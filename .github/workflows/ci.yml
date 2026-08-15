@@ -1,0 +1,60 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  lint-and-test:
+    name: fmt + clippy + test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: fmt
+        run: cargo fmt --all -- --check
+      - name: clippy
+        run: cargo clippy --all-targets -- -D warnings
+      - name: test
+        run: cargo test --workspace
+
+  build-static:
+    name: build controller (static musl)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          target: x86_64-unknown-linux-musl
+      - uses: Swatinem/rust-cache@v2
+      - name: build release
+        run: cargo build --release --package mielofon-controller --target x86_64-unknown-linux-musl
+      - name: upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: mielofon-controller-x86_64-musl
+          path: target/x86_64-unknown-linux-musl/release/mielofon-controller
+
+  sanitize:
+    name: sanitization scan (no real identifiers)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: scan for literal IPv4 addresses
+        run: |
+          if git grep -nE '\b([0-9]{1,3}\.){3}[0-9]{1,3}\b' -- ':!target' ':!Cargo.lock'; then
+            echo "::error::Literal IPv4 addresses found. Replace with placeholders (RFC 5737)."
+            exit 1
+          fi
+      - name: scan for known real hostnames/domains
+        run: |
+          if git grep -nE '\b(karlson|tiberium|plein-aire|club-es|radio-dacha|werther|vehq|izlaz|[a-z]+\.vehq\.ru|\.izlaz\.[a-z]+)\b' --ignore-case -- ':!target' ':!Cargo.lock'; then
+            echo "::error::Real hostname/domain references found. Must be replaced."
+            exit 1
+          fi

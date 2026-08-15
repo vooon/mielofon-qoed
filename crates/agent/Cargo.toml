@@ -1,0 +1,28 @@
+[package]
+name = "mielofon-agent"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Mielofon router agent"
+
+[[bin]]
+name = "mielofon-agent"
+path = "src/main.rs"
+
+[dependencies]
+mielofon-otel = { workspace = true }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+toml = { workspace = true }
+tracing = { workspace = true }
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+
+[dependencies.rustls]
+workspace = true
+features = ["ring"]
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["full"] }

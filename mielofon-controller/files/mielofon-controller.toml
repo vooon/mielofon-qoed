@@ -1,0 +1,49 @@
+# Mielofon controller configuration (SANITIZED example).
+#
+# All identifiers below are PLACEHOLDERS using RFC-private documentation
+# addresses and generic node names. Rewrite for your environment; never
+# publish real hostnames/IPs/ASNs.
+
+[node]
+name = "hub-a"           # placeholder node name
+advertise = "203.0.113.1" # RFC 5737 documentation address
+
+[cluster]
+grace_ttl_secs = 300
+gossip_interval_secs = 5
+
+[cluster.members]
+"hub-a" = "203.0.113.1"
+"hub-b" = "203.0.113.2"
+"hub-c" = "203.0.113.3"
+"hub-d" = "203.0.113.4"
+"hub-e" = "198.51.100.9"
+
+[listeners]
+# members = mTLS cluster gossip (default port 9551)
+# clients = mTLS agent API       (default port 9552)
+# admin   = loopback dashboard + /metrics + /healthz + /readyz (default port 9553)
+
+[tls]
+ca = "/etc/mielofon/ca.pem"
+cert = "/etc/mielofon/node.pem"
+key = "/etc/mielofon/node.key"
+
+[quality]
+rtt_good_ms = 40
+rtt_poor_ms = 90
+rtt_bad_ms = 250
+loss_good_pct = 1.0
+loss_poor_pct = 5.0
+rr_tps_good = 50.0
+rr_tps_poor = 20.0
+tcp_mbps_good = 10.0
+tcp_mbps_poor = 2.0
+
+# Observability. OTLP/HTTP (no gRPC). Leave endpoint empty to disable.
+[otel]
+enabled = true
+endpoint = ""            # e.g. "http://127.0.0.1:4318"
+# traces = { enabled = true }
+# metrics = { enabled = true }
+# logs = { enabled = true }

@@ -16,7 +16,8 @@ This is a **PUBLIC** repository describing software for a **private** production
 ## Stack & conventions
 - **Controller** is Rust, built as a single **static** binary for `x86_64-unknown-linux-musl` (verify with `ldd`: no dynamic deps).
 - **Agent** is pure **ucode** (OpenWrt scripting) — no Python. ucode modules: `uloop`/`utoop`, `uci`, `socket`, `fs`, `math`, `log`.
-- Planned layout (from handoff): `crates/controller/`, `agent/ucode/`, `docs/`, `.github/workflows/`.
+- **This repo is both the source AND an OpenWrt feed.** The top-level `mielofon-controller/` and `mielofon-agent/` dirs are `Package/` feed definitions (no separate feed repo). OpenWrt's feed scanner walks the whole repo for Makefiles defining `Package/`, so `crates/`/`agent/`/`docs/` are ignored by the feed. Mirror conventions from `vooon/my-openwrt-feed`.
+- Planned source layout: `crates/controller/`, `agent/ucode/`, `docs/`, `.github/workflows/`.
 - Runtime toolchain (OpenWrt, OSPF/BIRD mesh config) and the Ansible integration live in a separate private repo — out of scope here.
 
 ## Commands (as specified in handoff; repo not yet scaffolded)
