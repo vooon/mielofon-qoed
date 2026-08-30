@@ -63,7 +63,7 @@ define Package/mielofon-controller/install
 	$(INSTALL_BIN) $(CURDIR)/files/mielofon-controller.init $(1)/etc/init.d/mielofon-controller
 
 	$(INSTALL_DIR) $(1)/etc/config
-	$(INSTALL_CONF) $(CURDIR)/files/etc/config/mielofon-controller $(1)/etc/config/mielofon-controller
+	$(INSTALL_CONF) $(CURDIR)/files/mielofon-controller.conf $(1)/etc/config/mielofon-controller
 
 	$(INSTALL_DIR) $(1)/etc/mielofon
 	$(INSTALL_CONF) $(CURDIR)/files/mielofon-controller.toml $(1)/etc/mielofon/mielofon-controller.toml
