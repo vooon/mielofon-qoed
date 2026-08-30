@@ -3,28 +3,18 @@
 /* Probe executors. The agent only runs the probe it is told to run and returns
  * raw numbers; it makes no scheduling or policy decisions.
  *
- * Command output is captured by shell redirect to a temp file + fs.readfile:
- * the deployment ucode snapshot's `uloop.process` stdout stream API is not
- * dependable, and a probe phase is single-in-flight anyway, so blocking
- * `system()` is the simplest robust option.
+ * Each high-level export owns its command construction *and* parsing, so the
+ * caller never builds raw command strings. Output is captured via fs.popen()
+ * (a pipe to the process stdout), which stays on the event loop-friendly fs
+ * module rather than shell redirects to a temp file.
+ *
+ * NOTE: ucode has no function hoisting — everything is declared before use,
+ * hence the parsers/helpers sit above the executors below.
  */
 
-import { readfile, unlink } from 'fs';
+import { readfile, popen, error } from 'fs';
 
-const OUT = '/tmp/mielofon-probe.out';
-
-/* Run a shell command; cb(null, stdout) or cb(err). */
-export function run(shell_cmd, cb)
-{
-	system(shell_cmd + ' > ' + OUT + ' 2>&1');
-
-	let out = readfile(OUT);
-	if (out == null)
-		out = '';
-
-	unlink(OUT);
-	cb(null, out);
-};
+/* ── parsers ────────────────────────────────────────────────────────────── */
 
 export function parse_ping(stdout)
 {
@@ -38,9 +28,11 @@ export function parse_ping(stdout)
 		if (m)
 			loss = +m[1];
 
-		let r = match(lines[li], /rtt min\/avg\/max\/mdev = ([0-9.]+)\//);
+		/* iputils: "rtt min/avg/max/mdev = a/b/c/d ms";
+		 * busybox: "round-trip min/avg/max = a/b/c ms". Take the average. */
+		let r = match(lines[li], /(rtt|round-trip) min\/avg\/max(\/mdev)? = ([0-9.]+)\/([0-9.]+)\//);
 		if (r)
-			rtt = +r[1];
+			rtt = +r[4];
 	}
 
 	return { loss: loss, rtt: rtt };
@@ -87,6 +79,8 @@ export function parse_iperf3(raw)
 	return best;
 };
 
+/* ── link utilization ────────────────────────────────────────────────────── */
+
 export function bytes_sum(iface)
 {
 	let rx = readfile('/sys/class/net/' + iface + '/statistics/rx_bytes');
@@ -106,4 +100,95 @@ export function util_mbps(iface)
 	let b = bytes_sum(iface);
 
 	return ((b - a) * 8) / 1000000.0;
+};
+
+/* ── command execution ───────────────────────────────────────────────────── */
+
+/* Run a shell command; cb(err, stdout). */
+export function run(shell_cmd, cb)
+{
+	let pipe = popen(shell_cmd, 'r');
+
+	if (pipe == null) {
+		cb('popen failed: ' + (error() || 'unknown'));
+		return;
+	}
+
+	let out = '';
+
+	while (true) {
+		let chunk = pipe.read(4096);
+
+		if (chunk == null || !length(chunk))
+			break;
+
+		out += chunk;
+	}
+
+	pipe.close();
+	cb(null, out);
+};
+
+/* ── per-tool command builders ───────────────────────────────────────────── */
+
+function ping_command(link, cfg)
+{
+	/* Busybox ping rejects fractional `-i`; only pass it for integer values. */
+	let ival = (cfg.ping_interval >= 1) ? ` -i ${cfg.ping_interval}` : '';
+	let src = (link.source != null) ? ` -I ${link.source}` : '';
+
+	return `ping -q -c ${cfg.ping_count} -W 1${ival}${src} ${link.target}`;
+};
+
+function netperf_command(link, cfg)
+{
+	let src = (link.source != null) ? ` -L ${link.source}` : '';
+
+	return `netperf -l ${cfg.rr_duration} -t TCP_RR -H ${link.target}${src}`;
+};
+
+function iperf_command(link, cfg)
+{
+	let src = (link.source != null) ? ` -B ${link.source}` : '';
+
+	return `iperf3 -c ${link.target} -t ${cfg.tcp_duration} -f m -J${src}`;
+};
+
+/* ── executors (order: everthing above is already declared) ─────────────── */
+
+/* Always-on tier: RTT + loss, then transaction rate. */
+export function run_always(link, cfg, cb)
+{
+	run(ping_command(link, cfg), function(ping_err, ping_out) {
+		let p = parse_ping(ping_out);
+
+		run(netperf_command(link, cfg), function(rr_err, rr_out) {
+			cb(null, {
+				rtt_ms: (p.rtt != null) ? p.rtt : null,
+				loss_pct: p.loss,
+				rr_tps: parse_transaction_rate(rr_out),
+			});
+		});
+	});
+};
+
+/* Gated throughput tier: quiet gate first, then iperf3. */
+export function run_throughput(link, cfg, cb)
+{
+	let util = util_mbps(link.interface);
+
+	if (util > cfg.quiet_max_mbps) {
+		cb(null, { busy: true, util_mbps: util, tcp_mbps: null });
+		return;
+	}
+
+	run(iperf_command(link, cfg), function(e, out) {
+		let tcp = parse_iperf3(out);
+
+		cb(null, {
+			busy: (tcp == null),
+			util_mbps: util,
+			tcp_mbps: tcp,
+		});
+	});
 };

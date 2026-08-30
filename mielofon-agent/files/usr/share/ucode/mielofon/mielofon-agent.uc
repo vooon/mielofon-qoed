@@ -14,7 +14,7 @@ import { cursor } from 'uci';
 import * as uloop from 'uloop';
 import { create as create_client, post_json } from './client.uc';
 import { new_client } from './transport.uc';
-import { run as run_cmd, parse_ping, parse_transaction_rate, parse_iperf3, util_mbps } from './probes.uc';
+import { run_always, run_throughput } from './probes.uc';
 import { apply_cost } from './cost.uc';
 
 let cfg = {};
@@ -94,74 +94,34 @@ function reply(cmd, obj, done)
 
 function always_and_reply(cmd, link, done)
 {
-	let ping_cmd = 'ping -q -c ' + cfg.ping_count +
-		' -i ' + cfg.ping_interval + ' -W 1';
-
-	if (link.source)
-		ping_cmd += ' -I ' + link.source;
-
-	ping_cmd += ' ' + link.target;
-
-	run_cmd(ping_cmd, function(e1, out) {
-		let p = parse_ping(out);
-
-		let netperf_cmd = 'netperf -l ' + cfg.rr_duration +
-			' -t TCP_RR -H ' + link.target;
-
-		if (link.source)
-			netperf_cmd += ' -L ' + link.source;
-
-		run_cmd(netperf_cmd, function(e2, out2) {
-			let tps = parse_transaction_rate(out2);
-
-			reply(cmd, {
-				kind: 'probe',
-				link: { from: link.from, to: link.to, interface: link.interface },
-				rtt_ms: (p.rtt != null) ? p.rtt : null,
-				loss_pct: p.loss,
-				rr_tps: tps,
-				token: null,
-				util_mbps: 0,
-				state: 'quiet',
-			}, done);
-		});
+	run_always(link, cfg, function(e, r) {
+		reply(cmd, {
+			kind: 'probe',
+			link: { from: link.from, to: link.to, interface: link.interface },
+			rtt_ms: r.rtt_ms,
+			loss_pct: r.loss_pct,
+			rr_tps: r.rr_tps,
+			token: null,
+			util_mbps: 0,
+			state: 'quiet',
+		}, done);
 	});
 };
 
 function throughput_and_reply(cmd, link, done)
 {
-	let util = util_mbps(link.interface);
-
-	let base = {
-		kind: 'probe',
-		link: { from: link.from, to: link.to, interface: link.interface },
-		rtt_ms: null,
-		loss_pct: null,
-		rr_tps: null,
-		token: cmd.token || null,
-		util_mbps: util,
-	};
-
-	/* Quiet gate: never probe a busy link, never call it degraded. */
-	if (util > cfg.quiet_max_mbps) {
-		base.state = 'busy';
-		base.tcp_mbps = null;
-		reply(cmd, base, done);
-		return;
-	}
-
-	let iperf_cmd = 'iperf3 -c ' + link.target +
-		' -t ' + cfg.tcp_duration + ' -f m -J';
-
-	if (link.source)
-		iperf_cmd += ' -B ' + link.source;
-
-	run_cmd(iperf_cmd, function(e, out) {
-		let tcp = parse_iperf3(out);
-
-		base.tcp_mbps = tcp;
-		base.state = (tcp != null) ? 'quiet' : 'busy';
-		reply(cmd, base, done);
+	run_throughput(link, cfg, function(e, r) {
+		reply(cmd, {
+			kind: 'probe',
+			link: { from: link.from, to: link.to, interface: link.interface },
+			rtt_ms: null,
+			loss_pct: null,
+			rr_tps: null,
+			token: cmd.token || null,
+			util_mbps: r.util_mbps,
+			tcp_mbps: r.tcp_mbps,
+			state: r.busy ? 'busy' : 'quiet',
+		}, done);
 	});
 };
 

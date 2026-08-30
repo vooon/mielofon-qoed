@@ -33,7 +33,7 @@ This is a **PUBLIC** repository describing software for a **private** production
   natively. CI additionally builds a static `x86_64-unknown-linux-musl` artifact.
 - **Agent** is **ucode** (OpenWrt scripting) — no Python, no Rust. Feed
   `mielofon-agent` is `PKGARCH:=all` and installs `.uc` modules only. Probes run
-  the resident `ping`/`iperf3`/`netperf` binaries via `system()` + a temp file
+  the resident `ping`/`iperf3`/`netperf` binaries via `fs.popen()`
   (`uloop.process` stdout capture is unreliable in the target snapshot); BIRD is
   driven over ubus through `rpcd-mod-bird` (no `ucode-mod-socket` needed by the
   agent). mTLS to the controller uses `ucode-mod-uclient` **built with SSL** —
@@ -76,9 +76,9 @@ https://ucode.mein.io (Usage, Syntax, module-{core,log,uci,ubus,uloop,uclient}).
 - Object/method bodies closing over a variable used in their own initializer are
   rejected at parse ("use before initialization") — declare `let x = null;`
   first, assign later.
-- Run probes via `system()` + a temp file + `fs.readfile` (the deployment
-  snapshot's `uloop.process` stream API is unreliable); keep the event loop
-  responsive (single-threaded).
+- Run probes via `fs.popen()` + pipe reads (the deployment snapshot's
+  `uloop.process` stream API is unreliable); keep the event loop responsive
+  (single-threaded).
 
 ## Commands
 - Build controller: `cargo build --package mielofon-controller` (native)

@@ -20,13 +20,11 @@ const uloop = {
 function cursor() {}
 function connect() {}
 function readfile() {}
-function unlink() {}
+function popen() {}
+function error() {}
 function new_client() {}
 function create() {}
 function post_json() {}
 function apply_cost() {}
-function run_cmd() {}
-function parse_ping() {}
-function parse_transaction_rate() {}
-function parse_iperf3() {}
-function util_mbps() {}
+function run_always() {}
+function run_throughput() {}
