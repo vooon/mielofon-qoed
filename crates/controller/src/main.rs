@@ -100,6 +100,9 @@ async fn run_daemon(path: &str) -> anyhow::Result<()> {
     let admin_bind = state.cfg.listeners.admin();
     let admin_listener = TcpListener::bind(admin_bind)
         .map_err(|e| anyhow::anyhow!("bind admin {admin_bind}: {e}"))?;
+    admin_listener
+        .set_nonblocking(true)
+        .map_err(|e| anyhow::anyhow!("set admin nonblocking: {e}"))?;
     let admin_srv = axum_server::from_tcp(admin_listener)
         .map_err(|e| anyhow::anyhow!("admin server init: {e}"))?
         .serve(
@@ -159,6 +162,10 @@ async fn serve_mtls(
             return;
         }
     };
+    if let Err(e) = listener.set_nonblocking(true) {
+        info!(%addr, "mtls listener nonblocking failed: {e}");
+        return;
+    }
     let cfg = RustlsConfig::from_config(tls);
     let server = match axum_server::from_tcp_rustls(listener, cfg) {
         Ok(s) => s,
