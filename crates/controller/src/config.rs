@@ -145,7 +145,7 @@ impl Default for Cluster {
 /// [quality]
 /// [otel]
 /// ```
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Default)]
 #[serde(default)]
 pub struct Config {
     pub node: Node,
@@ -155,20 +155,6 @@ pub struct Config {
     pub tls: Tls,
     pub quality: Quality,
     pub otel: mielofon_otel::OTelConfig,
-}
-
-impl Default for Config {
-    fn default() -> Self {
-        Config {
-            node: Node::default(),
-            listeners: Listeners::default(),
-            cluster: Cluster::default(),
-            members: Members::new(),
-            tls: Tls::default(),
-            quality: Quality::default(),
-            otel: mielofon_otel::OTelConfig::default(),
-        }
-    }
 }
 
 impl Config {

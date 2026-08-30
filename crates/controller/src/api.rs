@@ -147,16 +147,18 @@ pub async fn post_quality(
 ) -> Result<Json<QualityResp>, StatusCode> {
     let (quality, ospf_cost) = ingest_quality(
         &state,
-        req.link,
-        req.ts,
-        req.rtt_ms,
-        req.loss_pct,
-        req.rr_tps,
-        req.tcp_mbps,
-        req.udp_mbps,
-        req.util_mbps,
-        req.state,
-        req.token,
+        Measure {
+            link: req.link,
+            ts: req.ts,
+            rtt_ms: req.rtt_ms,
+            loss_pct: req.loss_pct,
+            rr_tps: req.rr_tps,
+            tcp_mbps: req.tcp_mbps,
+            udp_mbps: req.udp_mbps,
+            util_mbps: req.util_mbps,
+            probe_state: req.state,
+            token: req.token,
+        },
     );
     Ok(Json(QualityResp {
         accepted: true,
@@ -165,10 +167,8 @@ pub async fn post_quality(
     }))
 }
 
-/// Shared measurement ingest: classify, store (LWW), and release the fence
-/// when a gated throughput report echoes its token.
-fn ingest_quality(
-    state: &AppState,
+/// A single measurement to ingest (avoids a 11-arg function; clippy too_many_arguments).
+struct Measure {
     link: LinkKey,
     ts: Option<u64>,
     rtt_ms: f64,
@@ -179,17 +179,21 @@ fn ingest_quality(
     util_mbps: f64,
     probe_state: ProbeState,
     token: Option<String>,
-) -> (Option<Quality>, Option<u32>) {
+}
+
+/// Shared measurement ingest: classify, store (LWW), and release the fence
+/// when a gated throughput report echoes its token.
+fn ingest_quality(state: &AppState, m: Measure) -> (Option<Quality>, Option<u32>) {
     let mut rec = QualityRecord::new(
-        rtt_ms,
-        loss_pct,
-        rr_tps,
-        tcp_mbps,
-        udp_mbps,
-        util_mbps,
-        probe_state,
+        m.rtt_ms,
+        m.loss_pct,
+        m.rr_tps,
+        m.tcp_mbps,
+        m.udp_mbps,
+        m.util_mbps,
+        m.probe_state,
     );
-    if let Some(ts) = ts {
+    if let Some(ts) = m.ts {
         rec.ts = ts;
     }
 
@@ -198,12 +202,12 @@ fn ingest_quality(
     rec.ospf_cost = quality.map(quality::cost_for_quality);
 
     let ospf_cost = rec.ospf_cost; // Copy
-    let link_id = link.id();
-    state.kv.put(link, rec);
+    let link_id = m.link.id();
+    state.kv.put(m.link, rec);
     bump_reports();
 
     // A gated throughput report carries the fence token — release the lease.
-    if let Some(t) = token {
+    if let Some(t) = m.token {
         state.fence.release(&link_id, &t);
     }
 
@@ -359,16 +363,18 @@ pub async fn agent_reply(
         } => {
             let (quality, ospf_cost) = ingest_quality(
                 &state,
-                link,
-                ts,
-                rtt_ms,
-                loss_pct,
-                rr_tps,
-                tcp_mbps,
-                udp_mbps,
-                util_mbps,
-                probe_state,
-                token,
+                Measure {
+                    link,
+                    ts,
+                    rtt_ms,
+                    loss_pct,
+                    rr_tps,
+                    tcp_mbps,
+                    udp_mbps,
+                    util_mbps,
+                    probe_state,
+                    token,
+                },
             );
             Json(serde_json::json!({
                 "ok": true, "id": id, "quality": quality, "ospf_cost": ospf_cost,

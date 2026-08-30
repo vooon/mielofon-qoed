@@ -113,13 +113,7 @@ fn now_secs() -> u64 {
 fn uuid4() -> String {
     let mut buf = String::new();
     for (i, b) in rand_bytes(16).iter().enumerate() {
-        if i == 4 {
-            buf.push('-');
-        } else if i == 6 {
-            buf.push('-');
-        } else if i == 8 {
-            buf.push('-');
-        } else if i == 10 {
+        if i == 4 || i == 6 || i == 8 || i == 10 {
             buf.push('-');
         }
         let _ = std::fmt::Write::write_fmt(&mut buf, format_args!("{:02x}", b));
