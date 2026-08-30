@@ -1,6 +1,7 @@
 //! Mielofon controller library.
 
 pub mod api;
+pub mod cert;
 pub mod config;
 pub mod dashboard;
 pub mod fence;

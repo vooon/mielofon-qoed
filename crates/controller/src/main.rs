@@ -14,9 +14,17 @@ use mielofon_controller::state::AppState;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    let path = std::env::args()
-        .nth(1)
-        .unwrap_or_else(|| "/etc/mielofon/mielofon-controller.toml".into());
+    let mut argv = std::env::args();
+    let first = argv.nth(1);
+
+    // `mielofon-controller cert <ca|node|agent> ...` — certificate generation
+    // (nebula-cert style), runs on the operator's control plane only.
+    if first.as_deref() == Some("cert") {
+        mielofon_controller::cert::run(&argv.collect::<Vec<_>>())?;
+        return Ok(());
+    }
+
+    let path = first.unwrap_or_else(|| "/etc/mielofon/mielofon-controller.toml".into());
     let cfg = Config::load(&path)?;
 
     // Select the ring CryptoProvider as the process default so rustls doesn't

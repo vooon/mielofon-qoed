@@ -66,7 +66,7 @@ define Package/mielofon-agent/install
 	$(INSTALL_BIN) ./files/etc/init.d/mielofon-agent $(1)/etc/init.d/
 
 	$(INSTALL_DIR) $(1)/usr/share/ucode/mielofon
-$(INSTALL_DATA) \
+	$(INSTALL_DATA) \
 		./files/usr/share/ucode/mielofon/mielofon-agent.uc \
 		./files/usr/share/ucode/mielofon/client.uc \
 		./files/usr/share/ucode/mielofon/cost.uc \
