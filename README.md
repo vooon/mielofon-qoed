@@ -26,9 +26,9 @@ Generate the mTLS CA and per-node/per-agent certificates on the operator's
 control plane (a host with `openssl`):
 
 ```sh
-mielofon-controller cert ca -name mielofon-ca
-mielofon-controller cert node -name hub-a -ip 203.0.113.1 -host hub-a -ca-key ca.key -ca-crt ca.crt
-mielofon-controller cert agent -name spoke-1 -ca-key ca.key -ca-crt ca.crt
+mielofon-controller cert ca --name mielofon-ca
+mielofon-controller cert node --name hub-a --ip 203.0.113.1 --host hub-a --ca-key ca.key --ca-crt ca.crt
+mielofon-controller cert agent --name spoke-1 --ca-key ca.key --ca-crt ca.crt
 ```
 
 Place the resulting PEM files under `/etc/mielofon/` on the respective

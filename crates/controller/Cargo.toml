@@ -24,6 +24,7 @@ tracing = { workspace = true }
 prometheus = { workspace = true }
 thiserror = { workspace = true }
 anyhow = { workspace = true }
+clap = { workspace = true, features = ["derive"] }
 
 [dependencies.rustls]
 workspace = true

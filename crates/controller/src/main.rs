@@ -12,20 +12,46 @@ use mielofon_controller::api;
 use mielofon_controller::config::Config;
 use mielofon_controller::state::AppState;
 
+use clap::{Parser, Subcommand};
+
+#[derive(Parser)]
+#[command(
+    name = "mielofon-controller",
+    about = "Distributed QoE link-quality coordination controller"
+)]
+#[command(subcommand_required = true, arg_required_else_help = true)]
+struct Cli {
+    #[command(subcommand)]
+    command: Command,
+}
+
+#[derive(Subcommand)]
+enum Command {
+    /// Run the controller daemon (the long-lived service).
+    Daemon(DaemonArgs),
+    /// mTLS certificate generation (openssl-based; runs on the operator host).
+    #[command(subcommand)]
+    Cert(mielofon_controller::cert::CertCli),
+}
+
+#[derive(clap::Args)]
+struct DaemonArgs {
+    /// Path to the controller TOML config.
+    #[arg(default_value = "/etc/mielofon/mielofon-controller.toml")]
+    config: String,
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    let mut argv = std::env::args();
-    let first = argv.nth(1);
-
-    // `mielofon-controller cert <ca|node|agent> ...` — certificate generation
-    // (nebula-cert style), runs on the operator's control plane only.
-    if first.as_deref() == Some("cert") {
-        mielofon_controller::cert::run(&argv.collect::<Vec<_>>())?;
-        return Ok(());
+    let cli = Cli::parse();
+    match cli.command {
+        Command::Daemon(args) => run_daemon(&args.config).await,
+        Command::Cert(args) => mielofon_controller::cert::run(args),
     }
+}
 
-    let path = first.unwrap_or_else(|| "/etc/mielofon/mielofon-controller.toml".into());
-    let cfg = Config::load(&path)?;
+async fn run_daemon(path: &str) -> anyhow::Result<()> {
+    let cfg = Config::load(path)?;
 
     // Select the ring CryptoProvider as the process default so rustls doesn't
     // fail on provider ambiguity (multiple deps pull different rustls features).

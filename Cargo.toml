@@ -53,3 +53,6 @@ opentelemetry-semantic-conventions = "0.32"
 # Error / libc
 thiserror = "2"
 anyhow = "1"
+
+# CLI parsing
+clap = { version = "4", features = ["derive"] }

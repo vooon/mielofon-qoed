@@ -7,115 +7,116 @@
 //! placeholders ("spoke-1", "hub-a", RFC 5737 addresses).
 
 use anyhow::{bail, Context, Result};
+use clap::Subcommand;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 
 const DEFAULT_DAYS: u64 = 825;
 
+/// Certificate subcommands. Parsed by clap from `cert <ca|node|agent> ...`.
+#[derive(Subcommand)]
+pub enum CertCli {
+    /// Generate a self-signed CA.
+    Ca(CaArgs),
+    /// Generate a server+client leaf for a controller node.
+    Node(SignArgs),
+    /// Generate a client leaf for an agent.
+    Agent(SignArgs),
+}
+
+#[derive(clap::Args)]
+pub struct CaArgs {
+    /// Certificate common name.
+    #[arg(long, default_value = "mielofon")]
+    name: String,
+    /// CA key output path.
+    #[arg(long)]
+    key: Option<PathBuf>,
+    /// CA certificate output path.
+    #[arg(long)]
+    crt: Option<PathBuf>,
+    /// Validity in days.
+    #[arg(long, default_value_t = DEFAULT_DAYS)]
+    days: u64,
+}
+
+#[derive(clap::Args)]
+pub struct SignArgs {
+    /// Certificate common name.
+    #[arg(long, default_value = "mielofon")]
+    name: String,
+    /// Subject alternative name IP (repeatable).
+    #[arg(long)]
+    ip: Vec<String>,
+    /// Subject alternative name DNS (repeatable).
+    #[arg(long)]
+    host: Vec<String>,
+    /// CA key path.
+    #[arg(long)]
+    ca_key: PathBuf,
+    /// CA certificate path.
+    #[arg(long)]
+    ca_crt: PathBuf,
+    /// Leaf key output path.
+    #[arg(long)]
+    key: Option<PathBuf>,
+    /// Leaf certificate output path.
+    #[arg(long)]
+    crt: Option<PathBuf>,
+    /// Validity in days.
+    #[arg(long, default_value_t = DEFAULT_DAYS)]
+    days: u64,
+}
+
+/// Resolved signing material shared by the openssl helpers.
 struct Flags {
     name: String,
     ips: Vec<String>,
     hosts: Vec<String>,
-    ca_key: String,
-    ca_crt: String,
-    key: String,
-    crt: String,
+    ca_key: PathBuf,
+    ca_crt: PathBuf,
+    key: PathBuf,
+    crt: PathBuf,
     days: u64,
 }
 
-pub fn run(args: &[String]) -> Result<()> {
-    let Some(sub) = args.first().map(String::as_str) else {
-        help();
-        bail!("missing cert subcommand");
-    };
-
-    match sub {
-        "ca" => cmd_ca(&parse_flags(&args[1..], "ca.key", "ca.crt")?),
-        "node" => cmd_sign(&parse_flags(&args[1..], "", "")?, false),
-        "agent" => cmd_sign(&parse_flags(&args[1..], "", "")?, true),
-        "help" | "--help" | "-h" => {
-            help();
-            Ok(())
-        }
-        other => {
-            help();
-            bail!("unknown cert subcommand: {other}")
-        }
+pub fn run(cli: CertCli) -> Result<()> {
+    match cli {
+        CertCli::Ca(a) => cmd_ca(&Flags {
+            name: a.name,
+            ips: Vec::new(),
+            hosts: Vec::new(),
+            ca_key: PathBuf::from("ca.key"),
+            ca_crt: PathBuf::from("ca.crt"),
+            key: a.key.unwrap_or_else(|| "ca.key".into()),
+            crt: a.crt.unwrap_or_else(|| "ca.crt".into()),
+            days: a.days,
+        }),
+        CertCli::Node(a) => cmd_sign(&resolve_sign(a), false),
+        CertCli::Agent(a) => cmd_sign(&resolve_sign(a), true),
     }
 }
 
-fn help() {
-    eprintln!(
-        "mielofon-controller cert - mTLS certificate generation (openssl-based)\n\
-         \n\
-           cert ca    -name <cn> [-key <f>] [-crt <f>] [-days <n>]\n\
-           cert node  [-ip <addr>]... [-host <dns>]... -ca-key <f> -ca-crt <f>\n\
-         \x20                    [-name <cn>] [-key <f>] [-crt <f>] [-days <n>]\n\
-           cert agent [-ip <addr>]... [-host <dns>]... -ca-key <f> -ca-crt <f>\n\
-         \x20                    [-name <cn>] [-key <f>] [-crt <f>] [-days <n>]\n\
-         \n\
-         Generate a dedicated CA once (cert ca), then a server+client leaf per\n\
-         controller node (cert node, with -ip/-host SAN) and a client leaf per\n\
-         agent (cert agent). Keys are EC P-256. Examples (placeholders):\n\
-         \n\
-           cert ca -name mielofon-ca\n\
-           cert node -name hub-a -ip 203.0.113.1 -host hub-a \\\n\
-         \x20            -ca-key ca.key -ca-crt ca.crt\n\
-           cert agent -name spoke-1 -ca-key ca.key -ca-crt ca.crt\n"
-    );
+fn resolve_sign(a: SignArgs) -> Flags {
+    let key = a
+        .key
+        .unwrap_or_else(|| PathBuf::from(format!("{}.key", a.name)));
+    let crt = a
+        .crt
+        .unwrap_or_else(|| PathBuf::from(format!("{}.crt", a.name)));
+    Flags {
+        name: a.name,
+        ips: a.ip,
+        hosts: a.host,
+        ca_key: a.ca_key,
+        ca_crt: a.ca_crt,
+        key,
+        crt,
+        days: a.days,
+    }
 }
 
-fn parse_flags(args: &[String], def_key: &str, def_crt: &str) -> Result<Flags> {
-    let mut f = Flags {
-        name: "mielofon".into(),
-        ips: Vec::new(),
-        hosts: Vec::new(),
-        ca_key: "ca.key".into(),
-        ca_crt: "ca.crt".into(),
-        key: def_key.to_string(),
-        crt: def_crt.to_string(),
-        days: DEFAULT_DAYS,
-    };
-
-    let mut i = 0;
-    while i < args.len() {
-        let flag = args[i].as_str();
-        let value = |i: &mut usize| -> Result<String> {
-            *i += 1;
-            args.get(*i)
-                .cloned()
-                .context(format!("missing value for {flag}"))
-        };
-
-        match flag {
-            "-name" => f.name = value(&mut i)?,
-            "-ip" => f.ips.push(value(&mut i)?),
-            "-host" => f.hosts.push(value(&mut i)?),
-            "-ca-key" => f.ca_key = value(&mut i)?,
-            "-ca-crt" => f.ca_crt = value(&mut i)?,
-            "-key" => f.key = value(&mut i)?,
-            "-crt" => f.crt = value(&mut i)?,
-            "-days" => f.days = value(&mut i)?.parse().context("invalid -days")?,
-            "-h" | "--help" => {
-                help();
-                std::process::exit(0);
-            }
-            other => bail!("unknown flag: {other}"),
-        }
-        i += 1;
-    }
-
-    if f.key.is_empty() {
-        f.key = format!("{}.key", f.name);
-    }
-    if f.crt.is_empty() {
-        f.crt = format!("{}.crt", f.name);
-    }
-
-    Ok(f)
-}
-
-fn run_openssl(args: &[&str]) -> Result<()> {
+fn run_openssl(args: &[String]) -> Result<()> {
     let out = Command::new("openssl")
         .args(args)
         .stdin(Stdio::null())
@@ -132,15 +133,15 @@ fn run_openssl(args: &[&str]) -> Result<()> {
     Ok(())
 }
 
-fn gen_ec_key(key: &str) -> Result<()> {
+fn gen_ec_key(key: &std::path::Path) -> Result<()> {
     run_openssl(&[
-        "genpkey",
-        "-algorithm",
-        "EC",
-        "-pkeyopt",
-        "ec_paramgen_curve:P-256",
-        "-out",
-        key,
+        "genpkey".to_string(),
+        "-algorithm".to_string(),
+        "EC".to_string(),
+        "-pkeyopt".to_string(),
+        "ec_paramgen_curve:P-256".to_string(),
+        "-out".to_string(),
+        key.to_string_lossy().into_owned(),
     ])
 }
 
@@ -161,30 +162,36 @@ fn temp_path(suffix: &str) -> PathBuf {
 fn cmd_ca(f: &Flags) -> Result<()> {
     gen_ec_key(&f.key)?;
     run_openssl(&[
-        "req",
-        "-x509",
-        "-new",
-        "-key",
-        &f.key,
-        "-sha256",
-        "-days",
-        &f.days.to_string(),
-        "-subj",
-        &format!("/CN={}", f.name),
-        "-out",
-        &f.crt,
+        "req".to_string(),
+        "-x509".to_string(),
+        "-new".to_string(),
+        "-key".to_string(),
+        f.key.to_string_lossy().into_owned(),
+        "-sha256".to_string(),
+        "-days".to_string(),
+        f.days.to_string(),
+        "-subj".to_string(),
+        format!("/CN={}", f.name),
+        "-out".to_string(),
+        f.crt.to_string_lossy().into_owned(),
     ])?;
-    println!("wrote {}", f.key);
-    println!("wrote {}", f.crt);
+    println!("wrote {}", f.key.display());
+    println!("wrote {}", f.crt.display());
     Ok(())
 }
 
 fn cmd_sign(f: &Flags, agent: bool) -> Result<()> {
-    if !std::path::Path::new(&f.ca_key).exists() {
-        bail!("CA key not found: {} (run `cert ca` first)", f.ca_key);
+    if !f.ca_key.exists() {
+        bail!(
+            "CA key not found: {} (run `cert ca` first)",
+            f.ca_key.display()
+        );
     }
-    if !std::path::Path::new(&f.ca_crt).exists() {
-        bail!("CA cert not found: {} (run `cert ca` first)", f.ca_crt);
+    if !f.ca_crt.exists() {
+        bail!(
+            "CA cert not found: {} (run `cert ca` first)",
+            f.ca_crt.display()
+        );
     }
 
     let mut ext = Vec::new();
@@ -213,15 +220,15 @@ fn cmd_sign(f: &Flags, agent: bool) -> Result<()> {
 
     gen_ec_key(&f.key)?;
 
-    let csr_args = [
-        "req",
-        "-new",
-        "-key",
-        &f.key,
-        "-subj",
-        &format!("/CN={}", f.name),
-        "-out",
-        csr.to_str().unwrap(),
+    let csr_args = vec![
+        "req".to_string(),
+        "-new".to_string(),
+        "-key".to_string(),
+        f.key.to_string_lossy().into_owned(),
+        "-subj".to_string(),
+        format!("/CN={}", f.name),
+        "-out".to_string(),
+        csr.to_string_lossy().into_owned(),
     ];
     run_openssl(&csr_args)?;
 
@@ -231,32 +238,32 @@ fn cmd_sign(f: &Flags, agent: bool) -> Result<()> {
 
     let days = f.days.to_string();
 
-    let mut x509: Vec<&str> = vec![
-        "x509",
-        "-req",
-        "-in",
-        csr.to_str().unwrap(),
-        "-CA",
-        &f.ca_crt,
-        "-CAkey",
-        &f.ca_key,
-        "-CAcreateserial",
-        "-sha256",
-        "-days",
-        &days,
+    let mut x509: Vec<String> = vec![
+        "x509".to_string(),
+        "-req".to_string(),
+        "-in".to_string(),
+        csr.to_string_lossy().into_owned(),
+        "-CA".to_string(),
+        f.ca_crt.to_string_lossy().into_owned(),
+        "-CAkey".to_string(),
+        f.ca_key.to_string_lossy().into_owned(),
+        "-CAcreateserial".to_string(),
+        "-sha256".to_string(),
+        "-days".to_string(),
+        days,
     ];
     if !ext.is_empty() {
-        x509.push("-extfile");
-        x509.push(extfile.to_str().unwrap());
+        x509.push("-extfile".to_string());
+        x509.push(extfile.to_string_lossy().into_owned());
     }
-    x509.push("-out");
-    x509.push(&f.crt);
+    x509.push("-out".to_string());
+    x509.push(f.crt.to_string_lossy().into_owned());
     run_openssl(&x509)?;
 
     let _ = std::fs::remove_file(&csr);
     let _ = std::fs::remove_file(&extfile);
 
-    println!("wrote {}", f.key);
-    println!("wrote {}", f.crt);
+    println!("wrote {}", f.key.display());
+    println!("wrote {}", f.crt.display());
     Ok(())
 }

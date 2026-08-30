@@ -1,0 +1,16 @@
+# Mielofon controller process configuration (SANITIZED example).
+#
+# /etc/uci/mielofon-controller — process-level knobs consumed by the init
+# script only. Mesh/OBSERVABILITY state lives in the daemon's TOML config
+# (/etc/mielofon/mielofon-controller.toml); this file configures how the
+# daemon is launched and monitored.
+
+config controller 'main'
+	# Master switch. Set to 0 to keep the service stopped.
+	option enabled '1'
+	# Path to the daemon's TOML configuration.
+	option config '/etc/mielofon/mielofon-controller.toml'
+	# Export RUST_BACKTRACE=1 so a panic prints a full stack trace to
+	# logread. Useful for diagnosing crashes in the field; keep off in
+	# normal operation (noisy).
+	option backtrace '0'
