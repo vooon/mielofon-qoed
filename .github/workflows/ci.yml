@@ -12,7 +12,7 @@ jobs:
     name: fmt + clippy + test
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
@@ -28,7 +28,7 @@ jobs:
     name: build controller (static musl)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
         with:
           target: x86_64-unknown-linux-musl
@@ -49,7 +49,7 @@ jobs:
     name: sanitization scan (no real identifiers)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: scan for literal IPv4 addresses
         run: |
           # Tracked text must only contain RFC 5737 documentation ranges
@@ -71,7 +71,7 @@ jobs:
     name: Feed registration check
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Validate feed layout
         run: |
           set -euo pipefail
@@ -101,7 +101,7 @@ jobs:
     name: Agent (ucode) checks
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Install toolchain
         run: |
