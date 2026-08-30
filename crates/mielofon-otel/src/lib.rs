@@ -45,6 +45,11 @@ impl Drop for TelemetryGuard {
 /// Build the OTEL providers, install a global `tracing` subscriber (console
 /// layer + optional OTLP log bridge + OTLP trace layer), and set the global
 /// meter provider. Returns a guard to keep alive for the daemon's lifetime.
+///
+/// The console layer is always installed at `cfg.log_level` (default info) so
+/// the daemon is never silent, even with OTEL disabled — this doubles as the
+/// `log_level` knob used to debug tests. OTLP layers are added only for the
+/// signals that are enabled AND have a resolved endpoint.
 pub fn install(
     cfg: &OTelConfig,
     service_name: &str,
@@ -53,7 +58,6 @@ pub fn install(
     let global_on = cfg.enabled.unwrap_or(true);
     if !global_on {
         info!("OTEL disabled (enabled=false)");
-        return Ok(TelemetryGuard { tp: None, lp: None });
     }
 
     // Per-signal effective endpoints. A signal is on only when it is enabled
@@ -62,13 +66,12 @@ pub fn install(
     let metric_ep = sig_endpoint(&cfg.metrics, &cfg.endpoint, "/v1/metrics")?;
     let log_ep = sig_endpoint(&cfg.logs, &cfg.endpoint, "/v1/logs")?;
 
-    let traces_on = cfg.traces.is_enabled(global_on) && trace_ep.is_some();
-    let metrics_on = cfg.metrics.is_enabled(global_on) && metric_ep.is_some();
-    let logs_on = cfg.logs.is_enabled(global_on) && log_ep.is_some();
+    let traces_on = global_on && cfg.traces.is_enabled(true) && trace_ep.is_some();
+    let metrics_on = global_on && cfg.metrics.is_enabled(true) && metric_ep.is_some();
+    let logs_on = global_on && cfg.logs.is_enabled(true) && log_ep.is_some();
 
-    if !(traces_on || metrics_on || logs_on) {
+    if global_on && !(traces_on || metrics_on || logs_on) {
         info!("OTEL enabled but no signal endpoint configured");
-        return Ok(TelemetryGuard { tp: None, lp: None });
     }
 
     let resource = Resource::builder()
@@ -138,13 +141,22 @@ pub fn install(
         global::set_meter_provider(mp.clone());
     }
 
-    let filter = env_filter(cfg);
+    // Console filter follows the global log_level; the OTLP layers follow the
+    // per-signal level, which defaults to the global one but may be lower
+    // (e.g. info on the console, debug forwarded to the collector).
+    let console_filter = env_filter(cfg.log_level.as_deref().unwrap_or("info"));
+    let otel_filter = env_filter(
+        cfg.level
+            .as_deref()
+            .unwrap_or(cfg.log_level.as_deref().unwrap_or("info")),
+    );
+
     let registry = tracing_subscriber::registry();
-    let registry = registry.with(tracing_subscriber::fmt::layer().with_filter(filter.clone()));
+    let registry = registry.with(tracing_subscriber::fmt::layer().with_filter(console_filter));
 
     let lp_layer = match lp.as_ref() {
         Some(lp) => opentelemetry_appender_tracing::layer::OpenTelemetryTracingBridge::new(lp)
-            .with_filter(filter.clone())
+            .with_filter(otel_filter.clone())
             .boxed(),
         None => tracing_subscriber::fmt::layer()
             .with_filter(tracing::level_filters::LevelFilter::OFF)
@@ -155,7 +167,7 @@ pub fn install(
     let tp_layer = match tp.as_ref() {
         Some(tp) => tracing_opentelemetry::layer()
             .with_tracer(tp.tracer(service_name.to_string()))
-            .with_filter(filter)
+            .with_filter(otel_filter)
             .boxed(),
         None => tracing_subscriber::fmt::layer()
             .with_filter(tracing::level_filters::LevelFilter::OFF)
@@ -168,8 +180,8 @@ pub fn install(
         .context("failed to install global tracing subscriber")?;
 
     debug!(
-        "OTEL enabled endpoint={} traces={} metrics={} logs={}",
-        cfg.endpoint, traces_on, metrics_on, logs_on
+        "otel={} endpoint={} traces={} metrics={} logs={}",
+        global_on, cfg.endpoint, traces_on, metrics_on, logs_on
     );
 
     Ok(TelemetryGuard { tp, lp })
@@ -206,8 +218,7 @@ fn sig_endpoint(
     Ok(Some(signal_endpoint(&ep, path)))
 }
 
-fn env_filter(cfg: &OTelConfig) -> EnvFilter {
-    let level = cfg.level.as_deref().unwrap_or("info");
+fn env_filter(level: &str) -> EnvFilter {
     EnvFilter::builder()
         .with_default_directive(LevelFilter::from(parse_level(level)).into())
         .from_env_lossy()

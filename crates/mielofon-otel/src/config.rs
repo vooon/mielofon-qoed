@@ -59,8 +59,14 @@ pub struct OTelConfig {
     /// Resource `service.name`. Usually not needed; caller passes it in.
     #[serde(alias = "service_name")]
     pub service_name: Option<String>,
-    /// Minimum level forwarded to OTEL logs. Independent of console `level`.
+    /// Minimum level forwarded to the OTEL collector (log bridge + trace
+    /// layer). Independent of the console level; may be lower (e.g. forward
+    /// `debug` to the collector while the console stays at `info`).
     pub level: Option<String>,
+    /// Console log level (fmt layer). Independent of the OTEL level; the
+    /// console is also installed when OTEL is disabled, so this is the knob
+    /// used to debug the daemon in tests. Defaults to `info`.
+    pub log_level: Option<String>,
     /// Per-signal overrides.
     pub traces: OTelSignalConfig,
     pub metrics: OTelSignalConfig,
