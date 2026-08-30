@@ -1,0 +1,21 @@
+# Rust build/test artifacts
+/target
+**/target
+
+# Git & CI
+/.git
+/.github
+
+# Docs are not part of the binary
+/docs
+*.md
+mielofon-handoff.md
+AGENTS.md
+
+# Feed packaging
+/mielofon-controller
+/mielofon-agent
+
+# Local tooling
+/node_modules
+/scripts

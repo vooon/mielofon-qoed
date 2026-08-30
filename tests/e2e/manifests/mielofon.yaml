@@ -1,0 +1,97 @@
+---
+# Headless service so peers can resolve each other's pod IPs before readiness.
+# Required for the entrypoint's peer discovery.
+apiVersion: v1
+kind: Service
+metadata:
+  name: mielofon
+  namespace: mielofon-e2e
+  labels:
+    app: mielofon
+spec:
+  clusterIP: None
+  publishNotReadyAddresses: true
+  selector:
+    app: mielofon
+  ports:
+    - name: members
+      port: 9551
+      targetPort: 9551
+    - name: clients
+      port: 9552
+      targetPort: 9552
+
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: mielofon
+  namespace: mielofon-e2e
+  labels:
+    app: mielofon
+spec:
+  serviceName: mielofon
+  replicas: 3
+  selector:
+    matchLabels:
+      app: mielofon
+  template:
+    metadata:
+      labels:
+        app: mielofon
+    spec:
+      containers:
+        - name: mielofon-controller
+          image: mielofon-controller:e2e
+          imagePullPolicy: IfNotPresent
+          command: ["/bin/sh", "/usr/local/bin/mielofon-entrypoint.sh"]
+          env:
+            - name: NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: POD_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.podIP
+            - name: MIELOFON_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+          readinessProbe:
+            exec:
+              command:
+                - /bin/sh
+                - -ec
+                - 'curl -sf http://127.0.0.1:9553/readyz >/dev/null'
+            initialDelaySeconds: 2
+            periodSeconds: 2
+            timeoutSeconds: 2
+            failureThreshold: 60
+          livenessProbe:
+            exec:
+              command:
+                - /bin/sh
+                - -ec
+                - 'curl -sf http://127.0.0.1:9553/healthz >/dev/null'
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            timeoutSeconds: 2
+            failureThreshold: 12
+          ports:
+            - name: members
+              containerPort: 9551
+            - name: clients
+              containerPort: 9552
+          volumeMounts:
+            - name: mielofon-ca
+              mountPath: /etc/mielofon-ca
+              readOnly: true
+            - name: mielofon-work
+              mountPath: /etc/mielofon
+      volumes:
+        - name: mielofon-ca
+          secret:
+            secretName: mielofon-ca
+        - name: mielofon-work
+          emptyDir: {}

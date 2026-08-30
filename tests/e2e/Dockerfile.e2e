@@ -1,0 +1,27 @@
+# Mielofon e2e controller image.
+#     docker build -f Dockerfile.e2e -t mielofon-controller:e2e .
+#
+# Static musl controller binary (same as the CI artifact) + alpine runtime with
+# openssl and curl. Each pod's entrypoint (tests/e2e/entrypoint.sh, wired via
+# the StatefulSet's command) resolves its peers, generates its own mTLS
+# identity from the shared e2e CA secret, renders its TOML and execs the daemon.
+
+FROM rust:1-bookworm AS builder
+RUN apt-get update && apt-get install -y --no-install-recommends musl-tools pkg-config && rm -rf /var/lib/apt/lists/*
+RUN rustup target add x86_64-unknown-linux-musl
+WORKDIR /build
+COPY Cargo.toml Cargo.lock ./
+COPY crates ./crates
+RUN cargo build --release --package mielofon-controller \
+        --target x86_64-unknown-linux-musl
+
+FROM alpine:3.21
+RUN apk add --no-cache ca-certificates openssl curl \
+    && adduser -D -H -u 1000 mielofon
+COPY --from=builder \
+    /build/target/x86_64-unknown-linux-musl/release/mielofon-controller \
+    /usr/local/bin/mielofon-controller
+COPY tests/e2e/entrypoint.sh /usr/local/bin/mielofon-entrypoint.sh
+RUN chmod +x /usr/local/bin/mielofon-entrypoint.sh
+USER mielofon
+ENTRYPOINT ["/usr/local/bin/mielofon-controller"]
