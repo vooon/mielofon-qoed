@@ -74,11 +74,13 @@ async fn main() -> anyhow::Result<()> {
     let admin_bind = state.cfg.listeners.admin();
     let admin_listener = TcpListener::bind(admin_bind)
         .map_err(|e| anyhow::anyhow!("bind admin {admin_bind}: {e}"))?;
-    let admin_srv = axum_server::from_tcp(admin_listener).serve(
-        api::admin_router()
-            .with_state(state.clone())
-            .into_make_service(),
-    );
+    let admin_srv = axum_server::from_tcp(admin_listener)
+        .map_err(|e| anyhow::anyhow!("admin server init: {e}"))?
+        .serve(
+            api::admin_router()
+                .with_state(state.clone())
+                .into_make_service(),
+        );
     let admin_handle = tokio::spawn(async move {
         let _ = admin_srv.await;
     });
@@ -132,7 +134,13 @@ async fn serve_mtls(
         }
     };
     let cfg = RustlsConfig::from_config(tls);
-    let server = axum_server::from_tcp_rustls(listener, cfg)
-        .serve(router.with_state(state).into_make_service());
+    let server = match axum_server::from_tcp_rustls(listener, cfg) {
+        Ok(s) => s,
+        Err(e) => {
+            info!(%addr, "mtls server init failed: {e}");
+            return;
+        }
+    };
+    let server = server.serve(router.with_state(state).into_make_service());
     let _ = server.await;
 }
