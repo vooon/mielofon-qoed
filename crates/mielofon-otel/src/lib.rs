@@ -50,12 +50,26 @@ pub fn install(
     service_name: &str,
     service_version: &str,
 ) -> anyhow::Result<TelemetryGuard> {
-    if !cfg.is_enabled() {
-        info!("OTEL disabled (endpoint empty or enabled=false)");
+    let global_on = cfg.enabled.unwrap_or(true);
+    if !global_on {
+        info!("OTEL disabled (enabled=false)");
         return Ok(TelemetryGuard { tp: None, lp: None });
     }
 
-    config::parse_endpoint(&cfg.endpoint).map_err(anyhow::Error::from)?;
+    // Per-signal effective endpoints. A signal is on only when it is enabled
+    // AND its resolved endpoint (signal override, else global) is non-empty.
+    let trace_ep = sig_endpoint(&cfg.traces, &cfg.endpoint, "/v1/traces")?;
+    let metric_ep = sig_endpoint(&cfg.metrics, &cfg.endpoint, "/v1/metrics")?;
+    let log_ep = sig_endpoint(&cfg.logs, &cfg.endpoint, "/v1/logs")?;
+
+    let traces_on = cfg.traces.is_enabled(global_on) && trace_ep.is_some();
+    let metrics_on = cfg.metrics.is_enabled(global_on) && metric_ep.is_some();
+    let logs_on = cfg.logs.is_enabled(global_on) && log_ep.is_some();
+
+    if !(traces_on || metrics_on || logs_on) {
+        info!("OTEL enabled but no signal endpoint configured");
+        return Ok(TelemetryGuard { tp: None, lp: None });
+    }
 
     let resource = Resource::builder()
         .with_service_name(service_name.to_string())
@@ -65,25 +79,15 @@ pub fn install(
         ))
         .build();
 
-    let traces_on = cfg.traces.is_enabled(true);
-    let metrics_on = cfg.metrics.is_enabled(true);
-    let logs_on = cfg.logs.is_enabled(true);
-
-    if !(traces_on || metrics_on || logs_on) {
-        info!("OTEL endpoint set but all signals disabled");
-        return Ok(TelemetryGuard { tp: None, lp: None });
-    }
-
     // MeterProvider first, then LoggerProvider, then the tracing bridge and
     // TracerProvider last (so OTel logs/meters interpolate correctly while the
     // global subscriber starts assimilating events). See opentelemetry-rust
     // docs/design/observability.md for the recommended ordering.
     let mp = if metrics_on {
-        let exporter = signal_endpoint(&cfg.endpoint, "/v1/metrics");
         let exp = opentelemetry_otlp::MetricExporter::builder()
             .with_http()
             .with_protocol(opentelemetry_otlp::Protocol::HttpBinary)
-            .with_endpoint(exporter)
+            .with_endpoint(metric_ep.unwrap())
             .build()
             .context("build OTEL metric exporter")?;
         Some(
@@ -97,11 +101,10 @@ pub fn install(
     };
 
     let lp = if logs_on {
-        let exporter = signal_endpoint(&cfg.endpoint, "/v1/logs");
         let exp = opentelemetry_otlp::LogExporter::builder()
             .with_http()
             .with_protocol(opentelemetry_otlp::Protocol::HttpBinary)
-            .with_endpoint(exporter)
+            .with_endpoint(log_ep.unwrap())
             .build()
             .context("build OTEL log exporter")?;
         Some(
@@ -115,11 +118,10 @@ pub fn install(
     };
 
     let tp = if traces_on {
-        let exporter = signal_endpoint(&cfg.endpoint, "/v1/traces");
         let exp = opentelemetry_otlp::SpanExporter::builder()
             .with_http()
             .with_protocol(opentelemetry_otlp::Protocol::HttpBinary)
-            .with_endpoint(exporter)
+            .with_endpoint(trace_ep.unwrap())
             .build()
             .context("build OTEL trace exporter")?;
         Some(
@@ -186,6 +188,22 @@ fn signal_endpoint(endpoint: &str, path: &str) -> String {
     } else {
         format!("{}{}", endpoint.trim_end_matches('/'), path)
     }
+}
+
+/// Resolve and validate a signal's effective endpoint (signal override, else
+/// global). None when the resolved endpoint is empty (signal not configured);
+/// validates the http/https scheme so a bad scheme fails loudly at startup.
+fn sig_endpoint(
+    sig: &OTelSignalConfig,
+    global: &str,
+    path: &str,
+) -> anyhow::Result<Option<String>> {
+    let ep = sig.effective_endpoint(global);
+    if ep.is_empty() {
+        return Ok(None);
+    }
+    config::parse_endpoint(&ep).map_err(anyhow::Error::from)?;
+    Ok(Some(signal_endpoint(&ep, path)))
 }
 
 fn env_filter(cfg: &OTelConfig) -> EnvFilter {

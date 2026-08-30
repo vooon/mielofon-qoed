@@ -40,10 +40,21 @@ rr_tps_poor = 20.0
 tcp_mbps_good = 10.0
 tcp_mbps_poor = 2.0
 
-# Observability. OTLP/HTTP (no gRPC). Leave endpoint empty to disable.
+# Observability. OTLP/HTTP (no gRPC). A signal exports only when it is enabled
+# AND its resolved endpoint (per-signal override, else the global endpoint) is
+# non-empty. Leave everything unset/empty to disable.
 [otel]
 enabled = true
-endpoint = ""            # e.g. "http://127.0.0.1:4318"
-# traces = { enabled = true }
-# metrics = { enabled = true }
-# logs = { enabled = true }
+endpoint = ""            # optional global endpoint, e.g. "http://127.0.0.1:4318"
+
+# [otel.traces]
+# enabled = true
+# endpoint = "http://127.0.0.1:4318/v1/traces"
+
+# [otel.metrics]
+# enabled = true
+# endpoint = "http://127.0.0.1:4318/v1/metrics"
+
+# [otel.logs]
+# enabled = true
+# endpoint = "http://127.0.0.1:4318/v1/logs"
