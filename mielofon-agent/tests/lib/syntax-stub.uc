@@ -22,9 +22,15 @@ function connect() {}
 function readfile() {}
 function popen() {}
 function error() {}
+function writefile() {}
+function rename() {}
 function new_client() {}
 function create() {}
 function post_json() {}
 function apply_cost() {}
 function run_always() {}
 function run_throughput() {}
+const metrics = {
+	init: function() {}, interval: function() {}, write: function() {},
+	record_always: function() {}, record_throughput: function() {},
+};

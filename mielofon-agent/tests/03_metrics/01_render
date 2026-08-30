@@ -1,0 +1,38 @@
+-- Testcase --
+import * as metrics from 'metrics';
+
+metrics.record_always(
+	{ from: 'spoke-1', to: 'hub-a', interface: 'awg_hub_a' },
+	{ rtt_ms: 0.648, loss_pct: 0, rr_tps: 1891.95 }
+);
+
+metrics.record_throughput(
+	{ from: 'spoke-1', to: 'hub-a', interface: 'awg_hub_a' },
+	{ util_mbps: 3.25, tcp_mbps: 84.6, busy: 0 }
+);
+
+let text = metrics.render();
+
+function has(needle)
+{
+	if (index(text, needle) < 0)
+		die('missing: ' + needle);
+}
+
+has('mielofon_agent_up 1');
+has('mielofon_agent_links 1');
+has('from="spoke-1",to="hub-a",interface="awg_hub_a"');
+has('mielofon_agent_link_rtt_ms{');
+has('mielofon_agent_link_rtt_ms{from="spoke-1",to="hub-a",interface="awg_hub_a"} 0.648');
+has('mielofon_agent_link_rr_tps');
+has('mielofon_agent_link_tcp_mbps');
+has('mielofon_agent_link_util_mbps');
+has('mielofon_agent_link_busy{from="spoke-1",to="hub-a",interface="awg_hub_a"} 0');
+has('mielofon_agent_last_probe_unixtime');
+
+print('OK');
+-- Expect stdout --
+OK
+-- Expect exitcode --
+0
+-- End --

@@ -16,6 +16,7 @@ import { create as create_client, post_json } from './client.uc';
 import { new_client } from './transport.uc';
 import { run_always, run_throughput } from './probes.uc';
 import { apply_cost } from './cost.uc';
+import * as metrics from './metrics.uc';
 
 let cfg = {};
 let links = [];
@@ -95,6 +96,8 @@ function reply(cmd, obj, done)
 function always_and_reply(cmd, link, done)
 {
 	run_always(link, cfg, function(e, r) {
+		metrics.record_always(link, r);
+
 		reply(cmd, {
 			kind: 'probe',
 			link: { from: link.from, to: link.to, interface: link.interface },
@@ -111,6 +114,8 @@ function always_and_reply(cmd, link, done)
 function throughput_and_reply(cmd, link, done)
 {
 	run_throughput(link, cfg, function(e, r) {
+		metrics.record_throughput(link, r);
+
 		reply(cmd, {
 			kind: 'probe',
 			link: { from: link.from, to: link.to, interface: link.interface },
@@ -256,6 +261,11 @@ client = create_client({
 	timeout_ms: cfg.timeout_ms + 10000,
 	new_client: new_client,
 });
+
+if (metrics.init()) {
+	metrics.write();
+	uloop.interval(metrics.interval(), function() { metrics.write(); });
+}
 
 register();
 uloop.run();

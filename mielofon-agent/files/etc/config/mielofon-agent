@@ -21,6 +21,10 @@ config agent 'main'
 	option ping_interval '0.2'
 	option rr_duration '4'
 	option tcp_duration '4'
+	# Optional Prometheus textfile (node-exporter collector), rewritten
+	# atomically every prometheus_interval seconds. Empty disables.
+	# option prometheus_textfile '/run/prometheus/textfile/mielofon-agent.prom'
+	option prometheus_interval '20'
 
 # One section per managed outgoing link. The controller references the link
 # only by {from,to,interface}; probe target/source are device-local and never
