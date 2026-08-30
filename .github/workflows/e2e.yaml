@@ -1,0 +1,48 @@
+name: E2E Tests
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  e2e:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: nolar/setup-k3d-k3s@v1
+        with:
+          version: v1.36
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and load controller image
+        run: |
+          docker build -f tests/e2e/Dockerfile.e2e -t mielofon-controller:e2e .
+          k3d image import mielofon-controller:e2e
+
+      - name: Run e2e
+        run: bash tests/e2e/run-e2e.sh
+
+      - name: Debug on failure
+        if: failure()
+        run: |
+          echo "=== Pod Status ==="
+          kubectl -n mielofon-e2e get pods -o wide || true
+          echo "=== PODS: node-0 ==="
+          kubectl -n mielofon-e2e logs mielofon-0 --tail=60 || true
+          echo "=== PODS: node-1 ==="
+          kubectl -n mielofon-e2e logs mielofon-1 --tail=60 || true
+          echo "=== PODS: node-2 ==="
+          kubectl -n mielofon-e2e logs mielofon-2 --tail=60 || true
+          echo "=== Status outputs ==="
+          for p in mielofon-0 mielofon-1 mielofon-2; do
+            echo "--- $p ---"
+            kubectl -n mielofon-e2e exec "$p" -- curl -s http://127.0.0.1:9553/v1/status || true
+            echo
+          done
