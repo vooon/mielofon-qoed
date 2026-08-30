@@ -19,8 +19,8 @@ define Package/mielofon-agent
   DEPENDS:=+ucode +ucode-mod-uclient +ucode-mod-ubus +ucode-mod-uci +ucode-mod-fs \
 	+ucode-mod-uloop +ucode-mod-log +rpcd +rpcd-mod-bird \
 	+iperf3 +netperf +iputils-ping \
-	+PACKAGE_libustream-openssl:libustream-openssl \
-	+PACKAGE_libustream-mbedtls:libustream-mbedtls
+	+MIELOFON_AGENT_TLS_OPENSSL:libustream-openssl \
+	+MIELOFON_AGENT_TLS_MBEDTLS:libustream-mbedtls
 endef
 
 define Package/mielofon-agent/description
@@ -38,15 +38,18 @@ endef
 define Package/mielofon-agent/config
 	if PACKAGE_mielofon-agent
 
-		# Guarantee uclient has a TLS backend at runtime: openssl when the
-		# image chose it, otherwise mbedtls as the fallback, so an SSL-less
-		# ucode-mod-uclient build can never slip through. (The select guard
-		# must NOT reference the target symbol — kconfig flags a self-select
-		# as a recursive dependency.)
-		config MIELOFON_AGENT_TLS
+		# TLS backend for the uclient mTLS transport, expressed as mielofon's
+		# OWN config entries (the DEPENDS line below references these, not the
+		# ustream package symbols). openssl wins when the image enables it;
+		# otherwise mbedtls is selected as the fallback, so an SSL-less
+		# ucode-mod-uclient build can never slip through.
+		config MIELOFON_AGENT_TLS_OPENSSL
 			bool
-			default y
-			select PACKAGE_libustream-mbedtls if !PACKAGE_libustream-openssl
+			default y if PACKAGE_libustream-openssl
+
+		config MIELOFON_AGENT_TLS_MBEDTLS
+			bool
+			default y if !MIELOFON_AGENT_TLS_OPENSSL
 
 	endif
 endef
