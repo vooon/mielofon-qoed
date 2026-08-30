@@ -17,7 +17,7 @@ tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 opentelemetry = { workspace = true, features = ["trace", "metrics", "logs"] }
 opentelemetry_sdk = { workspace = true }
-opentelemetry-otlp = { workspace = true, features = ["reqwest-client", "http-proto"] }
+opentelemetry-otlp = { workspace = true, features = ["reqwest-blocking-client", "http-proto"] }
 opentelemetry-appender-tracing = { workspace = true }
 tracing-opentelemetry = { workspace = true }
 
