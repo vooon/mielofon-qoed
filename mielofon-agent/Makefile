@@ -1,7 +1,7 @@
 include $(TOPDIR)/rules.mk
 
 PKG_NAME:=mielofon-agent
-PKG_VERSION:=0.3.3
+PKG_VERSION:=0.3.4
 PKG_RELEASE:=1
 
 PKG_LICENSE:=Apache-2.0
