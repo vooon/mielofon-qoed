@@ -81,7 +81,7 @@ jobs:
           for dir in */; do
             dir="${dir%/}"
             case "$dir" in
-              .github|docs|crates|scripts) continue ;;
+              .github|docs|crates|scripts|tests) continue ;;
             esac
             if [ -d "$dir" ] && [ ! -f "$dir/Makefile" ]; then
               echo "::error::$dir/ exists but has no Makefile"

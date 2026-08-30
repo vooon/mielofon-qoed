@@ -32,6 +32,10 @@ metadata:
 spec:
   serviceName: mielofon
   replicas: 3
+  # Parallel: every node's entrypoint needs all three peers resolvable before
+  # it can render its config. OrderedReady would deadlock (pod-0 never becomes
+  # Ready because pod-1/pod-2 are not created yet).
+  podManagementPolicy: Parallel
   selector:
     matchLabels:
       app: mielofon
@@ -40,6 +44,11 @@ spec:
       labels:
         app: mielofon
     spec:
+      # The image runs as an unprivileged mielofon user, but the emptyDir work
+      # volume and openssl's CA serial writes need write access to /etc/mielofon
+      # and /etc/mielofon-ca. Run as root for the e2e harness.
+      securityContext:
+        runAsUser: 0
       containers:
         - name: mielofon-controller
           image: mielofon-controller:e2e
