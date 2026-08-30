@@ -3,6 +3,7 @@
 use crate::config::Config;
 use crate::fence::Fence;
 use crate::kv::LwwStore;
+use crate::worker::WorkerRegistry;
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 use std::time::Instant;
@@ -15,6 +16,7 @@ pub struct AppState {
     pub cfg: Arc<Config>,
     pub kv: Arc<LwwStore>,
     pub fence: Arc<Fence>,
+    pub workers: Arc<WorkerRegistry>,
     pub ready: Arc<Ready>,
     pub started_at: Arc<Instant>,
 }
@@ -25,6 +27,7 @@ impl AppState {
             cfg: Arc::new(cfg),
             kv: Arc::new(LwwStore::new()),
             fence: Arc::new(Fence::new()),
+            workers: Arc::new(WorkerRegistry::new()),
             ready: Arc::new(Ready(AtomicBool::new(false))),
             started_at: Arc::new(Instant::now()),
         }

@@ -5,6 +5,29 @@ JSON. Endpoints on the **members** (`9551`) and **clients** (`9552`) listeners
 are mTLS; the read endpoints on the **admin** listener (`9553`) are loopback
 HTTP.
 
+## Division of responsibilities
+
+The **controller is the decision-maker** for the whole mesh: it schedules probe
+work, holds the probe fence, classifies quality, derives the OSPF cost policy,
+and dispatches commands to agents.
+
+The **agent is a thin executor**: it runs whatever probe it is told to run and
+reports raw measurements, and it applies the OSPF cost it is told to apply.
+It holds **no** scheduling, policy, or classification logic and never acquires
+the fence itself.
+
+Because spokes sit behind NAT, the controller→agent channel is **agent-pull**:
+an agent registers, polls the working queue, executes commands, reports, and
+acks. The controller never connects out to an agent.
+
+```
+┌──────────── controller ────────────┐
+ scheduler → fence → dispatch work    │   POST /v1/agent/work  (pull)
+ classifier → policy → apply_cost     │◄────────────────────────── agent
+ quality store (KV) ← reports          │   POST /v1/quality
+└─────────────────────────────────────┘
+```
+
 ## Quality record
 
 A directed link `{from, to, interface}` maps to a measurement record:
@@ -24,41 +47,76 @@ A directed link `{from, to, interface}` maps to a measurement record:
 }
 ```
 
-`state` is `quiet` | `busy` | `conflict` (reported by the agent). `quality`
-(`good|acceptable|poor|bad`) and `ospf_cost` are assigned by the controller;
-they are absent while unknown.
+`state` is `quiet` | `busy` | `conflict`. `quality`
+(`good|acceptable|poor|bad`) and `ospf_cost` are assigned by the controller.
 
-## Fence (soft lease)
+## Agent lifecycle
 
-Only the throughput tier is gated. The controller grants a lease with a TTL and
-token. On expiry without release, another agent may take over. A second
-acquirer receives `ok: false, reason: "held"` plus the current `holder`. An
-overlap (eventual consistency) is tolerated and reported as `conflict`.
+### Register
 
 ```jsonc
-POST /v1/fence/acquire            // clients
-{ "agent": "spoke-1", "link": "spoke-1-cr", "ttl_secs": 120 }
-// -> { "ok": true,  "token": "...", "ttl": 120 }
-// -> { "ok": false, "holder": "spoke-1", "reason": "held" }
-
-POST /v1/fence/release            // clients
-{ "link": "spoke-1-cr", "token": "..." }
-// -> { "ok": true }
+POST /v1/agent/register           // clients
+{ "agent": "spoke-1",
+  "links": [ {"from":"spoke-1","to":"hub-a","interface":"awg_hub_a"} ] }
+// -> { "ok": true, "commands": [ {apply_cost …} ] }   // current policy snapshot
 ```
 
-## Agent → controller
+### Poll work
 
 ```jsonc
-POST /v1/quality                  // clients
-{ "link": {"from":"spoke-1","to":"cr","interface":"awg_cr"},
+POST /v1/agent/work               // clients
+{ "agent": "spoke-1" }
+// -> { "commands": [ … ] }        // drained; empty when nothing is due
+```
+
+Command shapes:
+
+```jsonc
+{ "id": "f8a2…", "type": "probe", "tier": "always",
+  "link": { "from":"spoke-1","to":"hub-a","interface":"awg_hub_a" } }
+
+{ "id": "9c11…", "type": "probe", "tier": "throughput",
+  "token": "6e4a…",                    // fence lease held by the controller
+  "link": { … } }
+
+{ "id": "3d77…", "type": "apply_cost",
+  "link": { … }, "cost": 50 }
+```
+
+The controller's scheduler issues `probe/always` per link on an interval, and
+`probe/throughput` only when the link's fence lease is free — it acquires the
+lease before issuing the command. `apply_cost` is issued when the derived cost
+for a link differs from the last cost the controller told the agent to apply.
+
+### Report
+
+```jsonc
+POST /v1/quality                 // clients
+{ "link": {…},
   "rtt_ms":15.0, "loss_pct":0.0, "rr_tps":90.0,
   "tcp_mbps":1.5, "udp_mbps":null, "util_mbps":0.0,
-  "state":"quiet" }
+  "state":"quiet", "token": null }
 // -> { "accepted":true, "quality":"poor", "ospf_cost":50 }
 ```
 
-A busy link must be reported `state: "busy"` (with `util_mbps` set) and is not
-classified — it is never reported as degraded.
+- Always-on reports carry no token. Throughput reports echo the fence token
+  from the command; the controller releases the lease on receipt.
+- A busy link is reported `state: "busy"` (with `util_mbps`) and is never
+  classified as degraded.
+
+### Apply ack
+
+```jsonc
+POST /v1/apply/ack               // clients
+{ "agent":"spoke-1", "link":{…}, "cost":50 }
+// -> { "ok": true }
+```
+
+## Fence (soft lease)
+
+Owned entirely by the controller scheduler. A lease has a TTL and token; on
+expiry without a report it may be re-issued. An overlapping throughput probe is
+tolerated and reported as `conflict`.
 
 ## Read endpoints (admin listener)
 
@@ -66,7 +124,7 @@ classified — it is never reported as degraded.
 GET /v1/quality?from=..&to=..&interface=..   latest record for a link
 GET /v1/quality/all                          full replicated view
 GET /v1/policy?from=..&to=..&interface=..    quality + ospf_cost decision
-GET /v1/status                               node, readiness, leases, members
+GET /v1/status                               node, readiness, leases, agents
 GET /healthz                                 200 when process is up
 GET /readyz                                  200 when ready, 503 otherwise
 GET /metrics                                 Prometheus text exposition
@@ -75,14 +133,10 @@ GET /metrics                                 Prometheus text exposition
 ## Gossip (anti-entropy)
 
 Members exchange the full KV view. LWW merge keeps the newest `ts` per link;
-the store expires records older than `grace_ttl_secs`.
+records older than `grace_ttl_secs` expire.
 
 ```jsonc
 POST /v1/gossip/exchange          // members
-{ "node": "hub-a", "records": [[{"from":..,"to":..,"interface":..}, {...}]] }
-// -> { "node": "hub-b", "records": [...] }
+{ "node": "hub-a", "records": [[…]] }
+// -> { "node": "hub-b", "records": […] }
 ```
-
-Each node pushes its view to every other member on a fixed interval
-(`gossip_interval_secs`). Pushes tolerate a flapping fabric — a failed push is
-simply retried next interval.

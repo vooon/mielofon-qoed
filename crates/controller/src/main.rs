@@ -43,6 +43,11 @@ async fn main() -> anyhow::Result<()> {
         gossip_client,
     ));
 
+    // Probe/policy scheduler — the controller is the mesh decision-maker and
+    // drives registered agents through their work queues.
+    let sched_state = state.clone();
+    tokio::spawn(mielofon_controller::scheduler::scheduler_loop(sched_state));
+
     let prune_state = state.clone();
     let grace = state.cfg.cluster.grace_ttl_secs.max(10);
     tokio::spawn(async move {

@@ -4,7 +4,7 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "Mielofon router agent"
+description = "Mielofon router agent: runs probes and applies OSPF costs as instructed"
 
 [[bin]]
 name = "mielofon-agent"
@@ -12,17 +12,21 @@ path = "src/main.rs"
 
 [dependencies]
 mielofon-otel = { workspace = true }
-tokio = { workspace = true }
+tokio = { workspace = true, features = ["process", "io-util", "fs"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
 toml = { workspace = true }
 tracing = { workspace = true }
 thiserror = { workspace = true }
 anyhow = { workspace = true }
+rustls-pemfile = { workspace = true }
 
 [dependencies.rustls]
 workspace = true
 features = ["ring"]
+
+[dependencies.tokio-rustls]
+workspace = true
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["full"] }

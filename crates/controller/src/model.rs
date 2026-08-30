@@ -30,6 +30,11 @@ impl LinkKey {
             interface: interface.into(),
         }
     }
+
+    /// Compact stable identifier used as map keys and command ids.
+    pub fn id(&self) -> String {
+        format!("{}/{}/{}", self.from, self.to, self.interface)
+    }
 }
 
 /// Probe state reported by the agent alongside measurements.

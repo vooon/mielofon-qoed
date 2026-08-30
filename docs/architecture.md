@@ -50,12 +50,37 @@ The admin listener binds `127.0.0.1` and is intended to be exposed through a
 reverse proxy (e.g. HAProxy). It is **not** mTLS; the proxy is the exposure
 boundary.
 
+### Coordination model
+
+The controller is the **decision-maker** for the whole mesh. A scheduler runs
+inside each controller and:
+
+1. issues per-link always-on probe work on a cadence;
+2. issues gated throughput probe work only when the link's fence lease is free
+   (acquiring the lease itself before dispatch);
+3. classifies the reported quality and derives the OSPF cost policy;
+4. dispatches `apply_cost` commands when the derived cost differs from what an
+   agent last applied.
+
+The agent is a **thin executor**: it polls a work queue, runs the probes it is
+told to run, reports raw measurements, and applies the OSPF cost it is told to
+apply. It holds no scheduling, policy, or classification logic, and never
+acquires the fence itself. Spokes sit behind NAT, so agents pull work from the
+controller rather than the controller connecting out to them.
+
 ### Probe fence (soft lease)
 
-Only the intrusive throughput probe tier uses the fence. An agent acquires a
-short-lived lease before running a gated throughput probe; only one agent does
-so cluster-wide. Because consistency is eventual, a rare overlap is tolerated —
-the agent reports it as `conflict` rather than degraded. See `protocol.md`.
+The fence is owned entirely by the controller scheduler. A lease has a TTL and
+token; only one intrusive throughput probe is scheduled cluster-wide at a time
+and the controller releases the lease when the corresponding report arrives.
+Because cluster consistency is eventual, a rare overlap is tolerated and
+reported as `conflict` rather than degraded. See `protocol.md`.
+
+> Known limitation: today the fence lives per controller process (in-memory).
+> In a multi-node cluster each node schedules independently; as with the rest of
+> the fabric this tolerates a rare overlapping throughput probe (reported
+> `conflict`). Moving the lease into the replicated gossip store so the fence is
+> truly cluster-global is a future step.
 
 ### Quality classification
 

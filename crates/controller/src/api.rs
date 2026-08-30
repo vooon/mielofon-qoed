@@ -58,6 +58,10 @@ pub struct QualityReq {
     pub udp_mbps: Option<f64>,
     pub util_mbps: f64,
     pub state: ProbeState,
+    /// Echo of the fence token from a gated throughput command. When present,
+    /// the controller releases the lease for the link.
+    #[serde(default)]
+    pub token: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -159,14 +163,76 @@ pub async fn post_quality(
     rec.ospf_cost = q.map(quality::cost_for_quality);
 
     let ospf_cost = rec.ospf_cost; // Copy
+    let link_id = req.link.id();
     state.kv.put(req.link, rec);
     bump_reports();
+
+    // A gated throughput report carries the fence token — release the lease.
+    if let Some(token) = req.token {
+        state.fence.release(&link_id, &token);
+    }
 
     Ok(Json(QualityResp {
         accepted: true,
         quality: q,
         ospf_cost,
     }))
+}
+
+// ── Agent pull endpoints (clients listener) ───────────────────────────────
+
+/// Register an agent and its managed links; the response carries the current
+/// policy snapshot (apply_cost commands) so a fresh agent converges immediately.
+pub async fn register_agent(
+    State(state): State<AppState>,
+    Json(req): Json<crate::worker::RegisterReq>,
+) -> Json<crate::worker::RegisterResp> {
+    if req.agent.is_empty() {
+        return Json(crate::worker::RegisterResp {
+            ok: false,
+            commands: Vec::new(),
+        });
+    }
+    state.workers.register(&req.agent, req.links);
+
+    // Seed current policy for the agent's links.
+    let mut commands = Vec::new();
+    for (agent, link) in state.workers.owned_links() {
+        if agent != req.agent {
+            continue;
+        }
+        if let Some(cost) = state.kv.get(&link).and_then(|r| r.ospf_cost) {
+            if state.workers.applied_sent(&agent, &link) != Some(cost) {
+                state.workers.set_applied_sent(&agent, &link, cost);
+                commands.push(crate::worker::WorkCmd::ApplyCost {
+                    id: format!("apply/{}/{}", agent, link.id()),
+                    link: link.clone(),
+                    cost,
+                });
+            }
+        }
+    }
+    Json(crate::worker::RegisterResp { ok: true, commands })
+}
+
+/// Pull (and drain) pending commands for an agent.
+pub async fn work_pull(
+    State(state): State<AppState>,
+    Json(req): Json<crate::worker::WorkReq>,
+) -> Json<crate::worker::WorkResp> {
+    let commands = state.workers.drain(&req.agent);
+    Json(crate::worker::WorkResp { commands })
+}
+
+/// Acknowledge an applied OSPF cost.
+pub async fn apply_ack(
+    State(state): State<AppState>,
+    Json(req): Json<crate::worker::ApplyAckReq>,
+) -> Json<serde_json::Value> {
+    state
+        .workers
+        .set_applied_sent(&req.agent, &req.link, req.cost);
+    Json(serde_json::json!({"ok": true}))
 }
 
 // ── Admin handlers (plain HTTP on loopback) ───────────────────────────────
@@ -296,6 +362,9 @@ pub fn clients_router() -> Router<AppState> {
         .route("/v1/quality", post(post_quality))
         .route("/v1/fence/acquire", post(fence_acquire))
         .route("/v1/fence/release", post(fence_release))
+        .route("/v1/agent/register", post(register_agent))
+        .route("/v1/agent/work", post(work_pull))
+        .route("/v1/apply/ack", post(apply_ack))
 }
 
 pub fn admin_router() -> Router<AppState> {
