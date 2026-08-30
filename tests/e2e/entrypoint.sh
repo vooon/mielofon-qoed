@@ -75,7 +75,7 @@ fi
 	echo "grace_ttl_secs = 60"
 	echo "gossip_interval_secs = 1"
 	echo
-	echo "[cluster.members]"
+	echo "[members]"
 	for n in $(seq 0 $((PEER_COUNT - 1))); do
 		# shellcheck disable=SC2154 # assigned above via eval
 		eval "peer_ip=\${PEER_IP_${n}}"

@@ -12,7 +12,7 @@ advertise = "203.0.113.1" # RFC 5737 documentation address
 grace_ttl_secs = 300
 gossip_interval_secs = 5
 
-[cluster.members]
+[members]
 "hub-a" = "203.0.113.1"
 "hub-b" = "203.0.113.2"
 "hub-c" = "203.0.113.3"

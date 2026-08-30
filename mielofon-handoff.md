@@ -170,7 +170,7 @@ advertise = "203.0.113.1"   # RFC5737 documentation address — replace in deplo
 transport = "tcp-mtls"
 port = 9443
 
-[cluster.members]       # all voters
+[members]               # all voters
 "hub-a" = "203.0.113.1"   # documentation range only
 "hub-b" = "203.0.113.2"
 "hub-c" = "203.0.113.3"

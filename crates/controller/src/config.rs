@@ -138,7 +138,7 @@ impl Default for Cluster {
 /// [node]
 /// name = "hub-a"
 /// advertise = "203.0.113.1"
-/// [cluster.members]
+/// [members]
 /// "hub-a" = "203.0.113.1"
 /// [listeners]
 /// [tls]
