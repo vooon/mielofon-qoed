@@ -41,7 +41,11 @@ prometheus = "0.14"
 # OpenTelemetry (OTLP/HTTP only, gRPC-free)
 opentelemetry = { version = "0.32", default-features = false, features = ["trace", "metrics", "logs", "internal-logs"] }
 opentelemetry_sdk = { version = "0.32", features = ["trace", "metrics", "logs", "rt-tokio"] }
-opentelemetry-otlp = { version = "0.32", default-features = false, features = ["trace", "metrics", "logs", "http-proto", "reqwest-client"] }
+# Blocking HTTP client on purpose: the non-experimental Batch*Processors and
+# PeriodicReader drive exporters from plain std threads via
+# futures_executor::block_on, so an async (reqwest-client) client panics with
+# "there is no reactor running". The blocking client works anywhere.
+opentelemetry-otlp = { version = "0.32", default-features = false, features = ["trace", "metrics", "logs", "http-proto", "reqwest-blocking-client"] }
 opentelemetry-appender-tracing = "0.32"
 tracing-opentelemetry = "0.33"
 opentelemetry-semantic-conventions = "0.32"
