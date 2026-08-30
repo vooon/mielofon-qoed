@@ -92,7 +92,7 @@ if (payload.links[0].interface != 'awg_hub_a')
 if (!rec.freed)
 	die('client not freed after completion');
 
-print('OK');
+print('OK\n');
 -- Expect stdout --
 OK
 -- Expect exitcode --

@@ -30,7 +30,7 @@ has('mielofon_agent_link_util_mbps');
 has('mielofon_agent_link_busy{from="spoke-1",to="hub-a",interface="awg_hub_a"} 0');
 has('mielofon_agent_last_probe_unixtime');
 
-print('OK');
+print('OK\n');
 -- Expect stdout --
 OK
 -- Expect exitcode --

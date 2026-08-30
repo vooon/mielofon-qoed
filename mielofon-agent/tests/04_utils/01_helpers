@@ -26,7 +26,7 @@ let hn = default_agent_name();
 if (hn == null || !length(hn))
 	die('hostname empty');
 
-print('OK');
+print('OK\n');
 -- Expect stdout --
 OK
 -- Expect exitcode --

@@ -32,7 +32,7 @@ let m = parse_iperf3('{"end":{"sum_received":{"bits_per_second":100000000}}}');
 if (m == null || !(m > 99 && m < 101))
 	die('tcp mismatch: ' + m);
 
-print('OK');
+print('OK\n');
 -- Expect stdout --
 OK
 -- Expect exitcode --
