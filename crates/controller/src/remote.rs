@@ -31,7 +31,7 @@ pub async fn post(
     );
     tls.write_all(header.as_bytes()).await?;
     tls.write_all(body).await?;
-    tls.shutdown().await?;
+    tls.flush().await?;
 
     // Drain the response (ignore status; gossip is best-effort).
     let mut buf = vec![0u8; 1024];

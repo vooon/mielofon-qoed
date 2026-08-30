@@ -30,6 +30,8 @@ pub async fn exchange(
     Json(req): Json<ExchangeReq>,
 ) -> Result<Json<ExchangeResp>, StatusCode> {
     state.kv.merge(&req.records);
+    // Inbound push proves round-trip reachability to this peer as well.
+    state.peers.mark_ok(&req.node, 0);
     trace_gossip(&req.node, req.records.len());
     let view = state.kv.all();
     Ok(Json(ExchangeResp {
@@ -64,7 +66,8 @@ pub async fn gossip_loop(state: AppState, client: Arc<rustls::ClientConfig>) {
                 Err(_) => continue,
             };
             let url_path = "/v1/gossip/exchange".to_string();
-            if let Err(e) = crate::remote::post(
+            let started = std::time::Instant::now();
+            match crate::remote::post(
                 *addr,
                 state.cfg.listeners.members_port,
                 client.clone(),
@@ -73,8 +76,11 @@ pub async fn gossip_loop(state: AppState, client: Arc<rustls::ClientConfig>) {
             )
             .await
             {
+                Ok(()) => state
+                    .peers
+                    .mark_ok(name, started.elapsed().as_millis() as u64),
                 // Tolerate a flapping fabric: the next interval retries.
-                warn!("gossip push to {name}: {e}");
+                Err(e) => warn!("gossip push to {name}: {e}"),
             }
         }
     }

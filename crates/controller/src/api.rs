@@ -81,6 +81,8 @@ pub struct StatusResp {
     pub links: usize,
     pub leases: Vec<crate::fence::Lease>,
     pub members: Vec<String>,
+    /// Per-member liveness reported by gossip (name -> health).
+    pub peers: Vec<(String, crate::state::PeerHealthEntry)>,
 }
 
 /// Query filter for `GET /v1/policy` and `GET /v1/quality`.
@@ -505,13 +507,25 @@ pub async fn get_status(State(state): State<AppState>) -> Json<StatusResp> {
         links: state.kv.len(),
         leases: state.fence.leases(),
         members: state.cfg.members.keys().cloned().collect(),
+        peers: state.peers.snapshot(),
     })
+}
+
+/// Members-listener liveness probe. Nodes ping each other over the mTLS
+/// members port; the gossip loop measures this round-trip for /v1/status.
+pub async fn ping(State(state): State<AppState>) -> Json<serde_json::Value> {
+    Json(serde_json::json!({
+        "node": state.cfg.node.name,
+        "ok": true,
+    }))
 }
 
 // ── Router assembly ───────────────────────────────────────────────────────
 
 pub fn members_router() -> Router<AppState> {
-    Router::new().route("/v1/gossip/exchange", post(crate::gossip::exchange))
+    Router::new()
+        .route("/v1/ping", get(ping))
+        .route("/v1/gossip/exchange", post(crate::gossip::exchange))
 }
 
 pub fn clients_router() -> Router<AppState> {
