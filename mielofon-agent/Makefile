@@ -40,11 +40,13 @@ define Package/mielofon-agent/config
 
 		# Guarantee uclient has a TLS backend at runtime: openssl when the
 		# image chose it, otherwise mbedtls as the fallback, so an SSL-less
-		# ucode-mod-uclient build can never slip through.
+		# ucode-mod-uclient build can never slip through. (The select guard
+		# must NOT reference the target symbol — kconfig flags a self-select
+		# as a recursive dependency.)
 		config MIELOFON_AGENT_TLS
 			bool
 			default y
-			select PACKAGE_libustream-mbedtls if !PACKAGE_libustream-openssl && !PACKAGE_libustream-mbedtls
+			select PACKAGE_libustream-mbedtls if !PACKAGE_libustream-openssl
 
 	endif
 endef
