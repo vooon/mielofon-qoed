@@ -1,0 +1,31 @@
+name: release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Create GitHub Release
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Sanity checks
+        run: |
+          set -euo pipefail
+          for pkg in mielofon-controller mielofon-agent; do
+            grep -q '^define Package/' "$pkg/Makefile"
+          done
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v3
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: mielofon ${{ github.ref_name }}
+          generate_release_notes: true

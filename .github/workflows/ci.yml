@@ -58,3 +58,33 @@ jobs:
             echo "::error::Real hostname/domain references found. Must be replaced."
             exit 1
           fi
+
+  feed-health:
+    name: Feed registration check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate feed layout
+        run: |
+          set -euo pipefail
+          # Every top-level dir that looks like a package must contain a
+          # Makefile, otherwise feeds update/install skips it silently.
+          # Non-package dirs are exempt.
+          for dir in */; do
+            dir="${dir%/}"
+            case "$dir" in
+              .github|docs|crates|scripts) continue ;;
+            esac
+            if [ -d "$dir" ] && [ ! -f "$dir/Makefile" ]; then
+              echo "::error::$dir/ exists but has no Makefile"
+              exit 1
+            fi
+          done
+          for pkg in mielofon-controller mielofon-agent; do
+            if [ ! -f "$pkg/Makefile" ]; then
+              echo "::error::package $pkg missing Makefile"
+              exit 1
+            fi
+            grep -q '^define Package/' "$pkg/Makefile" || { echo "::error::$pkg/Makefile has no Package/ definition"; exit 1; }
+          done
+          echo "feed layout OK"

@@ -4,17 +4,13 @@ PKG_NAME:=mielofon-controller
 PKG_VERSION:=0.1.0
 PKG_RELEASE:=1
 
-PKG_SOURCE_PROTO:=git
-PKG_SOURCE_URL:=https://github.com/vooon/mielofon-qoed.git
-PKG_MIRROR_HASH:=skip
-PKG_SOURCE_VERSION:=v$(PKG_VERSION)
+PKG_BUILD_DIR:=$(BUILD_DIR)/mielofon-controller-$(PKG_VERSION)
+PKG_BUILD_DEPENDS:=rust/host
+PKG_BUILD_PARALLEL:=1
 
 PKG_LICENSE:=Apache-2.0
 PKG_LICENSE_FILES:=LICENSE
 PKG_MAINTAINER:=Vladimir Ermakov <vooon341@gmail.com>
-
-PKG_BUILD_DEPENDS:=rust/host
-PKG_BUILD_PARALLEL:=1
 
 include $(INCLUDE_DIR)/package.mk
 include ../../packages/lang/rust/rust-package.mk
@@ -32,11 +28,20 @@ define Package/mielofon-controller/description
   Mielofon controller: a small Rust daemon forming a multi-node cluster that
   keeps a replicated per-link quality store, a probe mutual-exclusion fence, an
   mTLS HTTP API, an OTLP/Prometheus observability surface, and an embedded
-  dashboard.
+  dashboard. It is the decision-maker for the whole mesh.
 endef
 
 define Package/mielofon-controller/conffiles
 /etc/mielofon/mielofon-controller.toml
+endef
+
+# This repo is both the source and the feed; build from the working tree
+# (no PKG_SOURCE download). Copy the Cargo workspace into the build dir.
+define Build/Prepare
+	mkdir -p $(PKG_BUILD_DIR)
+	$(CP) $(CURDIR)/../Cargo.toml $(PKG_BUILD_DIR)/
+	$(CP) $(CURDIR)/../Cargo.lock $(PKG_BUILD_DIR)/
+	$(CP) $(CURDIR)/../crates $(PKG_BUILD_DIR)/
 endef
 
 define Build/Compile
