@@ -1,0 +1,34 @@
+-- Testcase --
+import { float, parse_json, default_agent_name } from 'utils';
+
+if (float('42.5', 1.0) != 42.5)
+	die('float parse');
+
+if (float('nope', 7.0) != 7.0)
+	die('float fallback');
+
+if (float('', 9.0) != 9.0)
+	die('float empty');
+
+let o = parse_json('{"a": 1}');
+
+if (o == null || o.a != 1)
+	die('parse_json valid');
+
+if (parse_json('not json') != null)
+	die('parse_json invalid');
+
+if (parse_json('') != null)
+	die('parse_json empty');
+
+let hn = default_agent_name();
+
+if (hn == null || !length(hn))
+	die('hostname empty');
+
+print('OK');
+-- Expect stdout --
+OK
+-- Expect exitcode --
+0
+-- End --

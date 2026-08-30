@@ -30,6 +30,9 @@ function post_json() {}
 function apply_cost() {}
 function run_always() {}
 function run_throughput() {}
+function float() {}
+function parse_json() {}
+function default_agent_name() {}
 const metrics = {
 	init: function() {}, interval: function() {}, write: function() {},
 	record_always: function() {}, record_throughput: function() {},

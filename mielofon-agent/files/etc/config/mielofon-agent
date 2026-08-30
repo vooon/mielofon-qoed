@@ -6,6 +6,7 @@
 
 config agent 'main'
 	option enabled '1'
+	# Agent identity. Empty/defaults to the router hostname.
 	option agent_name 'spoke-1'
 	# Controller clients listener (mTLS). Full URL including scheme and port.
 	option controller_url 'https://203.0.113.1:9552'

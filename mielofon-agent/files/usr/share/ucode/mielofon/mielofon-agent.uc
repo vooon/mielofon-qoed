@@ -17,17 +17,11 @@ import { new_client } from './transport.uc';
 import { run_always, run_throughput } from './probes.uc';
 import { apply_cost } from './cost.uc';
 import * as metrics from './metrics.uc';
+import { float, parse_json, default_agent_name } from './utils.uc';
 
 let cfg = {};
 let links = [];
 let client = null;
-
-function float(v, def)
-{
-	let n = +v;
-
-	return (n == n) ? n : def;
-};
 
 function load_config()
 {
@@ -35,6 +29,9 @@ function load_config()
 	ctx.load('mielofon-agent');
 
 	let agent = ctx.get('mielofon-agent', 'main', 'agent_name');
+	if (agent == null || !length(agent))
+		agent = default_agent_name();
+
 	let controller_url = ctx.get('mielofon-agent', 'main', 'controller_url');
 	let cacert = ctx.get('mielofon-agent', 'main', 'cacert');
 	let cert = ctx.get('mielofon-agent', 'main', 'cert');
@@ -197,20 +194,6 @@ function handle_commands(cmds, done)
 	next(0);
 };
 
-function parse_list(raw)
-{
-	if (raw == null || !length(raw))
-		return [];
-
-	try {
-		return json(raw);
-	}
-	catch (e) {
-		log.WARN('bad json response: %s\n', raw);
-		return [];
-	}
-};
-
 function register()
 {
 	let body = { agent: cfg.agent, links: [] };
@@ -227,7 +210,7 @@ function register()
 			return;
 		}
 
-		let v = parse_list(raw);
+		let v = parse_json(raw);
 		handle_commands((v && v.commands) ? v.commands : [], command_step);
 	});
 };
@@ -243,7 +226,7 @@ function command_step()
 			return;
 		}
 
-		let v = parse_list(raw);
+		let v = parse_json(raw);
 		handle_commands((v && v.commands) ? v.commands : [], command_step);
 	});
 };

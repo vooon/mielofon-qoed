@@ -73,6 +73,7 @@ $(INSTALL_DATA) \
 		./files/usr/share/ucode/mielofon/metrics.uc \
 		./files/usr/share/ucode/mielofon/probes.uc \
 		./files/usr/share/ucode/mielofon/transport.uc \
+		./files/usr/share/ucode/mielofon/utils.uc \
 		$(1)/usr/share/ucode/mielofon/
 endef
 
