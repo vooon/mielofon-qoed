@@ -5,8 +5,8 @@ mesh running over AmneziaWG point-to-point links. It steers traffic to good
 links and away from degraded ones, and gives an operator a per-link and path
 view of why traffic goes where it goes.
 
-This document describes the controller (`crates/controller`). The agent is
-described separately.
+This document describes the controller (`crates/controller`) and the agent
+(`mielofon-agent/`, ucode).
 
 > **Sanitization**: this is a public repo describing software for a private
 > mesh. Only placeholder node names (`hub-a`..`hub-e`) and RFC-private
@@ -20,7 +20,7 @@ The repo is both the mielofon source **and** an OpenWrt feed. In `feeds.conf`:
 src-git mielofon https://github.com/vooon/mielofon-qoed.git
 ```
 
-- `crates/` — Rust workspace source (`controller`, `agent`, `mielofon-otel`).
+- `crates/` — Rust workspace source (`controller`, `mielofon-otel`).
 - `mielofon-controller/` and `mielofon-agent/` — feed `Package/` definitions.
 - OpenWrt's feed scanner ignores non-package directories (e.g. `crates/`).
 
@@ -43,7 +43,7 @@ store's expiry (`grace_ttl_secs`).
 | Listener | Port | Transport | Purpose |
 |----------|------|-----------|---------|
 | members  | 9551 | mTLS (rustls) | cluster gossip / anti-entropy |
-| clients  | 9552 | mTLS (rustls) | agents: quality reports + probe fence |
+| clients  | 9552 | mTLS (rustls) | agents: commands + replies (long-poll) |
 | admin    | 9553 | HTTP on loopback | dashboard `/`, `/metrics`, `/healthz`, `/readyz`, read endpoints |
 
 The admin listener binds `127.0.0.1` and is intended to be exposed through a
@@ -62,17 +62,47 @@ inside each controller and:
 4. dispatches `apply_cost` commands when the derived cost differs from what an
    agent last applied.
 
-The agent is a **thin executor**: it polls a work queue, runs the probes it is
-told to run, reports raw measurements, and applies the OSPF cost it is told to
+```mermaid
+flowchart LR
+    subgraph Controller
+        S[Scheduler]
+        F[Fence]
+        Q[(Quality KV)]
+        P[Policy]
+    end
+    S -->|issue probe / acquire lease| F
+    S -->|commands| A[ucode agent]
+    F -->|fence token| S
+    A -->|replies / job id| Q
+    Q --> P
+    P -->|apply_cost| A
+    A -->|ubus / rpcd-mod-bird| B[BIRD]
+```
+
+The agent is a **thin executor** written in **ucode**: it long-polls the
+controller's command endpoint, runs the probe it is told to run, replies with
+raw measurements (echoing the job id), and applies the OSPF cost it is told to
 apply. It holds no scheduling, policy, or classification logic, and never
 acquires the fence itself. Spokes sit behind NAT, so agents pull work from the
 controller rather than the controller connecting out to them.
+
+The agent package (`mielofon-agent/`) is `PKGARCH:=all` and installs `.uc`
+modules under `/usr/share/ucode/mielofon/` plus a procd init and a UCI config
+(`/etc/config/mielofon-agent`) that carries the mTLS identity
+(`/etc/mielofon/agent.{key,cert}` + `ca.pem`) and a single `controller_url`.
+Key integration points:
+
+- **Transport**: mTLS HTTPS via `ucode-mod-uclient`; the package's KConfig
+  guarantees a `libustream-*` TLS backend (openssl preferred, mbedtls fallback)
+  is always enabled. Probes run the resident `ping` / `iperf3` / `netperf`
+  binaries; BIRD is driven over ubus through `rpcd-mod-bird` (`bird query`), so
+  the agent needs no `ucode-mod-socket`.
 
 ### Probe fence (soft lease)
 
 The fence is owned entirely by the controller scheduler. A lease has a TTL and
 token; only one intrusive throughput probe is scheduled cluster-wide at a time
-and the controller releases the lease when the corresponding report arrives.
+and the controller releases the lease when the corresponding reply arrives.
 Because cluster consistency is eventual, a rare overlap is tolerated and
 reported as `conflict` rather than degraded. See `protocol.md`.
 

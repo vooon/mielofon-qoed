@@ -3,9 +3,8 @@ resolver = "2"
 members = [
     "crates/mielofon-otel",
     "crates/controller",
-    "crates/agent",
 ]
-default-members = ["crates/controller", "crates/agent"]
+default-members = ["crates/controller"]
 
 [workspace.package]
 version = "0.1.0"

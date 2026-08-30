@@ -1,0 +1,40 @@
+-- Testcase --
+import { parse_ping, parse_transaction_rate, parse_iperf3 } from 'probes';
+
+let p = parse_ping(
+	'PING 2001:db8::1 (2001:db8::1) 56 data bytes\n' +
+	'\n' +
+	'--- 2001:db8::1 ping statistics ---\n' +
+	'3 packets transmitted, 3 received, 0% packet loss, time 402ms\n' +
+	'rtt min/avg/max/mdev = 11.057/11.741/12.402/0.551 ms\n'
+);
+
+if (p.loss != 0)
+	die('loss mismatch: ' + p.loss);
+
+if (!(p.rtt > 11 && p.rtt < 12))
+	die('rtt mismatch: ' + p.rtt);
+
+let t = parse_transaction_rate(
+	'Socket Message Elapsed Messages\n' +
+	'\n' +
+	'Size Size Time Okay Errors Throughput\n' +
+	'bytes bytes secs # # 10^6ops/sec\n' +
+	'\n' +
+	'0 0 4.00 903 0 225.75\n'
+);
+
+if (t != 225.75)
+	die('tps mismatch: ' + t);
+
+let m = parse_iperf3('{"end":{"sum_received":{"bits_per_second":100000000}}}');
+
+if (m == null || !(m > 99 && m < 101))
+	die('tcp mismatch: ' + m);
+
+print('OK');
+-- Expect stdout --
+OK
+-- Expect exitcode --
+0
+-- End --

@@ -88,3 +88,45 @@ jobs:
             grep -q '^define Package/' "$pkg/Makefile" || { echo "::error::$pkg/Makefile has no Package/ definition"; exit 1; }
           done
           echo "feed layout OK"
+
+  agent:
+    name: Agent (ucode) checks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Shellcheck init script
+        if: hashFiles('mielofon-agent/files/etc/init.d/mielofon-agent') != ''
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends shellcheck
+          shellcheck mielofon-agent/files/etc/init.d/mielofon-agent
+
+      - name: Lint ucode modules (node ESM parse + ucode rules)
+        if: hashFiles('package.json') != ''
+        run: |
+          node scripts/uc-lint.mjs
+
+      - uses: ./.github/actions/build-ucode
+        id: ucode
+
+      - name: Syntax-check ucode modules (ucode -c)
+        run: |
+          set -euo pipefail
+          work="$(mktemp -d)"
+          for f in mielofon-agent/files/usr/share/ucode/mielofon/*.uc; do
+            { cat mielofon-agent/tests/lib/syntax-stub.uc
+              sed -e '/^import /d' -e 's/^export //' "$f"; } \
+              > "$work/$(basename "$f")"
+          done
+          for f in "$work"/*.uc; do
+            "${{ steps.ucode.outputs.bin }}" -c "$f"
+          done
+
+      - name: Run ucode unit tests (mocked modules)
+        run: |
+          set -euo pipefail
+          UCODE_BIN="${{ steps.ucode.outputs.bin }}" \
+          UCODE_MODULES="${{ steps.ucode.outputs.mods }}" \
+            mielofon-agent/tests/run_tests.sh

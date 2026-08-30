@@ -1,0 +1,42 @@
+# Mielofon agent configuration (SANITIZED example).
+#
+# The agent pulls commands from the controller over a long-lived mTLS
+# long-poll, runs the probe it is told to run, and applies the OSPF cost it
+# is told to apply. All addresses below are placeholders (RFC 5737 / RFC 3849).
+
+config agent 'main'
+	option enabled '1'
+	option agent_name 'spoke-1'
+	# Controller clients listener (mTLS). Full URL including scheme and port.
+	option controller_url 'https://203.0.113.1:9552'
+	# mTLS client identity (deployed by the operator, never shipped):
+	option cacert '/etc/mielofon/ca.pem'
+	option cert    '/etc/mielofon/agent.cer'
+	option key     '/etc/mielofon/agent.key'
+	# Long-poll hold for /v1/agent/command (ms). 0 = plain drain.
+	option command_timeout_ms '30000'
+	# Quiet threshold in Mbps: above this the throughput tier is skipped.
+	option quiet_max_mbps '15'
+	option ping_count '3'
+	option ping_interval '0.2'
+	option rr_duration '4'
+	option tcp_duration '4'
+
+# One section per managed outgoing link. The controller references the link
+# only by {from,to,interface}; probe target/source are device-local and never
+# leave the router.
+config link 'sample_hub_link'
+	option from 'spoke-1'
+	option to 'hub-a'
+	option interface 'awg_hub_a'
+	option target '2001:db8::1'
+	# option source '2001:db8::10'
+	# BIRD CLI command run on apply_cost via `ubus call bird query`. `{interface}`
+	# and `{cost}` are substituted. Empty = no-op ack (non-BIRD hosts).
+	# option cost_command 'configure'
+
+# config link
+# 	option from 'spoke-1'
+# 	option to 'hub-b'
+# 	option interface 'awg_hub_b'
+# 	option target '2001:db8::2'

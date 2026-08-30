@@ -16,16 +16,24 @@ reports raw measurements, and it applies the OSPF cost it is told to apply.
 It holds **no** scheduling, policy, or classification logic and never acquires
 the fence itself.
 
-Because spokes sit behind NAT, the controller→agent channel is **agent-pull**:
-an agent registers, polls the working queue, executes commands, reports, and
-acks. The controller never connects out to an agent.
+Because spokes sit behind NAT, the controller→agent channel is **agent-pull via
+a long-poll**: the agent registers, then holds an mTLS long-poll on the command
+endpoint; the controller returns queued commands (or an empty batch on
+timeout), and the agent immediately re-polls. Every command carries a **job
+identifier**, and every reply to it echoes that `id`. The controller never
+connects out to an agent.
 
-```
-┌──────────── controller ────────────┐
- scheduler → fence → dispatch work    │   POST /v1/agent/work  (pull)
- classifier → policy → apply_cost     │◄────────────────────────── agent
- quality store (KV) ← reports          │   POST /v1/quality
-└─────────────────────────────────────┘
+```mermaid
+flowchart LR
+    subgraph c[Controller]
+        sched[Scheduler] --> fence[Probe fence]
+        sched --> qual[(Quality KV)]
+        qual --> pol[Policy / OSPF cost]
+    end
+
+    sched -->|POST /v1/agent/command · long-poll| A
+    pol -->|apply_cost| A
+    A[Agent] -->|POST /v1/agent/reply · echoes job id| qual
 ```
 
 ## Quality record
@@ -61,25 +69,26 @@ POST /v1/agent/register           // clients
 // -> { "ok": true, "commands": [ {apply_cost …} ] }   // current policy snapshot
 ```
 
-### Poll work
+### Pull commands (long-poll)
 
 ```jsonc
-POST /v1/agent/work               // clients
-{ "agent": "spoke-1" }
-// -> { "commands": [ … ] }        // drained; empty when nothing is due
+POST /v1/agent/command            // clients
+{ "agent": "spoke-1", "timeout_ms": 30000 }
+// -> { "commands": [ … ] }        // drained; { "commands": [] } on timeout;
+//                                   the agent re-polls immediately
 ```
 
-Command shapes:
+Command shapes — each carries a job `id`:
 
 ```jsonc
-{ "id": "f8a2…", "type": "probe", "tier": "always",
+{ "id": "always/spoke-1/…", "type": "probe", "tier": "always",
   "link": { "from":"spoke-1","to":"hub-a","interface":"awg_hub_a" } }
 
-{ "id": "9c11…", "type": "probe", "tier": "throughput",
+{ "id": "throughput/spoke-1/…", "type": "probe", "tier": "throughput",
   "token": "6e4a…",                    // fence lease held by the controller
   "link": { … } }
 
-{ "id": "3d77…", "type": "apply_cost",
+{ "id": "apply/spoke-1/…", "type": "apply_cost",
   "link": { … }, "cost": 50 }
 ```
 
@@ -87,30 +96,29 @@ The controller's scheduler issues `probe/always` per link on an interval, and
 `probe/throughput` only when the link's fence lease is free — it acquires the
 lease before issuing the command. `apply_cost` is issued when the derived cost
 for a link differs from the last cost the controller told the agent to apply.
+While no agent is long-polling, probe work is not queued (bounded); the policy
+snapshot is re-seeded through `register` on reconnect.
 
-### Report
+### Reply
+
+Every reply echoes the command's job `id`:
 
 ```jsonc
-POST /v1/quality                 // clients
-{ "link": {…},
+POST /v1/agent/reply              // clients
+{ "id": "always/spoke-1/…", "kind": "probe",
+  "link": { … },
   "rtt_ms":15.0, "loss_pct":0.0, "rr_tps":90.0,
-  "tcp_mbps":1.5, "udp_mbps":null, "util_mbps":0.0,
-  "state":"quiet", "token": null }
-// -> { "accepted":true, "quality":"poor", "ospf_cost":50 }
+  "tcp_mbps":null, "util_mbps":0.0, "state":"quiet", "token": null }
+
+{ "id": "apply/spoke-1/…", "kind": "applied", "link": { … }, "cost": 50 }
 ```
 
-- Always-on reports carry no token. Throughput reports echo the fence token
+- Always-on replies carry no token. Throughput replies echo the fence token
   from the command; the controller releases the lease on receipt.
 - A busy link is reported `state: "busy"` (with `util_mbps`) and is never
   classified as degraded.
-
-### Apply ack
-
-```jsonc
-POST /v1/apply/ack               // clients
-{ "agent":"spoke-1", "link":{…}, "cost":50 }
-// -> { "ok": true }
-```
+- `/v1/quality` and `/v1/apply/ack` remain supported as the equivalent
+  non-correlated endpoints.
 
 ## Fence (soft lease)
 

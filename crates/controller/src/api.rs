@@ -145,7 +145,10 @@ pub async fn post_quality(
     State(state): State<AppState>,
     Json(req): Json<QualityReq>,
 ) -> Result<Json<QualityResp>, StatusCode> {
-    let mut rec = QualityRecord::new(
+    let (quality, ospf_cost) = ingest_quality(
+        &state,
+        req.link,
+        req.ts,
         req.rtt_ms,
         req.loss_pct,
         req.rr_tps,
@@ -153,30 +156,58 @@ pub async fn post_quality(
         req.udp_mbps,
         req.util_mbps,
         req.state,
+        req.token,
     );
-    if let Some(ts) = req.ts {
+    Ok(Json(QualityResp {
+        accepted: true,
+        quality,
+        ospf_cost,
+    }))
+}
+
+/// Shared measurement ingest: classify, store (LWW), and release the fence
+/// when a gated throughput report echoes its token.
+fn ingest_quality(
+    state: &AppState,
+    link: LinkKey,
+    ts: Option<u64>,
+    rtt_ms: f64,
+    loss_pct: f64,
+    rr_tps: f64,
+    tcp_mbps: Option<f64>,
+    udp_mbps: Option<f64>,
+    util_mbps: f64,
+    probe_state: ProbeState,
+    token: Option<String>,
+) -> (Option<Quality>, Option<u32>) {
+    let mut rec = QualityRecord::new(
+        rtt_ms,
+        loss_pct,
+        rr_tps,
+        tcp_mbps,
+        udp_mbps,
+        util_mbps,
+        probe_state,
+    );
+    if let Some(ts) = ts {
         rec.ts = ts;
     }
 
-    let q = quality::classify(&state.cfg.quality, &rec);
-    rec.quality = q;
-    rec.ospf_cost = q.map(quality::cost_for_quality);
+    let quality = quality::classify(&state.cfg.quality, &rec);
+    rec.quality = quality;
+    rec.ospf_cost = quality.map(quality::cost_for_quality);
 
     let ospf_cost = rec.ospf_cost; // Copy
-    let link_id = req.link.id();
-    state.kv.put(req.link, rec);
+    let link_id = link.id();
+    state.kv.put(link, rec);
     bump_reports();
 
     // A gated throughput report carries the fence token — release the lease.
-    if let Some(token) = req.token {
-        state.fence.release(&link_id, &token);
+    if let Some(t) = token {
+        state.fence.release(&link_id, &t);
     }
 
-    Ok(Json(QualityResp {
-        accepted: true,
-        quality: q,
-        ospf_cost,
-    }))
+    (quality, ospf_cost)
 }
 
 // ── Agent pull endpoints (clients listener) ───────────────────────────────
@@ -233,6 +264,126 @@ pub async fn apply_ack(
         .workers
         .set_applied_sent(&req.agent, &req.link, req.cost);
     Json(serde_json::json!({"ok": true}))
+}
+
+/// Long-poll command fetch.
+#[derive(Debug, Deserialize)]
+pub struct CommandReq {
+    pub agent: String,
+    #[serde(default = "default_timeout_ms")]
+    pub timeout_ms: u64,
+}
+
+fn default_timeout_ms() -> u64 {
+    30_000
+}
+
+/// Long-polled work fetch: returns queued commands immediately, otherwise
+/// holds the request until a command is queued (scheduler `notify`) or the
+/// timeout expires. `timeout_ms == 0` behaves like the plain drain endpoint.
+pub async fn command_long_poll(
+    State(state): State<AppState>,
+    Json(req): Json<CommandReq>,
+) -> Json<crate::worker::WorkResp> {
+    let timeout = std::time::Duration::from_millis(req.timeout_ms.min(120_000));
+    if timeout.is_zero() {
+        return Json(crate::worker::WorkResp {
+            commands: state.workers.drain(&req.agent),
+        });
+    }
+    let notify = state.workers.notify(&req.agent);
+    let deadline = tokio::time::Instant::now() + timeout;
+    loop {
+        let commands = state.workers.drain(&req.agent);
+        if !commands.is_empty() {
+            return Json(crate::worker::WorkResp { commands });
+        }
+        tokio::select! {
+            _ = notify.notified() => continue,
+            _ = tokio::time::sleep_until(deadline) => {
+                return Json(crate::worker::WorkResp { commands: Vec::new() });
+            }
+        }
+    }
+}
+
+/// A reply for a previously dispatched command. Every reply echoes the
+/// command's job identifier (`id`).
+#[derive(Debug, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum AgentReply {
+    Probe {
+        agent: String,
+        id: String,
+        link: LinkKey,
+        ts: Option<u64>,
+        rtt_ms: f64,
+        loss_pct: f64,
+        rr_tps: f64,
+        #[serde(default)]
+        tcp_mbps: Option<f64>,
+        #[serde(default)]
+        udp_mbps: Option<f64>,
+        util_mbps: f64,
+        state: ProbeState,
+        #[serde(default)]
+        token: Option<String>,
+    },
+    Applied {
+        agent: String,
+        id: String,
+        link: LinkKey,
+        cost: u32,
+    },
+}
+
+/// `/v1/agent/reply`: agent→controller results for previously issued commands.
+pub async fn agent_reply(
+    State(state): State<AppState>,
+    Json(reply): Json<AgentReply>,
+) -> Json<serde_json::Value> {
+    match reply {
+        AgentReply::Probe {
+            agent: _,
+            id,
+            link,
+            ts,
+            rtt_ms,
+            loss_pct,
+            rr_tps,
+            tcp_mbps,
+            udp_mbps,
+            util_mbps,
+            state: probe_state,
+            token,
+        } => {
+            let (quality, ospf_cost) = ingest_quality(
+                &state,
+                link,
+                ts,
+                rtt_ms,
+                loss_pct,
+                rr_tps,
+                tcp_mbps,
+                udp_mbps,
+                util_mbps,
+                probe_state,
+                token,
+            );
+            Json(serde_json::json!({
+                "ok": true, "id": id, "quality": quality, "ospf_cost": ospf_cost,
+            }))
+        }
+        AgentReply::Applied {
+            agent,
+            id,
+            link,
+            cost,
+        } => {
+            state.workers.set_applied_sent(&agent, &link, cost);
+            Json(serde_json::json!({"ok": true, "id": id}))
+        }
+    }
 }
 
 // ── Admin handlers (plain HTTP on loopback) ───────────────────────────────
@@ -364,6 +515,8 @@ pub fn clients_router() -> Router<AppState> {
         .route("/v1/fence/release", post(fence_release))
         .route("/v1/agent/register", post(register_agent))
         .route("/v1/agent/work", post(work_pull))
+        .route("/v1/agent/command", post(command_long_poll))
+        .route("/v1/agent/reply", post(agent_reply))
         .route("/v1/apply/ack", post(apply_ack))
 }
 

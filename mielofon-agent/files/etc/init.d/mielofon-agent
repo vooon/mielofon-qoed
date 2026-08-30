@@ -1,0 +1,30 @@
+#!/bin/sh /etc/rc.common
+
+# shellcheck disable=SC2034          # consumed by /etc/rc.common
+USE_PROCD=1
+
+START=96
+STOP=9
+
+start_service()
+{
+	procd_open_instance
+	procd_set_param command /usr/bin/ucode \
+		/usr/share/ucode/mielofon/mielofon-agent.uc
+	procd_set_param respawn 3600 5 5
+	procd_set_param stdout 1
+	procd_set_param stderr 1
+	procd_close_instance
+}
+
+# Config is read at startup only, so applying changes requires a restart.
+reload_service()
+{
+	stop
+	start
+}
+
+service_triggers()
+{
+	procd_add_reload_trigger "mielofon-agent"
+}

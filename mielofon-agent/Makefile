@@ -4,64 +4,74 @@ PKG_NAME:=mielofon-agent
 PKG_VERSION:=0.1.0
 PKG_RELEASE:=1
 
-PKG_BUILD_DIR:=$(BUILD_DIR)/mielofon-agent-$(PKG_VERSION)
-PKG_BUILD_DEPENDS:=rust/host
-PKG_BUILD_PARALLEL:=1
-
 PKG_LICENSE:=Apache-2.0
-PKG_LICENSE_FILES:=LICENSE
 PKG_MAINTAINER:=Vladimir Ermakov <vooon341@gmail.com>
 
 include $(INCLUDE_DIR)/package.mk
-include ../../packages/lang/rust/rust-package.mk
 
 define Package/mielofon-agent
   SECTION:=net
   CATEGORY:=Network
   SUBMENU:=Routing and Redirection
-  TITLE:=Mielofon router agent (probe runner + OSPF cost applifier)
+  TITLE:=Mielofon router agent (ucode probe runner + OSPF cost applifier)
   URL:=https://github.com/vooon/mielofon-qoed
-  DEPENDS:=$(RUST_ARCH_DEPENDS)
+  PKGARCH:=all
+  DEPENDS:=+ucode +ucode-mod-uclient +ucode-mod-ubus +ucode-mod-uci +ucode-mod-fs \
+	+ucode-mod-uloop +ucode-mod-log +rpcd +rpcd-mod-bird \
+	+iperf3 +netperf +iputils-ping \
+	+PACKAGE_libustream-openssl:libustream-openssl \
+	+PACKAGE_libustream-mbedtls:libustream-mbedtls
 endef
 
 define Package/mielofon-agent/description
-  Mielofon agent: runs on each mesh router, executes the probe and
-  apply-cost commands issued by the mielofon-controller and reports raw
-  measurements. Thin executor — no scheduling or policy logic of its own.
+  Mielofon agent: runs on each mesh router, pulls commands from the
+  mielofon-controller over an mTLS long-poll, executes the probe it is told to
+  run (or applies the OSPF cost it is told to apply), and reports back
+  correlating each reply with the job id. Thin executor — no scheduling or
+  policy logic of its own.
+
+  Requires ucode-mod-uclient to be built WITH SSL support (the mielofon-agent
+  config block guarantees a libustream-* backend is always enabled). BIRD is
+  driven over ubus via rpcd-mod-bird.
+endef
+
+define Package/mielofon-agent/config
+	if PACKAGE_mielofon-agent
+
+		# Guarantee uclient has a TLS backend at runtime: openssl when the
+		# image chose it, otherwise mbedtls as the fallback, so an SSL-less
+		# ucode-mod-uclient build can never slip through.
+		config MIELOFON_AGENT_TLS
+			bool
+			default y
+			select PACKAGE_libustream-mbedtls if !PACKAGE_libustream-openssl && !PACKAGE_libustream-mbedtls
+
+	endif
 endef
 
 define Package/mielofon-agent/conffiles
-/etc/mielofon/mielofon-agent.toml
-endef
-
-# This repo is both the source and the feed; build from the working tree
-# (no PKG_SOURCE download). Copy the Cargo workspace into the build dir.
-define Build/Prepare
-	mkdir -p $(PKG_BUILD_DIR)
-	$(CP) $(CURDIR)/../Cargo.toml $(PKG_BUILD_DIR)/
-	$(CP) $(CURDIR)/../Cargo.lock $(PKG_BUILD_DIR)/
-	$(CP) $(CURDIR)/../crates $(PKG_BUILD_DIR)/
+/etc/config/mielofon-agent
+/etc/mielofon/
 endef
 
 define Build/Compile
-	cd $(PKG_BUILD_DIR); \
-	$(CARGO_PKG_VARS) \
-	CC="$(TARGET_CC)" \
-	cargo build -v \
-		--release \
-		--package mielofon-agent
 endef
 
 define Package/mielofon-agent/install
-	$(INSTALL_DIR) $(1)/usr/sbin
-	$(INSTALL_BIN) $(PKG_BUILD_DIR)/target/$(RUSTC_TARGET_ARCH)/release/mielofon-agent $(1)/usr/sbin/
+	$(INSTALL_DIR) $(1)/etc/mielofon
+	$(INSTALL_DIR) $(1)/etc/config
+	$(INSTALL_CONF) ./files/etc/config/mielofon-agent $(1)/etc/config/
 
 	$(INSTALL_DIR) $(1)/etc/init.d
-	$(INSTALL_BIN) $(CURDIR)/files/mielofon-agent.init $(1)/etc/init.d/mielofon-agent
+	$(INSTALL_BIN) ./files/etc/init.d/mielofon-agent $(1)/etc/init.d/
 
-	$(INSTALL_DIR) $(1)/etc/mielofon
-	$(INSTALL_CONF) $(CURDIR)/files/mielofon-agent.toml $(1)/etc/mielofon/mielofon-agent.toml
+	$(INSTALL_DIR) $(1)/usr/share/ucode/mielofon
+	$(INSTALL_DATA) \
+		./files/usr/share/ucode/mielofon/mielofon-agent.uc \
+		./files/usr/share/ucode/mielofon/client.uc \
+		./files/usr/share/ucode/mielofon/probes.uc \
+		./files/usr/share/ucode/mielofon/cost.uc \
+		$(1)/usr/share/ucode/mielofon/
 endef
 
-$(eval $(call RustBinPackage,mielofon-agent))
 $(eval $(call BuildPackage,mielofon-agent))

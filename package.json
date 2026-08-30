@@ -1,0 +1,12 @@
+{
+  "name": "mielofon-agent",
+  "private": true,
+  "description": "ucode development tooling (linter for the agent's .uc modules)",
+  "scripts": {
+    "lint:uc": "node scripts/uc-lint.mjs",
+    "lint": "npm run lint:uc"
+  },
+  "engines": {
+    "node": ">=16"
+  }
+}

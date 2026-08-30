@@ -1,0 +1,100 @@
+-- Testcase --
+import * as client from 'client';
+
+let captured = [];
+
+/* Injected fake transport: mirrors new_client(url, auth, cb), records for
+ * assertions, and synchronously drives data_eof like the real uclient. */
+let fake_new_client = function(url, auth, cb) {
+	let rec = null;
+
+	function make() {
+		return {
+			url: url,
+			cb: cb,
+			ssl: null,
+			req: null,
+			freed: false,
+			set_timeout: function(ms) { rec.timeout = ms; },
+			ssl_init: function(opts) { rec.ssl = opts; return true; },
+			read: function() { return null; },
+			status: function() { return { status: 200, eof: true }; },
+			free: function() { rec.freed = true; },
+			request: function(opts) {
+				rec.req = opts;
+				push(captured, rec);
+				cb.data_eof();
+			},
+		};
+	}
+
+	rec = make();
+	return rec;
+};
+
+let cl = client.create({
+	base_url: 'https://203.0.113.1:9552',
+	tls: {
+		cacert: '/etc/mielofon/ca.pem',
+		cert: '/etc/mielofon/agent.cer',
+		key: '/etc/mielofon/agent.key',
+	},
+	timeout_ms: 40000,
+	new_client: fake_new_client,
+});
+
+let done = false;
+
+client.post_json(cl, '/v1/agent/register', {
+	agent: 'spoke-1',
+	links: [ { from: 'spoke-1', to: 'hub-a', interface: 'awg_hub_a' } ],
+}, function(err, status, raw) {
+	done = true;
+});
+
+if (!done)
+	die('post_json did not complete synchronously under fake transport');
+
+if (length(captured) != 1)
+	die('expected one request, got ' + length(captured));
+
+let rec = captured[0];
+
+if (rec.url != 'https://203.0.113.1:9552/v1/agent/register')
+	die('url mismatch: ' + rec.url);
+
+if (rec.ssl == null)
+	die('ssl_init not called');
+
+if (rec.ssl.cert_file != '/etc/mielofon/agent.cer')
+	die('cert_file mismatch: ' + rec.ssl.cert_file);
+
+if (rec.ssl.key_file != '/etc/mielofon/agent.key')
+	die('key_file mismatch: ' + rec.ssl.key_file);
+
+if (length(rec.ssl.ca_files) != 1 || rec.ssl.ca_files[0] != '/etc/mielofon/ca.pem')
+	die('ca_files mismatch');
+
+if (!rec.ssl.verify)
+	die('verify not enabled');
+
+let payload = json(rec.req.post_data);
+
+if (payload == null || payload.agent != 'spoke-1')
+	die('post_data agent mismatch: ' + rec.req.post_data);
+
+if (length(payload.links) != 1)
+	die('post_data links mismatch');
+
+if (payload.links[0].interface != 'awg_hub_a')
+	die('post_data link mismatch');
+
+if (!rec.freed)
+	die('client not freed after completion');
+
+print('OK');
+-- Expect stdout --
+OK
+-- Expect exitcode --
+0
+-- End --

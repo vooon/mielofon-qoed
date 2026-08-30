@@ -33,6 +33,7 @@ endef
 
 define Package/mielofon-controller/conffiles
 /etc/mielofon/mielofon-controller.toml
+/etc/mielofon/
 endef
 
 # This repo is both the source and the feed; build from the working tree

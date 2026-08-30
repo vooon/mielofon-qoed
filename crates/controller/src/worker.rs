@@ -7,7 +7,8 @@
 use crate::model::LinkKey;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, VecDeque};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
+use tokio::sync::Notify;
 
 /// Probe tier.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
@@ -65,11 +66,31 @@ impl Worker {
 #[derive(Default)]
 pub struct WorkerRegistry {
     inner: Mutex<HashMap<String, Worker>>,
+    notify_map: Mutex<HashMap<String, Arc<Notify>>>,
 }
 
 impl WorkerRegistry {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// The per-agent wake-up handle used by `/v1/agent/command` long-poll.
+    /// The scheduler signals it after queuing work.
+    pub fn notify(&self, agent: &str) -> Arc<Notify> {
+        let mut map = self.notify_map.lock().expect("workers lock poisoned");
+        map.entry(agent.to_string())
+            .or_insert_with(|| Arc::new(Notify::new()))
+            .clone()
+    }
+
+    /// Queue a command for an agent and wake its long-poll waiter.
+    pub fn push(&self, agent: &str, cmd: WorkCmd) {
+        let mut map = self.inner.lock().expect("workers lock poisoned");
+        if let Some(w) = map.get_mut(agent) {
+            w.queue.push_back(cmd);
+            drop(map);
+            self.notify(agent).notify_waiters();
+        }
     }
 
     /// Register (or refresh) an agent and its managed links. Returns true when
@@ -150,14 +171,6 @@ impl WorkerRegistry {
         let mut map = self.inner.lock().expect("workers lock poisoned");
         if let Some(w) = map.get_mut(agent) {
             w.applied_sent.insert(link.id(), cost);
-        }
-    }
-
-    /// Queue a command for an agent.
-    pub fn push(&self, agent: &str, cmd: WorkCmd) {
-        let mut map = self.inner.lock().expect("workers lock poisoned");
-        if let Some(w) = map.get_mut(agent) {
-            w.queue.push_back(cmd);
         }
     }
 
