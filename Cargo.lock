@@ -700,7 +700,7 @@ checksum = "cf8baf1c55e62ffcace7a9f06f4bd9cd3f0c4beb022d3b367256b91b87513d98"
 
 [[package]]
 name = "mielofon-controller"
-version = "0.1.0"
+version = "0.2.1"
 dependencies = [
  "anyhow",
  "axum",
@@ -712,7 +712,7 @@ dependencies = [
  "rustls-pemfile",
  "serde",
  "serde_json",
- "thiserror 1.0.69",
+ "thiserror 2.0.20",
  "tokio",
  "tokio-rustls",
  "toml",
@@ -722,7 +722,7 @@ dependencies = [
 
 [[package]]
 name = "mielofon-otel"
-version = "0.1.0"
+version = "0.2.1"
 dependencies = [
  "anyhow",
  "opentelemetry",
@@ -731,7 +731,7 @@ dependencies = [
  "opentelemetry_sdk",
  "serde",
  "serde_json",
- "thiserror 1.0.69",
+ "thiserror 2.0.20",
  "tokio",
  "tracing",
  "tracing-opentelemetry",

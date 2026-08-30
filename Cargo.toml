@@ -47,5 +47,5 @@ tracing-opentelemetry = "0.33"
 opentelemetry-semantic-conventions = "0.32"
 
 # Error / libc
-thiserror = "1"
+thiserror = "2"
 anyhow = "1"
