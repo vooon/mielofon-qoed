@@ -96,6 +96,7 @@ https://ucode.mein.io (Usage, Syntax, module-{core,log,uci,ubus,uloop,uclient}).
 - Never edit credential/config files or fabricate/overwrite credentials unless the user explicitly asks.
 - Preserve user data and configuration; ask before changing if in doubt. Do not undo user choices in favor of your own approach without discussing first.
 - Keep links absolute unless requested otherwise; prefer minimal, targeted patches.
+- Every text file must end with a final newline (`\n`) — no trailing-newline-less files.
 
 ## Commit messages
 - Conventional Commits: `<type>(<scope>): <description>` (see https://www.conventionalcommits.org/en/v1.0.0/#summary).
