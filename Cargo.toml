@@ -17,7 +17,7 @@ mielofon-otel = { path = "crates/mielofon-otel" }
 
 # Async runtime / HTTP
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "net", "time"] }
-axum = { version = "0.7", features = ["http1", "tokio"] }
+axum = { version = "0.8", features = ["http1", "tokio"] }
 tower = { version = "0.5", features = ["util"] }
 http = "1"
 serde = { version = "1", features = ["derive"] }
