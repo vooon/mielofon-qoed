@@ -13,4 +13,5 @@ pub mod remote;
 pub mod scheduler;
 pub mod state;
 pub mod tls;
+pub mod tracectx;
 pub mod worker;

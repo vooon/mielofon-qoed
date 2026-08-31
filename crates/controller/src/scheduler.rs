@@ -47,11 +47,15 @@ fn plan_tick(state: &AppState) {
             .workers
             .always_due(&agent, &link, now, ALWAYS_INTERVAL)
         {
+            let span =
+                tracing::info_span!("agent.command", agent=%agent, tier="always", link=%link_id);
+            let traceparent = span.in_scope(crate::tracectx::current_traceparent);
             let cmd = WorkCmd::Probe {
                 id: cmd_id(),
                 tier: Tier::Always,
                 token: None,
                 link: link.clone(),
+                traceparent,
             };
             // push() dedups per (link, tier); stamp issued only when queued.
             if state.workers.push(&agent, cmd) {
@@ -65,11 +69,14 @@ fn plan_tick(state: &AppState) {
             .throughput_due(&agent, &link, now, THROUGHPUT_INTERVAL)
         {
             if let Ok(lease) = state.fence.acquire(&agent, &link_id, FENCE_TTL_SECS) {
+                let span = tracing::info_span!("agent.command", agent=%agent, tier="throughput", link=%link_id);
+                let traceparent = span.in_scope(crate::tracectx::current_traceparent);
                 let cmd = WorkCmd::Probe {
                     id: cmd_id(),
                     tier: Tier::Throughput,
                     token: Some(lease.token),
                     link: link.clone(),
+                    traceparent,
                 };
                 if state.workers.push(&agent, cmd) {
                     state
@@ -83,10 +90,13 @@ fn plan_tick(state: &AppState) {
         if let Some(rec) = state.kv.get(&link) {
             if let Some(cost) = rec.ospf_cost {
                 if state.workers.applied_sent(&agent, &link) != Some(cost) {
+                    let span = tracing::info_span!("agent.command", agent=%agent, kind="apply", link=%link_id);
+                    let traceparent = span.in_scope(crate::tracectx::current_traceparent);
                     let cmd = WorkCmd::ApplyCost {
                         id: cmd_id(),
                         link: link.clone(),
                         cost,
+                        traceparent,
                     };
                     state.workers.push(&agent, cmd);
                     state.workers.set_applied_sent(&agent, &link, cost);

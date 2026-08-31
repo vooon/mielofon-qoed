@@ -822,6 +822,8 @@ dependencies = [
  "clap",
  "http",
  "mielofon-otel",
+ "opentelemetry",
+ "opentelemetry_sdk",
  "prometheus",
  "rustls",
  "rustls-pemfile",
@@ -833,6 +835,7 @@ dependencies = [
  "toml",
  "tower",
  "tracing",
+ "tracing-opentelemetry",
  "uuid",
 ]
 

@@ -74,8 +74,14 @@ pub fn install(
         info!("OTEL enabled but no signal endpoint configured");
     }
 
+    // Effective service identity: config wins, caller-provided is the fallback.
+    let service_name = cfg
+        .service_name
+        .clone()
+        .unwrap_or_else(|| service_name.to_string());
+
     let resource = Resource::builder()
-        .with_service_name(service_name.to_string())
+        .with_service_name(service_name.clone())
         .with_attribute(opentelemetry::KeyValue::new(
             "service.version",
             service_version.to_string(),

@@ -28,11 +28,18 @@ pub enum WorkCmd {
         #[serde(skip_serializing_if = "Option::is_none")]
         token: Option<String>,
         link: LinkKey,
+        /// W3C `traceparent` of the dispatch span, echoed back by the agent so
+        /// the reply/report spans join the same trace.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        traceparent: Option<String>,
     },
     ApplyCost {
         id: String,
         link: LinkKey,
         cost: u32,
+        /// W3C `traceparent` of the dispatch span (see above).
+        #[serde(skip_serializing_if = "Option::is_none")]
+        traceparent: Option<String>,
     },
 }
 
@@ -307,6 +314,7 @@ mod tests {
                 tier: Tier::Always,
                 token: None,
                 link: link(),
+                traceparent: None,
             },
         );
         assert_eq!(r.drain("spoke-1").len(), 1);
@@ -331,6 +339,7 @@ mod tests {
             tier: Tier::Always,
             token: None,
             link: link(),
+            traceparent: None,
         };
         // Same (link, tier) queued repeatedly → only one makes it in.
         assert!(r.push("spoke-1", probe("a")));
@@ -349,6 +358,7 @@ mod tests {
                 tier: Tier::Throughput,
                 token: Some("tok".into()),
                 link: link(),
+                traceparent: None,
             },
         );
         // Re-register (e.g. agent reconnect) clears anything queued while away.
@@ -362,6 +372,7 @@ mod tests {
                 tier: Tier::Always,
                 token: None,
                 link: link(),
+                traceparent: None,
             },
         );
         assert_eq!(r.drain("spoke-1").len(), 1);

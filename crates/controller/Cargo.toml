@@ -21,6 +21,9 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 toml = { workspace = true }
 tracing = { workspace = true }
+tracing-opentelemetry = { workspace = true }
+opentelemetry = { workspace = true }
+opentelemetry_sdk = { workspace = true }
 prometheus = { workspace = true }
 thiserror = { workspace = true }
 anyhow = { workspace = true }

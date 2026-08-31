@@ -245,6 +245,7 @@ pub async fn register_agent(
                     id: uuid::Uuid::new_v4().to_string(),
                     link: link.clone(),
                     cost,
+                    traceparent: None,
                 });
             }
         }
@@ -334,13 +335,31 @@ pub enum AgentReply {
         state: ProbeState,
         #[serde(default)]
         token: Option<String>,
+        /// Echo of the dispatch span's W3C `traceparent`; the ingest span is
+        /// re-parented under it so command→agent→result forms one trace.
+        #[serde(default)]
+        traceparent: Option<String>,
     },
     Applied {
         agent: String,
         id: String,
         link: LinkKey,
         cost: u32,
+        /// Echo of the dispatch span's W3C `traceparent`.
+        #[serde(default)]
+        traceparent: Option<String>,
     },
+}
+
+/// Run `f` inside a span whose W3C parent is `traceparent`, when present.
+/// Returns the span's return value.
+fn with_traceparent<T>(traceparent: Option<&str>, f: impl FnOnce() -> T) -> T {
+    let span = tracing::info_span!("agent.report");
+    use tracing_opentelemetry::OpenTelemetrySpanExt;
+    if let Some(cx) = crate::tracectx::parent_context(traceparent) {
+        let _ = span.set_parent(cx);
+    }
+    span.in_scope(f)
 }
 
 /// `/v1/agent/reply`: agent→controller results for previously issued commands.
@@ -362,22 +381,25 @@ pub async fn agent_reply(
             util_mbps,
             state: probe_state,
             token,
+            traceparent,
         } => {
-            let (quality, ospf_cost) = ingest_quality(
-                &state,
-                Measure {
-                    link,
-                    ts,
-                    rtt_ms,
-                    loss_pct,
-                    rr_tps,
-                    tcp_mbps,
-                    udp_mbps,
-                    util_mbps,
-                    probe_state,
-                    token,
-                },
-            );
+            let (quality, ospf_cost) = with_traceparent(traceparent.as_deref(), || {
+                ingest_quality(
+                    &state,
+                    Measure {
+                        link,
+                        ts,
+                        rtt_ms,
+                        loss_pct,
+                        rr_tps,
+                        tcp_mbps,
+                        udp_mbps,
+                        util_mbps,
+                        probe_state,
+                        token,
+                    },
+                )
+            });
             Json(serde_json::json!({
                 "ok": true, "id": id, "quality": quality, "ospf_cost": ospf_cost,
             }))
@@ -387,8 +409,11 @@ pub async fn agent_reply(
             id,
             link,
             cost,
+            traceparent,
         } => {
-            state.workers.set_applied_sent(&agent, &link, cost);
+            with_traceparent(traceparent.as_deref(), || {
+                state.workers.set_applied_sent(&agent, &link, cost);
+            });
             Json(serde_json::json!({"ok": true, "id": id}))
         }
     }

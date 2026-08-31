@@ -85,6 +85,11 @@ function reply(cmd, obj, done)
 	obj.agent = cfg.agent;
 	obj.id = cmd.id;
 
+	// Echo the dispatch span's traceparent so the controller can correlate
+	// this reply back into the originating trace.
+	if (cmd.traceparent != null)
+		obj.traceparent = cmd.traceparent;
+
 	post_json(client, '/v1/agent/reply', obj, function(err, status) {
 		if (err || status != 200)
 			log.WARN('reply %s failed: %s / %s\n', cmd.id, err, status);
