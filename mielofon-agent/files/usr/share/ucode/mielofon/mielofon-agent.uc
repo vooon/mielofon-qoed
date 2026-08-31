@@ -10,6 +10,9 @@
  */
 
 import * as log from 'log';
+import { ulog_open, ULOG_SYSLOG, LOG_DAEMON } from 'log';
+
+ulog_open(ULOG_SYSLOG, LOG_DAEMON, 'mielofon-agent');
 import { cursor } from 'uci';
 import * as uloop from 'uloop';
 import { create as create_client, post_json } from './client.uc';
