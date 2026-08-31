@@ -44,15 +44,19 @@ function govalue(value)
 
 function metric(name, mtype, help, skipdecl)
 {
-	let func;
 	let decl = skipdecl == true ? false : true;
 
-	let yld = function(labels, value) {
+	/* NOTE: avoid `func = yld; return func` self-referential closures here.
+	 * This ucode build runs with reference counting only (GC is opt-in via
+	 * the -g flag), so a closure that references its own binding is cyclic
+	 * and leaks every time render() runs. Nothing here chains on the yielded
+	 * function's return value, so the closure just returns nothing. */
+	return function(labels, value) {
 		let v = govalue(value);
 
 		if (v == null) {
 			puts('skipping metric: unsupported value for ' + name);
-			return func;
+			return;
 		}
 
 		let labels_str = '';
@@ -88,11 +92,7 @@ function metric(name, mtype, help, skipdecl)
 		}
 
 		puts(name + labels_str + ' ' + v);
-		return func;
 	};
-
-	func = yld;
-	return func;
 }
 
 function gauge(name, help, skipdecl) { return metric(name, 'gauge', help, skipdecl); }

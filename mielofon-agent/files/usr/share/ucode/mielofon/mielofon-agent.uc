@@ -271,5 +271,11 @@ if (metrics.init()) {
 	uloop.interval(metrics.interval() * 1000, function() { metrics.write(); });
 }
 
+/* This ucode build runs with reference counting only: the mark-and-sweep GC
+ * is opt-in (the `-g` CLI flag or explicit gc()). The agent is meant to run
+ * for months on a router, so run a periodic GC as a safety net against any
+ * reference cycle that sneaks in — every 15 minutes is cheap and bounds RSS. */
+uloop.interval(900000, gc);
+
 register();
 uloop.run();
