@@ -8,7 +8,6 @@
 //!   - `apply_cost` when the derived cost differs from what the agent last was
 //!     told to apply.
 
-use crate::model::LinkKey;
 use crate::state::AppState;
 use crate::worker::{Tier, WorkCmd};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -49,13 +48,15 @@ fn plan_tick(state: &AppState) {
             .always_due(&agent, &link, now, ALWAYS_INTERVAL)
         {
             let cmd = WorkCmd::Probe {
-                id: cmd_id(&agent, &link, "always"),
+                id: cmd_id(),
                 tier: Tier::Always,
                 token: None,
                 link: link.clone(),
             };
-            state.workers.push(&agent, cmd);
-            state.workers.mark_issued(&agent, &link, Tier::Always, now);
+            // push() dedups per (link, tier); stamp issued only when queued.
+            if state.workers.push(&agent, cmd) {
+                state.workers.mark_issued(&agent, &link, Tier::Always, now);
+            }
         }
 
         // Throughput tier (intrusive) — only when the fence is free.
@@ -65,15 +66,16 @@ fn plan_tick(state: &AppState) {
         {
             if let Ok(lease) = state.fence.acquire(&agent, &link_id, FENCE_TTL_SECS) {
                 let cmd = WorkCmd::Probe {
-                    id: cmd_id(&agent, &link, "throughput"),
+                    id: cmd_id(),
                     tier: Tier::Throughput,
                     token: Some(lease.token),
                     link: link.clone(),
                 };
-                state.workers.push(&agent, cmd);
-                state
-                    .workers
-                    .mark_issued(&agent, &link, Tier::Throughput, now);
+                if state.workers.push(&agent, cmd) {
+                    state
+                        .workers
+                        .mark_issued(&agent, &link, Tier::Throughput, now);
+                }
             }
         }
 
@@ -82,7 +84,7 @@ fn plan_tick(state: &AppState) {
             if let Some(cost) = rec.ospf_cost {
                 if state.workers.applied_sent(&agent, &link) != Some(cost) {
                     let cmd = WorkCmd::ApplyCost {
-                        id: cmd_id(&agent, &link, "apply"),
+                        id: cmd_id(),
                         link: link.clone(),
                         cost,
                     };
@@ -94,7 +96,8 @@ fn plan_tick(state: &AppState) {
     }
 }
 
-/// Deterministic, non-cryptographic command id (a key for idempotency/otel).
-fn cmd_id(agent: &str, link: &LinkKey, kind: &str) -> String {
-    format!("{kind}/{}/{}", agent, link.id())
+/// Fresh, globally-unique command id per dispatch (like an `X-Request-Id`),
+/// so command/reply correlation is unambiguous even across re-dispatch.
+fn cmd_id() -> String {
+    uuid::Uuid::new_v4().to_string()
 }

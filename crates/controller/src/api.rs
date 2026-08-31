@@ -242,7 +242,7 @@ pub async fn register_agent(
             if state.workers.applied_sent(&agent, &link) != Some(cost) {
                 state.workers.set_applied_sent(&agent, &link, cost);
                 commands.push(crate::worker::WorkCmd::ApplyCost {
-                    id: format!("apply/{}/{}", agent, link.id()),
+                    id: uuid::Uuid::new_v4().to_string(),
                     link: link.clone(),
                     cost,
                 });

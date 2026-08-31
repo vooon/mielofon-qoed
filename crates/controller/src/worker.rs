@@ -83,22 +83,39 @@ impl WorkerRegistry {
             .clone()
     }
 
-    /// Queue a command for an agent and wake its long-poll waiter.
-    pub fn push(&self, agent: &str, cmd: WorkCmd) {
+    /// Queue a command for an agent and wake its long-poll waiter. A probe is
+    /// not enqueued if one of the same (link, tier) is already pending — the
+    /// agent only ever has one outstanding probe per kind per link, so an
+    /// unresponsive agent cannot accumulate an unbounded backlog. Returns true
+    /// when the command was actually enqueued (so the caller stamps "issued").
+    pub fn push(&self, agent: &str, cmd: WorkCmd) -> bool {
         let mut map = self.inner.lock().expect("workers lock poisoned");
         if let Some(w) = map.get_mut(agent) {
+            let key = cmd_key(&cmd);
+            if w.queue.iter().any(|c| cmd_key(c) == key) {
+                drop(map);
+                self.notify(agent).notify_waiters();
+                return false;
+            }
             w.queue.push_back(cmd);
             drop(map);
             self.notify(agent).notify_waiters();
+            return true;
         }
+        false
     }
 
     /// Register (or refresh) an agent and its managed links. Returns true when
     /// newly added (so the scheduler seeds the policy snapshot).
+    ///
+    /// A registration starts a clean slate: any work the scheduler queued while
+    /// the agent was away is dropped, so a (re)connecting agent only receives
+    /// commands issued after it came back.
     pub fn register(&self, agent: &str, links: Vec<LinkKey>) -> bool {
         let mut map = self.inner.lock().expect("workers lock poisoned");
         let w = map.entry(agent.to_string()).or_default();
         w.last_seen = now_secs();
+        w.queue.clear();
         if links.is_empty() {
             return false;
         }
@@ -210,6 +227,14 @@ fn now_secs() -> u64 {
         .as_secs()
 }
 
+/// Dedup key for a queued command: link id + kind/tier.
+fn cmd_key(c: &WorkCmd) -> (String, String) {
+    match c {
+        WorkCmd::Probe { link, tier, .. } => (link.id(), format!("probe/{tier:?}")),
+        WorkCmd::ApplyCost { link, .. } => (link.id(), "apply".into()),
+    }
+}
+
 /// Request bodies for the agent endpoints.
 #[derive(Debug, Deserialize)]
 pub struct RegisterReq {
@@ -295,5 +320,50 @@ mod tests {
         assert_eq!(r.applied_sent("spoke-1", &link()), None);
         r.set_applied_sent("spoke-1", &link(), 50);
         assert_eq!(r.applied_sent("spoke-1", &link()), Some(50));
+    }
+
+    #[test]
+    fn push_dedups_same_link_tier() {
+        let r = WorkerRegistry::new();
+        r.register("spoke-1", vec![link()]);
+        let probe = |n: &str| WorkCmd::Probe {
+            id: n.into(),
+            tier: Tier::Always,
+            token: None,
+            link: link(),
+        };
+        // Same (link, tier) queued repeatedly → only one makes it in.
+        assert!(r.push("spoke-1", probe("a")));
+        assert!(!r.push("spoke-1", probe("b")));
+        assert_eq!(r.drain("spoke-1").len(), 1);
+    }
+
+    #[test]
+    fn register_drops_stale_queued_work() {
+        let r = WorkerRegistry::new();
+        r.register("spoke-1", vec![link()]);
+        r.push(
+            "spoke-1",
+            WorkCmd::Probe {
+                id: "stale".into(),
+                tier: Tier::Throughput,
+                token: Some("tok".into()),
+                link: link(),
+            },
+        );
+        // Re-register (e.g. agent reconnect) clears anything queued while away.
+        assert!(!r.register("spoke-1", vec![link()]));
+        assert!(r.drain("spoke-1").is_empty());
+        // New work is accepted after the reset.
+        r.push(
+            "spoke-1",
+            WorkCmd::Probe {
+                id: "fresh".into(),
+                tier: Tier::Always,
+                token: None,
+                link: link(),
+            },
+        );
+        assert_eq!(r.drain("spoke-1").len(), 1);
     }
 }

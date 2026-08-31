@@ -108,27 +108,9 @@ fn now_secs() -> u64 {
         .as_secs()
 }
 
-/// Minimal v4-style token generator (no external dep). Not cryptographically
-/// meaningful for the fence; it only guards accidental release mistmatching.
+/// Fresh unique token for a newly acquired lease.
 fn uuid4() -> String {
-    let mut buf = String::new();
-    for (i, b) in rand_bytes(16).iter().enumerate() {
-        if i == 4 || i == 6 || i == 8 || i == 10 {
-            buf.push('-');
-        }
-        let _ = std::fmt::Write::write_fmt(&mut buf, format_args!("{:02x}", b));
-    }
-    buf
-}
-
-/// Simple non-crypto 16 random bytes from `/dev/urandom`.
-fn rand_bytes(n: usize) -> Vec<u8> {
-    use std::io::Read;
-    let mut out = vec![0u8; n];
-    if let Ok(mut f) = std::fs::File::open("/dev/urandom") {
-        let _ = f.read_exact(&mut out);
-    }
-    out
+    uuid::Uuid::new_v4().to_string()
 }
 
 #[cfg(test)]
