@@ -409,6 +409,14 @@ pub async fn metrics(State(state): State<AppState>) -> impl IntoResponse {
     body.push_str("# HELP mielofon_links number of known links\n# TYPE mielofon_links gauge\n");
     body.push_str(&format!("mielofon_links {}\n", state.kv.len()));
 
+    body.push_str("# HELP mielofon_build_info build and version information\n# TYPE mielofon_build_info gauge\n");
+    body.push_str(&format!(
+        "mielofon_build_info{{version=\"{}\",revision=\"{}\",rustc=\"{}\"}} 1\n",
+        env!("MIELOFON_VERSION"),
+        env!("MIELOFON_GIT_REV"),
+        env!("MIELOFON_RUSTC"),
+    ));
+
     for (key, rec) in state.kv.all() {
         let labels = format!(
             "from=\"{}\",to=\"{}\",iface=\"{}\"",
