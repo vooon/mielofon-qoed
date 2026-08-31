@@ -7,6 +7,13 @@
  * (or applies the OSPF cost it is told to apply), and replies on
  * `POST /v1/agent/reply`, echoing each command's job id. No scheduling or
  * policy logic lives here.
+ *
+ * Control flow is a single flat pump: the controller's commands are drained
+ * one at a time from `queue`, each producing exactly one reply, and when the
+ * queue is empty the long poll is re-armed. `step()` is the one and only
+ * continuation, invoked from every async completion — no nested callback /
+ * closure chain is ever constructed, so the stack depth and the number of
+ * live closures stay constant under an indefinite poll loop.
  */
 
 import * as log from 'log';
@@ -25,6 +32,11 @@ import { float, parse_json, default_agent_name } from './utils.uc';
 let cfg = {};
 let links = [];
 let client = null;
+
+/* State-machine state. `queue` holds commands drained from the controller.
+ * Exactly one async step (a reply post or the long poll) is in flight at any
+ * time, so no per-command closure chain is ever kept alive. */
+let queue = [];
 
 function load_config()
 {
@@ -80,7 +92,8 @@ function find_link(iface)
 	return null;
 };
 
-function reply(cmd, obj, done)
+/* Stamp agent/id/traceparent on a reply and POST it; cb runs when done. */
+function reply_send(cmd, obj, cb)
 {
 	obj.agent = cfg.agent;
 	obj.id = cmd.id;
@@ -94,16 +107,76 @@ function reply(cmd, obj, done)
 		if (err || status != 200)
 			log.WARN('reply %s failed: %s / %s\n', cmd.id, err, status);
 
-		done();
+		cb();
 	});
 };
 
-function always_and_reply(cmd, link, done)
+/* Execute one command; always completes via `cb`. */
+function run_command(cmd, cb)
 {
+	if (!cmd || !cmd.type) {
+		cb();
+		return;
+	}
+
+	if (cmd.type == 'apply_cost') {
+		let link = find_link(cmd.link.interface);
+
+		if (!link || !link.cost_command) {
+			reply_send(cmd, { kind: 'applied', link: cmd.link, cost: cmd.cost }, cb);
+			return;
+		}
+
+		apply_cost(link.cost_command, link.interface, cmd.cost, function(err) {
+			reply_send(cmd, {
+				kind: 'applied',
+				link: cmd.link,
+				cost: cmd.cost,
+				note: err || null,
+			}, cb);
+		});
+
+		return;
+	}
+
+	if (cmd.type != 'probe') {
+		log.WARN('unknown command type %s\n', cmd.type);
+		cb();
+		return;
+	}
+
+	let link = find_link(cmd.link.interface);
+
+	if (!link) {
+		log.WARN('unknown interface %s, skipping\n', cmd.link.interface);
+		cb();
+		return;
+	}
+
+	if (cmd.tier == 'throughput') {
+		run_throughput(link, cfg, function(e, r) {
+			metrics.record_throughput(link, r);
+
+			reply_send(cmd, {
+				kind: 'probe',
+				link: { from: link.from, to: link.to, interface: link.interface },
+				rtt_ms: null,
+				loss_pct: null,
+				rr_tps: null,
+				token: cmd.token || null,
+				util_mbps: r.util_mbps,
+				tcp_mbps: r.tcp_mbps,
+				state: r.busy ? 'busy' : 'quiet',
+			}, cb);
+		});
+
+		return;
+	}
+
 	run_always(link, cfg, function(e, r) {
 		metrics.record_always(link, r);
 
-		reply(cmd, {
+		reply_send(cmd, {
 			kind: 'probe',
 			link: { from: link.from, to: link.to, interface: link.interface },
 			rtt_ms: r.rtt_ms,
@@ -112,94 +185,30 @@ function always_and_reply(cmd, link, done)
 			token: null,
 			util_mbps: 0,
 			state: 'quiet',
-		}, done);
+		}, cb);
 	});
 };
 
-function throughput_and_reply(cmd, link, done)
+function enqueue_commands(v)
 {
-	run_throughput(link, cfg, function(e, r) {
-		metrics.record_throughput(link, r);
+	let cmds = (v && v.commands) ? v.commands : [];
 
-		reply(cmd, {
-			kind: 'probe',
-			link: { from: link.from, to: link.to, interface: link.interface },
-			rtt_ms: null,
-			loss_pct: null,
-			rr_tps: null,
-			token: cmd.token || null,
-			util_mbps: r.util_mbps,
-			tcp_mbps: r.tcp_mbps,
-			state: r.busy ? 'busy' : 'quiet',
-		}, done);
-	});
+	for (let c in cmds)
+		push(queue, c);
 };
 
-function apply_cost_and_reply(cmd, done)
+/* Single flat continuation: pop the next command if any, otherwise re-arm
+ * the long poll. Never recurses through a chain of per-command closures. */
+function step()
 {
-	let link = find_link(cmd.link.interface);
+	if (length(queue)) {
+		let cmd = shift(queue);
 
-	if (!link || !link.cost_command) {
-		reply(cmd, { kind: 'applied', link: cmd.link, cost: cmd.cost }, done);
+		run_command(cmd, function() { step(); });
 		return;
 	}
 
-	apply_cost(link.cost_command, link.interface, cmd.cost, function(err) {
-		reply(cmd, {
-			kind: 'applied',
-			link: cmd.link,
-			cost: cmd.cost,
-			note: err || null,
-		}, done);
-	});
-};
-
-function handle_command(cmd, done)
-{
-	if (!cmd || !cmd.type) {
-		done();
-		return;
-	}
-
-	if (cmd.type == 'apply_cost') {
-		apply_cost_and_reply(cmd, done);
-		return;
-	}
-
-	if (cmd.type == 'probe') {
-		let link = find_link(cmd.link.interface);
-
-		if (!link) {
-			log.WARN('unknown interface %s, skipping\n', cmd.link.interface);
-			done();
-			return;
-		}
-
-		if (cmd.tier == 'throughput')
-			throughput_and_reply(cmd, link, done);
-		else
-			always_and_reply(cmd, link, done);
-
-		return;
-	}
-
-	log.WARN('unknown command type %s\n', cmd.type);
-	done();
-};
-
-function handle_commands(cmds, done)
-{
-	function next(i)
-	{
-		if (i >= length(cmds)) {
-			done();
-			return;
-		}
-
-		handle_command(cmds[i], function() { next(i + 1); });
-	}
-
-	next(0);
+	command_step();
 };
 
 function register()
@@ -214,12 +223,12 @@ function register()
 	post_json(client, '/v1/agent/register', body, function(err, status, raw) {
 		if (err || status != 200) {
 			log.WARN('register failed: %s / %s — retrying\n', err, status);
-			uloop.timer(3000, function() { register(); });
+			uloop.timer(3000, register);
 			return;
 		}
 
-		let v = parse_json(raw);
-		handle_commands((v && v.commands) ? v.commands : [], command_step);
+		enqueue_commands(parse_json(raw));
+		step();
 	});
 };
 
@@ -230,12 +239,12 @@ function command_step()
 	post_json(client, '/v1/agent/command', body, function(err, status, raw) {
 		if (err || status != 200) {
 			log.WARN('command long-poll failed: %s / %s — retrying\n', err, status);
-			uloop.timer(2000, function() { command_step(); });
+			uloop.timer(2000, command_step);
 			return;
 		}
 
-		let v = parse_json(raw);
-		handle_commands((v && v.commands) ? v.commands : [], command_step);
+		enqueue_commands(parse_json(raw));
+		step();
 	});
 };
 
@@ -255,7 +264,11 @@ client = create_client({
 
 if (metrics.init()) {
 	metrics.write();
-	uloop.interval(metrics.interval(), function() { metrics.write(); });
+	/* metrics.interval() returns seconds; uloop.interval() wants ms. A unit
+	 * mismatch here makes the textfile rewrite every 20 ms (~50/s) instead of
+	 * every 20 s — rendering allocates gauges/buffers faster than the ucode GC
+	 * reclaims them, which shows up as an unbounded RSS climb. */
+	uloop.interval(metrics.interval() * 1000, function() { metrics.write(); });
 }
 
 register();

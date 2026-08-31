@@ -1,0 +1,74 @@
+-- Testcase --
+import * as client from 'client';
+
+let created = 0;
+let sequence = [];
+
+let fake_new_client = function(url, auth, cb) {
+	created++;
+
+	let rec = null;
+
+	function make() {
+		return {
+			url: url,
+			cb: cb,
+			freed: false,
+			body: '',
+			ssl_init: function(opts) { return true; },
+			set_timeout: function(ms) { rec.timeout = ms; },
+			read: function() { return rec.body; },
+			status: function() { return { status: 200, eof: true }; },
+			free: function() { rec.freed = true; },
+			request: function(opts) {
+				rec.body = rec.url_body;
+				cb.data_read();
+				cb.data_eof();
+			},
+		};
+	}
+
+	rec = make();
+	rec.url_body = substr(url, index(url, '/v1/agent/') + 10);
+	return rec;
+};
+
+let cl = client.create({
+	base_url: 'https://203.0.113.1:9552',
+	tls: { cacert: '/etc/mielofon/ca.pem', cert: '/etc/mielofon/agent.cer', key: '/etc/mielofon/agent.key' },
+	timeout_ms: 40000,
+	new_client: fake_new_client,
+});
+
+/* Two sequential requests on one client: the second must not trip the
+ * single-in-flight guard from a stale `active` flag (module-scoped handler /
+ * req_state regression). */
+let done1 = false;
+let done2 = false;
+
+client.post_json(cl, '/v1/agent/register', { agent: 'spoke-1' }, function(err, status, raw) {
+	done1 = true;
+	sequence[1] = raw;
+
+	/* fire the next request inside the first callback (reentrancy) */
+	client.post_json(cl, '/v1/agent/command', { agent: 'spoke-1' }, function(err2, status2, raw2) {
+		done2 = true;
+		sequence[2] = raw2;
+	});
+});
+
+if (!done1 || !done2)
+	die('sequential requests did not complete: ' + done1 + '/' + done2);
+
+if (created != 2)
+	die('expected two transports, got ' + created);
+
+if (sequence[1] != 'register' || sequence[2] != 'command')
+	die('response routing mismatch: ' + sequence[1] + '/' + sequence[2]);
+
+print('OK\n');
+-- Expect stdout --
+OK
+-- Expect exitcode --
+0
+-- End --
