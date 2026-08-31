@@ -17,7 +17,8 @@ use clap::{Parser, Subcommand};
 #[derive(Parser)]
 #[command(
     name = "mielofon-controller",
-    about = "Distributed QoE link-quality coordination controller"
+    about = "Distributed QoE link-quality coordination controller",
+    version
 )]
 #[command(subcommand_required = true, arg_required_else_help = true)]
 struct Cli {
@@ -114,18 +115,18 @@ async fn run_daemon(path: &str) -> anyhow::Result<()> {
         let _ = admin_srv.await;
     });
 
-    // Bind members + clients (mTLS).
-    let members_handle = tokio::spawn(serve_mtls(
+    // Bind cluster + client (mTLS).
+    let cluster_handle = tokio::spawn(serve_mtls(
         state.clone(),
-        api::members_router(),
+        api::cluster_router(),
         server_tls.clone(),
-        state.cfg.listeners.members(),
+        state.cfg.listeners.cluster(),
     ));
-    let clients_handle = tokio::spawn(serve_mtls(
+    let client_handle = tokio::spawn(serve_mtls(
         state.clone(),
-        api::clients_router(),
+        api::client_router(),
         server_tls.clone(),
-        state.cfg.listeners.clients(),
+        state.cfg.listeners.client(),
     ));
 
     state.set_ready(true);
@@ -137,8 +138,8 @@ async fn run_daemon(path: &str) -> anyhow::Result<()> {
 
     tokio::select! {
         _ = admin_handle => {}
-        _ = members_handle => {}
-        _ = clients_handle => {}
+        _ = cluster_handle => {}
+        _ = client_handle => {}
         _ = tokio::signal::ctrl_c() => {
             info!("shutdown signal received");
         }

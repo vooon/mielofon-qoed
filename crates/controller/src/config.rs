@@ -7,13 +7,22 @@ use std::net::{IpAddr, SocketAddr};
 
 /// Listener bind addresses. Defaults bind admin to loopback and the mTLS
 /// listeners to all interfaces.
+///
+/// Naming follows etcd: the cluster endpoint carries node-to-node gossip
+/// (the old `members` listener), the client endpoint serves agents.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
 pub struct Listeners {
-    pub members_addr: IpAddr,
-    pub members_port: u16,
-    pub clients_addr: IpAddr,
-    pub clients_port: u16,
+    /// etcd-style cluster endpoint (node-to-node gossip over mTLS).
+    #[serde(alias = "members_addr")]
+    pub cluster_addr: IpAddr,
+    #[serde(alias = "members_port")]
+    pub cluster_port: u16,
+    /// etcd-style client endpoint (agent API over mTLS).
+    #[serde(alias = "clients_addr")]
+    pub client_addr: IpAddr,
+    #[serde(alias = "clients_port")]
+    pub client_port: u16,
     pub admin_addr: IpAddr,
     pub admin_port: u16,
 }
@@ -21,10 +30,10 @@ pub struct Listeners {
 impl Default for Listeners {
     fn default() -> Self {
         Listeners {
-            members_addr: "0.0.0.0".parse().unwrap(),
-            members_port: 9551,
-            clients_addr: "0.0.0.0".parse().unwrap(),
-            clients_port: 9552,
+            cluster_addr: "0.0.0.0".parse().unwrap(),
+            cluster_port: 9551,
+            client_addr: "0.0.0.0".parse().unwrap(),
+            client_port: 9552,
             admin_addr: "127.0.0.1".parse().unwrap(),
             admin_port: 9553,
         }
@@ -32,11 +41,11 @@ impl Default for Listeners {
 }
 
 impl Listeners {
-    pub fn members(&self) -> SocketAddr {
-        SocketAddr::new(self.members_addr, self.members_port)
+    pub fn cluster(&self) -> SocketAddr {
+        SocketAddr::new(self.cluster_addr, self.cluster_port)
     }
-    pub fn clients(&self) -> SocketAddr {
-        SocketAddr::new(self.clients_addr, self.clients_port)
+    pub fn client(&self) -> SocketAddr {
+        SocketAddr::new(self.client_addr, self.client_port)
     }
     pub fn admin(&self) -> SocketAddr {
         SocketAddr::new(self.admin_addr, self.admin_port)
@@ -83,33 +92,51 @@ impl Default for Tls {
 /// addresses. The fabric runs over the operator WAN, not the mesh underlay.
 pub type Members = BTreeMap<String, IpAddr>;
 
-/// Quality classification thresholds (conservative defaults per handoff).
+/// One quality class. Each dimension is optional: an unset threshold does not
+/// constrain that dimension. `rtt_ms`/`loss_pct` are upper bounds (lower is
+/// better); `rr_tps`/`tcp_mbps` are lower bounds (higher is better). `ospf_cost`
+/// is the metric advertised for links classified into this class.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+pub struct QualityClass {
+    pub rtt_ms: Option<f64>,
+    pub loss_pct: Option<f64>,
+    pub rr_tps: Option<f64>,
+    pub tcp_mbps: Option<f64>,
+    pub ospf_cost: u32,
+}
+
+impl QualityClass {
+    fn with(rtt_ms: f64, loss_pct: f64, rr_tps: f64, tcp_mbps: f64, ospf_cost: u32) -> Self {
+        QualityClass {
+            rtt_ms: Some(rtt_ms),
+            loss_pct: Some(loss_pct),
+            rr_tps: Some(rr_tps),
+            tcp_mbps: Some(tcp_mbps),
+            ospf_cost,
+        }
+    }
+}
+
+/// Quality classification. A measurement is assigned the worst class whose
+/// threshold it crosses; only dims listed per class take part. Conservative
+/// defaults (per handoff): good/acceptable/poor/bad with increasing costs.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
 pub struct Quality {
-    pub rtt_good_ms: f64,
-    pub rtt_poor_ms: f64,
-    pub rtt_bad_ms: f64,
-    pub loss_good_pct: f64,
-    pub loss_poor_pct: f64,
-    pub rr_tps_good: f64,
-    pub rr_tps_poor: f64,
-    pub tcp_mbps_good: f64,
-    pub tcp_mbps_poor: f64,
+    pub good: QualityClass,
+    pub acceptable: QualityClass,
+    pub poor: QualityClass,
+    pub bad: QualityClass,
 }
 
 impl Default for Quality {
     fn default() -> Self {
         Quality {
-            rtt_good_ms: 40.0,
-            rtt_poor_ms: 90.0,
-            rtt_bad_ms: 250.0,
-            loss_good_pct: 1.0,
-            loss_poor_pct: 5.0,
-            rr_tps_good: 50.0,
-            rr_tps_poor: 20.0,
-            tcp_mbps_good: 10.0,
-            tcp_mbps_poor: 2.0,
+            good: QualityClass::with(40.0, 1.0, 50.0, 10.0, 10),
+            acceptable: QualityClass::with(90.0, 2.5, 35.0, 5.0, 20),
+            poor: QualityClass::with(250.0, 5.0, 20.0, 2.0, 50),
+            bad: QualityClass::with(500.0, 10.0, 10.0, 1.0, 100),
         }
     }
 }
@@ -173,8 +200,8 @@ mod tests {
     #[test]
     fn defaults_are_sane() {
         let c = Config::default();
-        assert_eq!(c.listeners.members_port, 9551);
-        assert_eq!(c.listeners.clients_port, 9552);
+        assert_eq!(c.listeners.cluster_port, 9551);
+        assert_eq!(c.listeners.client_port, 9552);
         assert!(c.listeners.admin_addr.is_loopback());
         assert_eq!(c.listeners.admin_port, 9553);
     }

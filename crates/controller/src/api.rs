@@ -201,7 +201,7 @@ fn ingest_quality(state: &AppState, m: Measure) -> (Option<Quality>, Option<u32>
 
     let quality = quality::classify(&state.cfg.quality, &rec);
     rec.quality = quality;
-    rec.ospf_cost = quality.map(quality::cost_for_quality);
+    rec.ospf_cost = quality.map(|q| quality::cost_for_quality(&state.cfg.quality, q));
 
     let ospf_cost = rec.ospf_cost; // Copy
     let link_id = m.link.id();
@@ -530,13 +530,40 @@ pub async fn ping(State(state): State<AppState>) -> Json<serde_json::Value> {
 
 // ── Router assembly ───────────────────────────────────────────────────────
 
-pub fn members_router() -> Router<AppState> {
+/// One-line HTTP access log: listener label (cluster/client/admin), method,
+/// uri, status, duration. `/healthz` and `/readyz` are health-check hot paths
+/// (proxies poll them constantly) and are downgraded to `debug` to avoid
+/// flooding the daemon log.
+async fn access_log(
+    server: &'static str,
+    req: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    let method = req.method().clone();
+    let uri = req.uri().clone();
+    let probe = uri.path() == "/healthz" || uri.path() == "/readyz";
+    let started = std::time::Instant::now();
+    let resp = next.run(req).await;
+    let status = resp.status().as_u16();
+    let ms = started.elapsed().as_millis();
+    if probe {
+        tracing::debug!(server, %method, %uri, status, ms, "http");
+    } else {
+        tracing::info!(server, %method, %uri, status, ms, "http");
+    }
+    resp
+}
+
+pub fn cluster_router() -> Router<AppState> {
     Router::new()
         .route("/v1/ping", get(ping))
         .route("/v1/gossip/exchange", post(crate::gossip::exchange))
+        .layer(axum::middleware::from_fn(|req, next| {
+            access_log("cluster", req, next)
+        }))
 }
 
-pub fn clients_router() -> Router<AppState> {
+pub fn client_router() -> Router<AppState> {
     Router::new()
         .route("/v1/quality", post(post_quality))
         .route("/v1/fence/acquire", post(fence_acquire))
@@ -546,6 +573,9 @@ pub fn clients_router() -> Router<AppState> {
         .route("/v1/agent/command", post(command_long_poll))
         .route("/v1/agent/reply", post(agent_reply))
         .route("/v1/apply/ack", post(apply_ack))
+        .layer(axum::middleware::from_fn(|req, next| {
+            access_log("client", req, next)
+        }))
 }
 
 pub fn admin_router() -> Router<AppState> {
@@ -558,6 +588,9 @@ pub fn admin_router() -> Router<AppState> {
         .route("/v1/quality", get(get_quality))
         .route("/v1/policy", get(get_policy))
         .route("/v1/status", get(get_status))
+        .layer(axum::middleware::from_fn(|req, next| {
+            access_log("admin", req, next)
+        }))
 }
 
 // ── Prometheus counters ────────────────────────────────────────────────────

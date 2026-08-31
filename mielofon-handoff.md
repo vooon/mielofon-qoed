@@ -185,10 +185,33 @@ ca = "/etc/mielofon/ca.pem"
 cert = "/etc/mielofon/node.pem"
 key = "/etc/mielofon/node.key"
 
-[quality]
-rtt_good_ms = 40
-rtt_poor_ms = 90
-...
+[quality.good]
+rtt_ms = 40
+loss_pct = 1.0
+rr_tps = 50.0
+tcp_mbps = 10.0
+ospf_cost = 10
+
+[quality.acceptable]
+rtt_ms = 90
+loss_pct = 2.5
+rr_tps = 35.0
+tcp_mbps = 5.0
+ospf_cost = 20
+
+[quality.poor]
+rtt_ms = 250
+loss_pct = 5.0
+rr_tps = 20.0
+tcp_mbps = 2.0
+ospf_cost = 50
+
+[quality.bad]
+rtt_ms = 500
+loss_pct = 10.0
+rr_tps = 10.0
+tcp_mbps = 1.0
+ospf_cost = 100
 ```
 
 Agent config (`/etc/config/mielofon-agent` example) uses the same placeholder pattern.

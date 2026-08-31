@@ -69,7 +69,7 @@ pub async fn gossip_loop(state: AppState, client: Arc<rustls::ClientConfig>) {
             let started = std::time::Instant::now();
             match crate::remote::post(
                 *addr,
-                state.cfg.listeners.members_port,
+                state.cfg.listeners.cluster_port,
                 client.clone(),
                 &url_path,
                 &body,

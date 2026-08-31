@@ -20,25 +20,46 @@ gossip_interval_secs = 5
 "hub-e" = "198.51.100.9"
 
 [listeners]
-# members = mTLS cluster gossip (default port 9551)
-# clients = mTLS agent API       (default port 9552)
-# admin   = loopback dashboard + /metrics + /healthz + /readyz (default port 9553)
+# cluster = mTLS node-to-node gossip (etcd-style cluster endpoint, default 9551)
+# client  = mTLS agent API          (etcd-style client endpoint,  default 9552)
+# admin   = loopback dashboard + /metrics + /healthz + /readyz    (default 9553)
 
 [tls]
 ca = "/etc/mielofon/ca.pem"
 cert = "/etc/mielofon/node.pem"
 key = "/etc/mielofon/node.key"
 
-[quality]
-rtt_good_ms = 40
-rtt_poor_ms = 90
-rtt_bad_ms = 250
-loss_good_pct = 1.0
-loss_poor_pct = 5.0
-rr_tps_good = 50.0
-rr_tps_poor = 20.0
-tcp_mbps_good = 10.0
-tcp_mbps_poor = 2.0
+# Quality classes. Each class pins only the dimensions it wants to enforce
+# (unset = not constraining): rtt_ms/loss_pct are upper bounds (≤ is ok),
+# rr_tps/tcp_mbps are lower bounds (≥ is ok). A link gets the worst class
+# whose threshold it crosses; ospf_cost is advertised for links in that class.
+[quality.good]
+rtt_ms = 40
+loss_pct = 1.0
+rr_tps = 50.0
+tcp_mbps = 10.0
+ospf_cost = 10
+
+[quality.acceptable]
+rtt_ms = 90
+loss_pct = 2.5
+rr_tps = 35.0
+tcp_mbps = 5.0
+ospf_cost = 20
+
+[quality.poor]
+rtt_ms = 250
+loss_pct = 5.0
+rr_tps = 20.0
+tcp_mbps = 2.0
+ospf_cost = 50
+
+[quality.bad]
+rtt_ms = 500
+loss_pct = 10.0
+rr_tps = 10.0
+tcp_mbps = 1.0
+ospf_cost = 100
 
 # Observability. OTLP/HTTP (no gRPC). A signal exports only when it is enabled
 # AND its resolved endpoint (per-signal override, else the global endpoint) is
