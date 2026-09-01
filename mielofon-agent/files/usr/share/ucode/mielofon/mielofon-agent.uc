@@ -21,9 +21,11 @@ import { ulog_open, ULOG_SYSLOG, LOG_DAEMON } from 'log';
 
 ulog_open(ULOG_SYSLOG, LOG_DAEMON, 'mielofon-agent');
 import { cursor } from 'uci';
+import { connect as ubus_connect } from 'ubus';
 import * as uloop from 'uloop';
 import { create as create_client, post_json } from './client.uc';
 import { new_client } from './transport.uc';
+import { discover as discover_links } from './autodiscover.uc';
 import { run_always, run_throughput } from './probes.uc';
 import { apply_cost } from './cost.uc';
 import * as metrics from './metrics.uc';
@@ -52,12 +54,21 @@ function load_config()
 	let cert = ctx.get('mielofon-agent', 'main', 'cert');
 	let key = ctx.get('mielofon-agent', 'main', 'key');
 
+	let proto = ctx.get('mielofon-agent', 'main', 'ospf_protocol');
+	if (proto == null || !length(proto))
+		proto = 'mesh_v3';
+
 	cfg = {
 		agent: agent,
 		url: controller_url,
 		cacert: cacert,
 		cert: cert,
 		key: key,
+		ospf_protocol: proto,
+		bgp_peer_suffix: ctx.get('mielofon-agent', 'main', 'bgp_peer_suffix') || null,
+		iface_prefix: ctx.get('mielofon-agent', 'main', 'iface_prefix') || 'awg_',
+		excludes: [],
+		cost_command: ctx.get('mielofon-agent', 'main', 'cost_command') || null,
 		timeout_ms: int(ctx.get('mielofon-agent', 'main', 'command_timeout_ms') || '30000'),
 		quiet_max_mbps: float(ctx.get('mielofon-agent', 'main', 'quiet_max_mbps'), 15.0),
 		ping_count: int(ctx.get('mielofon-agent', 'main', 'ping_count') || '3'),
@@ -66,21 +77,43 @@ function load_config()
 		tcp_duration: ctx.get('mielofon-agent', 'main', 'tcp_duration') || '4',
 	};
 
-	ctx.foreach('mielofon-agent', 'link', function(s) {
-		if (!s.interface || !s.target)
+	/* Interfaces never to manage (probe/cost), autodiscovered or re-registered
+	 * on reload. */
+	ctx.foreach('mielofon-agent', 'exclude', function(s) {
+		if (!s.interface)
 			return true;
 
-		push(links, {
-			from: s.from || agent,
-			to: s.to,
-			interface: s.interface,
-			target: s.target,
-			source: s.source || null,
-			cost_command: s.cost_command || null,
-		});
-
+		push(cfg.excludes, s.interface);
 		return true;
 	});
+};
+
+/* Discover links from BIRD/OSPF on `bird status` + per-interface netifd
+ * status. Fills module-level `links`; falls back to an empty set (recovery
+ * happens on the next re-register/retry cycle). */
+function refresh_links()
+{
+	let bus = ubus_connect();
+
+	if (bus == null) {
+		log.WARN('ubus connect failed during link discovery\n');
+		links = [];
+		return;
+	}
+
+	let all = discover_links(cfg, {
+		status: function() {
+			return bus.call('bird', 'status', {});
+		},
+		iface: function(name) {
+			return bus.call('network.interface.' + name, 'status', {});
+		},
+	});
+
+	links = all;
+
+	for (let l in all)
+		l.from = cfg.agent;
 };
 
 function find_link(iface)
@@ -122,12 +155,12 @@ function run_command(cmd, cb)
 	if (cmd.type == 'apply_cost') {
 		let link = find_link(cmd.link.interface);
 
-		if (!link || !link.cost_command) {
+		if (!link || !cfg.cost_command) {
 			reply_send(cmd, { kind: 'applied', link: cmd.link, cost: cmd.cost }, cb);
 			return;
 		}
 
-		apply_cost(link.cost_command, link.interface, cmd.cost, function(err) {
+		apply_cost(cfg.cost_command, cmd.link.interface, cmd.cost, function(err) {
 			reply_send(cmd, {
 				kind: 'applied',
 				link: cmd.link,
@@ -214,6 +247,10 @@ function step()
 function register()
 {
 	let body = { agent: cfg.agent, links: [] };
+
+	/* Re-discover on every attempt: picks up links added/reconfigured and
+	 * self-heals if a transient BIRD/ubus outage previously returned none. */
+	refresh_links();
 
 	for (let l in links)
 		push(body.links, { from: l.from, to: l.to, interface: l.interface });

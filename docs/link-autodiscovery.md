@@ -35,15 +35,18 @@ agent here consumes the API):
    `type == ptp` without falling back to raw queries. (No per-interface
    `area` parsing is needed — see scoping below.)
 
-2. **Add a dedicated cost method** (name TBD, e.g. `set_cost` / `set_ospf_cost`):
+2. **Add a dedicated cost method** — implemented as `bird set_ospf_cost`:
 
    ```
-   bird set_cost { "protocol": "mesh_v3", "interface": "awg_hub_a", "cost": 25 }
+   bird set_ospf_cost { "interface": "awg_hub_a", "cost": 25 }
    ```
-   → runs the feed's BIRD reconfigure path for the given OSPF interface cost
-   and returns `{ code, stdout }`. The agent no longer builds a BIRD CLI
-   string (removes the per-link `cost_command` and the generic `query`
-   passthrough from the agent).
+   → runs the feed's BIRD reconfigure path (derives the runtime config from
+   `/etc/bird.conf`, validates with `configure check`, applies it) and
+   returns `{ code, stdout }`. The agent no longer builds a BIRD CLI string:
+   it calls this method directly, falling back to an operator `cost_command`
+   template via `bird query` on devices with an older rpcd-mod-bird. The
+   `protocol` argument is NOT part of the implemented method — the plugin
+   binds the interface by name in the config.
 
 ## Discovery pipeline (startup, once)
 
@@ -88,11 +91,11 @@ rpcd.
 | field | source | notes |
 |---|---|---|
 | `interface` | `status.ospf[]` iface of `cfg.ospf_protocol`, `type==ptp` | `dummy`/broadcast + unrelated OSPF excluded by protocol/type |
-| `to` (peer) | BGP peer protocol name (`peer_<node>_<domain>`) | strip `peer_` + `cfg.bgp_peer_suffix` (`_vehq_ru`) → `node`; match `awg_<token>` ↔ `<token>` |
+| `to` (peer) | BGP peer protocol name (`peer_<node>_<domain>`) | strip `peer_` + `cfg.bgp_peer_suffix` (`_example_com`) → `node`; match `awg_<token>` ↔ `<token>` |
 | `from` | `[main] agent_name` (unchanged) | |
 | `source` | `network.interface.<iface>` `ipv6-address[]` | first global addr; no `ip`/shell |
 | `target` | far side of the `/127` | flip last address bit of `source` |
-| `cost` | new rpcd `set_cost` method | no raw BIRD command in UCI |
+| `cost` | `bird set_ospf_cost {interface, cost}` | no raw BIRD command in UCI; falls back to `cost_command` only on older rpcd |
 
 Matching note: OSPF neighbor rows give `fe80::` link-locals, not the mesh
 global probe target — so `target` is derived from the interface's own `/127`,
@@ -134,24 +137,28 @@ config exclude
 
 ## Out of scope / open questions
 
-- **rpcd method name/args**: `set_cost` vs `set_ospf_cost`; whether it takes
-  `protocol` or defaults to the single OSPF instance. Decide alongside the
-  feed plugin work.
-- **`.status` iface `type` field**: exact name (e.g. `type` vs `iftype`)
-  fixed when the rpcd change lands; agent follows the real field name.
+- **Cost application**: `bird set_ospf_cost {interface, cost}` is now the
+  agent's primary path (no `protocol` arg — the plugin binds by interface
+  name); the `cost_command` template remains only as a fallback for devices
+  with an older rpcd-mod-bird. Drop the fallback when 0.4.0 is rolled out.
+- **`type` field in `status`**: implemented; agents tolerate both
+  `type == "ptp"` filtering and its absence (older rpcd) via the BGP-peer
+  match.
 - **BGP-name ↔ node-name suffix**: `bgp_peer_suffix` required initially;
   revisit once stable.
-- **Discovery cadence**: startup + `reload_service` first; periodic refresh
-  (pick up added links) as a cheap follow-up.
+- **Discovery cadence**: startup + `reload_service` + every register retry;
+  periodic refresh (pick up added links without a restart) is a cheap
+  follow-up.
 - **Per-interface overrides** (target/cost) deliberately deferred; `config
   link` remains the escape hatch if ever needed.
 
 ## Verification plan
 
-- Extend `tests/` with fixtures of `bird status` JSON (two OSPF protocols,
-  ptp + broadcast ifaces, BGP peers) and `network.interface.*` JSON; assert
-  the discovered link set equals the reference `{from,to,interface}` triples.
+- `tests/05_autodiscover/01_discover` covers: two OSPF protocols (mesh +
+  office), ptp/broadcast selection, exclude list, BGP-name → node matching,
+  `/127` target derivation, and the `discover()` end-to-end path with a fake
+  bus.
 - Manual on a node with two OSPF instances: discovery must yield only
-  `mesh_v3`/area ptp links, matching today's hand-written UCI minus `dummy_*`.
+  `mesh_v3` ptp links, matching today's hand-written UCI minus `dummy_*`.
 - Sanitized throughout: `awg_hub_a`, `peer_hub_a_example_com`, RFC 5737 /
   `fd00::/8` doc ranges.

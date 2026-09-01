@@ -3,6 +3,13 @@
 # The agent pulls commands from the controller over a long-lived mTLS
 # long-poll, runs the probe it is told to run, and applies the OSPF cost it
 # is told to apply. All addresses below are placeholders (RFC 5737 / RFC 3849).
+#
+# Links are AUTO-DISCOVERED from BIRD/OSPF, not listed per-link: the agent
+# reads `bird status` (rpcd-mod-bird) and matches the mesh OSPF protocol's
+# point-to-point interfaces against BGP peer protocol names
+# (`peer_<node>_<domain>`) to recover the peer; probe source/target come from
+# the interface's own IPv6 address (far side of the /127). Only an exclude
+# list is needed when a discovered interface must stay unmanaged.
 
 config agent 'main'
 	option enabled '1'
@@ -16,6 +23,18 @@ config agent 'main'
 	option key     '/etc/mielofon/agent.key'
 	# Long-poll hold for /v1/agent/command (ms). 0 = plain drain.
 	option command_timeout_ms '30000'
+	# OSPF protocol whose point-to-point interfaces are managed links.
+	# Nodes may run unrelated OSPF instances; they are ignored.
+	option ospf_protocol 'mesh_v3'
+	# Node name = BGP protocol name minus this suffix:
+	#   peer_hub_a_example_com minus "_example_com" -> "hub_a"
+	option bgp_peer_suffix '_example_com'
+	# Interface prefix stripped to match an interface to a peer node name:
+	#   awg_hub_a minus "awg_" -> "hub_a"
+	option iface_prefix 'awg_'
+	# Global BIRD cost command template; {interface} and {cost} are
+	# substituted and run via `ubus call bird query`. Empty = no-op ack.
+	# option cost_command 'configure'
 	# Quiet threshold in Mbps: above this the throughput tier is skipped.
 	option quiet_max_mbps '15'
 	option ping_count '3'
@@ -27,21 +46,7 @@ config agent 'main'
 	# option prometheus_textfile '/run/prometheus/textfile/mielofon-agent.prom'
 	option prometheus_interval '20'
 
-# One section per managed outgoing link. The controller references the link
-# only by {from,to,interface}; probe target/source are device-local and never
-# leave the router.
-config link 'sample_hub_link'
-	option from 'spoke-1'
-	option to 'hub-a'
-	option interface 'awg_hub_a'
-	option target '2001:db8::1'
-	# option source '2001:db8::10'
-	# BIRD CLI command run on apply_cost via `ubus call bird query`. `{interface}`
-	# and `{cost}` are substituted. Empty = no-op ack (non-BIRD hosts).
-	# option cost_command 'configure'
-
-# config link
-# 	option from 'spoke-1'
-# 	option to 'hub-b'
-# 	option interface 'awg_hub_b'
-# 	option target '2001:db8::2'
+# Discovered interfaces to leave unmanaged (never probed or cost-driven).
+# Matches on interface name.
+# config exclude
+# 	option interface 'dummy_awg'

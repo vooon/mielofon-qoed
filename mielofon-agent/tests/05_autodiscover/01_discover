@@ -1,0 +1,118 @@
+-- Testcase --
+import * as ad from 'autodiscover';
+
+/* Node with two OSPF instances: mesh (ptp awg_* + broadcast stub) and an
+ * unrelated IPv4 OSPF on eth2/eth3 which must be ignored. */
+let status = {
+	ospf: [
+		{
+			protocol: 'mesh_v3',
+			ip_version: '6',
+			interfaces: [
+				{ interface: 'dummy_awg', type: 'broadcast', cost: 10 },
+				{ interface: 'awg_hub_a', type: 'ptp', cost: 10 },
+				{ interface: 'awg_hub_b', type: 'ptp', cost: 10 },
+				{ interface: 'awg_legacy', type: 'ptp', cost: 10 },
+			],
+		},
+		{
+			protocol: 'werther_v2',
+			ip_version: '4',
+			interfaces: [
+				{ interface: 'eth2', type: 'ptp', cost: 10 },
+				{ interface: 'eth3', type: 'ptp', cost: 10 },
+			],
+		},
+	],
+	bgp: [
+		{ name: 'peer_hub_a_example_com', state: 'Established' },
+		{ name: 'peer_hub_b_example_com', state: 'Established' },
+		/* hub_c has a BGP session but no awg_* OSPF interface: no link */
+		{ name: 'peer_hub_c_example_com', state: 'Established' },
+	],
+};
+
+let cfg = {
+	ospf_protocol: 'mesh_v3',
+	bgp_peer_suffix: '_example_com',
+	iface_prefix: 'awg_',
+	excludes: [ 'awg_legacy' ],
+};
+
+let links = ad.select_links(status, cfg);
+
+if (length(links) != 2)
+	die('expected 2 links, got ' + length(links) +
+	    ' (broadcast stub + excluded + eth* must be filtered)');
+
+if (links[0].interface != 'awg_hub_a' || links[0].to != 'hub_a')
+	die('link[0] mismatch: ' + links[0].interface + ' -> ' + links[0].to);
+
+if (links[1].interface != 'awg_hub_b' || links[1].to != 'hub_b')
+	die('link[1] mismatch: ' + links[1].interface + ' -> ' + links[1].to);
+
+/* peer_node_name / iface_token */
+if (ad.peer_node_name('peer_hub_a_example_com', '_example_com') != 'hub_a')
+	die('peer_node_name failed');
+
+if (ad.peer_node_name('peer_hub_a_example_com', null) != 'hub_a_example_com')
+	die('peer_node_name without suffix failed');
+
+if (ad.peer_node_name('other_proto', '_example_com') != null)
+	die('non-peer protocol name should be rejected');
+
+if (ad.iface_token('awg_hub_a', 'awg_') != 'hub_a')
+	die('iface_token failed');
+
+/* derive_address: pick the /127 global, target = far side */
+let net = {
+	'ipv6-address': [
+		{ address: 'fe80::4243:40:1', mask: 64 },
+		{ address: 'fd00:0:0:1::40:1', mask: 127 },
+	],
+};
+
+let a = ad.derive_address(net);
+
+if (a == null)
+	die('derive_address returned null');
+
+if (a.source != 'fd00:0:0:1::40:1')
+	die('source mismatch: ' + a.source);
+
+if (a.target != 'fd00:0:0:1::40:0')
+	die('target mismatch (far /127 side expected): ' + a.target);
+
+/* no usable global v6 -> null */
+if (ad.derive_address({ 'ipv6-address': [ { address: 'fe80::1', mask: 64 } ] }) != null)
+	die('link-local-only interface should be rejected');
+
+if (ad.derive_address(null) != null)
+	die('null interface status should be rejected');
+
+/* discover() end-to-end with a fake bus */
+let bus = {
+	status: function() { return status; },
+	iface: function(name) {
+		return {
+			'ipv6-address': [
+				{ address: 'fd00:0:0:1::40:1', mask: 127 },
+			],
+		};
+	},
+};
+
+let all = ad.discover(cfg, bus);
+
+if (length(all) != 2)
+	die('discover() expected 2 links, got ' + length(all));
+
+if (all[0].source != 'fd00:0:0:1::40:1' || all[0].target != 'fd00:0:0:1::40:0')
+	die('discover() address derivation mismatch');
+
+print('OK\n');
+-- Expect stdout --
+OK
+-- Expect exitcode --
+0
+-- End --

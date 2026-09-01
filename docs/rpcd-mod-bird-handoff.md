@@ -1,169 +1,104 @@
-# rpcd-mod-bird change spec (handoff for the plugin maintainer)
+# rpcd-mod-bird change notes (as implemented)
 
-This document is written for the developer/agent who will modify
-`rpcd-mod-bird`. It is self-contained: no prior mielofon knowledge is
-assumed beyond the plugin itself. It is the rpcd-side half of the
-mielofon agent link auto-discovery design; see `docs/link-autodiscovery.md`
-for the consumer-side rationale.
+Background: this is the rpcd-side half of the mielofon agent link
+auto-discovery design; see `docs/link-autodiscovery.md` for the
+consumer-side rationale. Both changes below are **implemented** in the feed;
+this file records the contract they established (so the mielofon side can
+pin against the real field/method names). Sanitized examples throughout
+(`mesh_v3`, `awg_hub_a`, `peer_hub_a_example_com`).
 
-## Scope
+## Scope (both done)
 
-Change the ucode rpcd plugin `rpcd-mod-bird` (file `src/bird.uc` in the
-feed, installed to `/usr/share/rpcd/ucode/bird.uc`) twice:
+1. `bird status` reports each OSPF interface's **type** (`ptp`/`broadcast`/…).
+2. A dedicated **cost method** `bird set_ospf_cost` changes an OSPF
+   interface cost without the caller building a raw BIRD CLI string.
 
-1. Extend the OSPF interface parser so `bird status` reports each OSPF
-   interface's **type** (`ptp` / `broadcast` / …).
-2. Add a dedicated **cost-set method** so callers can change an OSPF
-   interface cost without building a raw BIRD CLI command string.
+`bird query` and `bird status` remain **backwards compatible**; the parser
+helpers moved to `src/birdconfig.uc` (pure, unit-tested with the plugin).
 
-Keep the existing `bird query` and `bird status` methods **backwards
-compatible** — other consumers use them.
+## Change 1 — OSPF interface `type`
 
-## Conventions
-
-- The plugin registers one ubus object, `bird`, with methods `query` and
-  `status`, exposed like:
-
-  ```ucode
-  const methods = { query: {...}, status: {...} };
-  return { bird: methods };
-  ```
-
-- BIRD socket I/O and reply handling are already implemented
-  (`birdRaw()`, `replyComplete()`, `cleanReply()`) — reuse them. Do not add
-  another raw-socket path.
-- Parsing uses ucode `match()`/POSIX regex, consistent with
-  `prometheus-node-exporter-ucode`'s `bird.uc` (must not differ between
-  musl/glibc).
-
-## Change 1 — report OSPF interface `type`
-
-### Where
-
-`parseOspfInterfaces()` in `src/bird.uc`.
-
-### Current shape (do not break)
-
-Per OSPF interface, `show ospf interface <proto>` prints blocks like
-(sanitized):
+`parseOspfInterfaces()` (`src/birdconfig.uc`) emits `{interface, type, cost}`.
 
 ```
  Interface awg_hub_a (IID 0)
  	Type: ptp
- 	Area: 0.0.0.0 (0)
- 	State: PtP
  	Cost: 10
 ```
-
-The parser currently emits only:
-
-```json
-{ "interface": "awg_hub_a", "cost": 10 }
-```
-
-### New shape
-
-Emit the `Type:` line as well, when present:
+→
 
 ```json
 { "interface": "awg_hub_a", "type": "ptp", "cost": 10 }
 ```
 
-- Add a case like `if ((m = match(l, /^Type:[ \t]+(\S+)/))) ifa.type = m[1];`
-  alongside the existing `^Interface` / `^Cost` cases (the loop already
-  strips leading whitespace per line).
-- All three fields optional on parse: if `Type:` is missing for some output
-  variant, `type` is simply `null` — never fail the whole `status` call.
-- `broadcast`, `ptp`, `nbma` etc. come straight through as-is; **no
-  normalization**.
+Every field is optional: an interface without a `Type:` line yields
+`type == null` and is **not** an error. Values pass through as-is
+(`ptp`, `broadcast`, `nbma`, …), no normalization.
 
-## Change 2 — new `bird set_cost` method
+## Change 2 — `bird set_ospf_cost` (implemented contract)
 
-### Purpose
-
-Currently the consumer (mielofon agent) applies cost by sending a raw BIRD
-command through `bird query` (a `configure`-style string with
-`{interface}`/`{cost}` placeholders it builds itself). That leaks feed
-internals into the agent and forces per-link command templates in consumer
-config. Replace that path with a structured method.
-
-### Contract
+Args (mirror `query`'s object style; `socket` optional):
 
 ```ucode
-set_cost: {
-    args: {
-        protocol: '',      // OSPF protocol name, e.g. "mesh_v3" (see below)
-        interface: '',     // e.g. "awg_hub_a"
-        cost: 0,           // integer OSPF cost
-        socket: '',        // optional, defaults to /run/bird.ctl
-    },
-    call: function(request) { ... },
-}
+set_ospf_cost: { interface: 'awg_hub_a', cost: 25, socket: '/run/bird.ctl' }
 ```
 
-Response (mirror `query`'s shape): success returns
-`{ code: 0, stdout: "<bird output>" }`; any failure (bad args, socket
-error, non-zero BIRD reply) returns `{ code: <non-zero>, stdout: … }` or
-`{ code: 1 }` when the socket is unreachable.
+Return: `{ code, stdout }`, success is `{ code: 0, stdout: "<bird output>" }`
+and:
+- `code 2` — bad args (`interface` empty, `cost` not a 1..65535 integer);
+- `code 3` — the OSPF config editor could not bind the interface;
+- `code 4` — file I/O error (config unreadable/unwritable);
+- `code 5` — another reconfiguration in progress (flock busy);
+- `code 1` — BIRD `configure check`/apply rejected the config.
 
-### Behaviour
+Behaviour (OpenWrt-specific, kept for whoever maintains the feed later):
 
-1. Validate args: `interface` and `cost` are required; `cost` must be a
-   non-negative integer. Invalid args → `{ code: 2 }`.
-2. Unless `protocol` is given, operate on the single OSPF instance; if more
-   than one OSPF protocol exists and `protocol` is omitted, return
-   `{ code: 3, stdout: "multiple OSPF protocols; specify protocol" }`.
-3. Build and run the BIRD command that sets the OSPF interface cost via the
-   existing `birdRaw()` path. **Use the same reconfiguration mechanism the
-   feed already uses for cost changes** (the same `configure`-style command
-   that today's `cost_command` template produces) — do not invent a new
-   one. Substitute the interface name and the cost value into that command.
-4. Return the cleaned BIRD reply as `stdout` with `code` set from BIRD's
-   reply code (0 on success).
+1. The **pristine** config is `/etc/bird.conf` and is never written.
+2. A runtime config `/tmp/etc/bird.conf` carries cost overrides applied to
+   other links; it is seeded from `/etc/bird.conf` when absent.
+3. The config editor rewrites the OSPF interface cost in place
+   (`editOspfCost`, `src/birdconfig.uc`).
+4. The derived config is validated with `configure check` before being
+   applied with `configure "/tmp/etc/bird.conf"`.
+5. Reconfigurations are serialized with flock on `/run/bird.reconfigure.lock`
+   (BIRD has a single config and one undo level).
+6. BIRD 3.x forgets the last `configure` filename on a bare `birdc
+   configure`/SIGHUP (re-reads `/etc/bird.conf`), so to reset applied costs
+   the operator deletes `/tmp/etc/bird.conf`.
+7. **No `protocol` argument**: the method binds the interface by name within
+   the config; the consumer passes `interface` + `cost` only.
 
-### Notes / decisions to settle
+The method is idempotent: setting the same cost twice is a plain success.
 
-- Method name here is `set_cost`; if the feed prefers `set_ospf_cost`,
-  rename consistently (consumer follows the real name — it is parameterized
-  in `docs/link-autodiscovery.md`).
-- Whether `protocol:` is mandatory everywhere or only when ambiguous: pick
-  one and document it; the consumer will always pass it, so either works.
-- Keep `query` untouched — the agent no longer uses it for cost, but it has
-  other consumers.
-- `set_cost` must be idempotent: applying the same cost twice is a no-op
-  success.
+## Consumer notes (agent side)
+
+- The mielofon agent calls `bird set_ospf_cost {interface, cost}`; on
+  devices still running an older rpcd-mod-bird without this method it falls
+  back to `bird query` with an operator `cost_command` template. No raw
+  BIRD CLI construction otherwise.
+- `status.ospf[].interfaces[].type` is used to select `ptp` interfaces;
+  `type == null` (older snapshot) degrades to the BGP-peer-name match.
+- Do not send `protocol` to `set_ospf_cost`.
 
 ## Versioning
 
-This is a feature release of the plugin. Bump `PKG_VERSION` (e.g.
-`0.3.0 → 0.4.0`) in the feed `Makefile`, and update the package `TITLE`/
-`description` to mention `set_cost` and the interface `type` field. The
-consumer pins against these field names; keep `status`/`query` field names
-stable.
+Feature release: `PKG_VERSION` `0.3.0 → 0.4.0`, `TITLE`/`description` now
+mention `set_ospf_cost` and the interface `type` field. Field/method names
+above are stable for the consumer.
 
 ## Verification
 
-- **Unit (parser):** extend the plugin's test approach (if any) or run the
-  new interface, feeding it the `show ospf interface` block above via a
-  fake socket; assert `{interface, type, cost}` come back correctly and that
-  an interface without `Type:` yields `type == null`.
-- **Live (socket):** on a router, `birdc show ospf interface mesh_v3` must
-  match what `ubus call bird status` reports (types present), and each node
-  exposes the known interfaces:
-  - mesh OSPF: interfaces named `awg_*`, `type == "ptp"`, plus a
-    `dummy_*`/`type == "broadcast"` stub;
-  - nodes running a second, unrelated OSPF: those interfaces must appear in
-    a different `status.ospf[]` entry (per `protocol`), so consumers can
-    filter by protocol name.
-- **Live (set_cost):** call
-  `ubus call bird set_cost '{"protocol":"mesh_v3","interface":"<iface>","cost":X}'`
-  then `birdc show ospf interface mesh_v3` and confirm the interface's cost
-  changed; re-apply the old cost to restore.
+- Parser: unit-tested in `src/test` of the feed (also covered by the
+  mielofon agent's `05_autodiscover` fixture for `type` tolerance).
+- Live: `ubus call bird set_ospf_cost '{"interface":"<iface>","cost":X}'`
+  then `birdc show ospf interface mesh_v3` must show the new cost; re-apply
+  the old cost to restore.
+- Live status: `ubus call bird status` per-node must show `awg_*` as
+  `type == "ptp"` (mesh OSPF) and any `dummy_*` as `type == "broadcast"`;
+  unrelated OSPF instances appear in a separate `status.ospf[]` entry.
 
-## Sanitization
+## Deployment status
 
-This feed is private but memorable bits still matter for the consumer's
-public repo. Keep examples generic (`mesh_v3`, `awg_hub_a`,
-`peer_hub_a_example_com`); no real hostnames, ASNs, or IPs in code
-comments, logs, or README. Pipe real data through examples only, never into
-the payload ucode.
+**Not yet deployed** on the target routers (live devices still expose only
+`query` + `status`). The agent tolerates this via the `cost_command`
+fallback; roll out the 0.4.0 plugin, then the agent can drop the fallback.
