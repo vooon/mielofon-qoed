@@ -82,6 +82,7 @@ function load_config()
 		ping_interval: ctx.get('mielofon-agent', 'main', 'ping_interval') || '0.2',
 		rr_duration: ctx.get('mielofon-agent', 'main', 'rr_duration') || '4',
 		tcp_duration: ctx.get('mielofon-agent', 'main', 'tcp_duration') || '4',
+		iperf_port: int(ctx.get('mielofon-agent', 'main', 'iperf_port') || '5201'),
 	};
 
 	/* Interfaces never to manage (probe/cost), autodiscovered or re-registered

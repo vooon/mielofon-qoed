@@ -9,6 +9,9 @@ metrics.counters.probe_ping += 4;
 metrics.counters.probe_netperf += 4;
 metrics.counters.probe_iperf += 1;
 metrics.counters.probe_busy += 2;
+metrics.counters.probe_errors.ping = 1;
+metrics.counters.probe_errors.netperf = 1;
+metrics.counters.probe_errors.iperf = 1;
 metrics.counters.apply_cost += 3;
 metrics.counters.apply_cost_errors += 1;
 
@@ -56,6 +59,9 @@ has('mielofon_agent_probe_total{kind="ping"} 4');
 has('mielofon_agent_probe_total{kind="netperf"} 4');
 has('mielofon_agent_probe_total{kind="iperf"} 1');
 has('mielofon_agent_probe_total{kind="busy"} 2');
+has('mielofon_agent_probe_errors_total{kind="ping"} 1');
+has('mielofon_agent_probe_errors_total{kind="netperf"} 1');
+has('mielofon_agent_probe_errors_total{kind="iperf"} 1');
 has('mielofon_agent_apply_cost_total{result="ok"} 3');
 has('mielofon_agent_apply_cost_total{result="error"} 1');
 

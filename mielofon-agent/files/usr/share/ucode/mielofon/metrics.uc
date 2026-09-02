@@ -36,6 +36,8 @@ export let counters = {
 	probe_busy: 0,          /* throughput probes skipped because link busy */
 	apply_cost: 0,          /* OSPF cost applies that succeeded */
 	apply_cost_errors: 0,   /* OSPF cost applies that failed */
+	/* per-tool probe failures, keyed by kind (ping/netperf/iperf) */
+	probe_errors: {},
 };
 
 /* ---- node-exporter metric formatting (adapted) ---------------------- */
@@ -228,6 +230,7 @@ export function render()
 	 * counter (they are monotonically increasing since agent start). */
 	let cmds = counter('mielofon_agent_commands_total', 'Commands drained from the controller, by outcome.');
 	let probes = counter('mielofon_agent_probe_total', 'Individual probe tool runs.');
+	let perr = counter('mielofon_agent_probe_errors_total', 'Probe tool runs that produced no usable result, by kind.');
 	let cost = counter('mielofon_agent_apply_cost_total', 'OSPF cost applies by outcome.');
 
 	cmds({ result: 'received' }, counters.commands_received);
@@ -238,6 +241,9 @@ export function render()
 	probes({ kind: 'netperf' }, counters.probe_netperf);
 	probes({ kind: 'iperf' }, counters.probe_iperf);
 	probes({ kind: 'busy' }, counters.probe_busy);
+
+	for (let k in counters.probe_errors)
+		perr({ kind: k }, counters.probe_errors[k]);
 
 	cost({ result: 'ok' }, counters.apply_cost);
 	cost({ result: 'error' }, counters.apply_cost_errors);

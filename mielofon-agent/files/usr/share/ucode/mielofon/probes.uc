@@ -151,8 +151,9 @@ function netperf_command(link, cfg)
 function iperf_command(link, cfg)
 {
 	let src = (link.source != null) ? ` -B ${link.source}` : '';
+	let port = (cfg.iperf_port != null && cfg.iperf_port != 5201) ? ` -p ${cfg.iperf_port}` : '';
 
-	return `iperf3 -c ${link.target} -t ${cfg.tcp_duration} -f m -J${src}`;
+	return `iperf3 -c ${link.target} -t ${cfg.tcp_duration} -f m -J${port}${src}`;
 };
 
 /* ── executors (order: everthing above is already declared) ─────────────── */
@@ -166,10 +167,19 @@ export function run_always(link, cfg, cb)
 
 		metrics.counters.probe_netperf++;
 		run(netperf_command(link, cfg), function(rr_err, rr_out) {
+			/* a probe that could not be answered (nothing to measure) is an
+			 * error, distinct from a busy link */
+			if (ping_err || p.rtt == null)
+				metrics.counters.probe_errors.ping = (metrics.counters.probe_errors.ping || 0) + 1;
+
+			let tps = parse_transaction_rate(rr_out);
+			if (rr_err || tps <= 0)
+				metrics.counters.probe_errors.netperf = (metrics.counters.probe_errors.netperf || 0) + 1;
+
 			cb(null, {
 				rtt_ms: (p.rtt != null) ? p.rtt : null,
 				loss_pct: p.loss,
-				rr_tps: parse_transaction_rate(rr_out),
+				rr_tps: tps,
 			});
 		});
 	});
@@ -189,6 +199,9 @@ export function run_throughput(link, cfg, cb)
 	metrics.counters.probe_iperf++;
 	run(iperf_command(link, cfg), function(e, out) {
 		let tcp = parse_iperf3(out);
+
+		if (e || tcp == null)
+			metrics.counters.probe_errors.iperf = (metrics.counters.probe_errors.iperf || 0) + 1;
 
 		cb(null, {
 			busy: (tcp == null),
