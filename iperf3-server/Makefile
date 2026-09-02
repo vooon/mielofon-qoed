@@ -19,9 +19,8 @@ include $(INCLUDE_DIR)/package.mk
 define Package/iperf3-server
   SECTION:=net
   CATEGORY:=Network
-  SUBMENU:=Routing and Redirection
-  TITLE:=Mielofon iperf3 server (mesh throughput probes)
-  URL:=https://github.com/vooon/qoed
+  TITLE:=iperf3 server
+  URL:=https://github.com/vooon/mielofon-qoed
   PKGARCH:=all
   DEPENDS:=+iperf3
 endef
