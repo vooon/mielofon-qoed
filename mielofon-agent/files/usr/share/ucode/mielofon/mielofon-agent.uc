@@ -23,6 +23,7 @@ ulog_open(ULOG_SYSLOG, LOG_DAEMON, 'mielofon-agent');
 import { cursor } from 'uci';
 import { connect as ubus_connect } from 'ubus';
 import * as uloop from 'uloop';
+import * as digest from 'digest';
 import { create as create_client, post_json } from './client.uc';
 import { new_client } from './transport.uc';
 import { discover as discover_links } from './autodiscover.uc';
@@ -39,6 +40,13 @@ let client = null;
  * Exactly one async step (a reply post or the long poll) is in flight at any
  * time, so no per-command closure chain is ever kept alive. */
 let queue = [];
+
+/* Periodic re-discovery: at boot the tunnels/BGP peers come up a few seconds
+ * apart, so the first `register()` may report only a subset of links. These
+ * track the last registered link set so a later refresh can spot a change and
+ * re-register (serialized through the pump, one request in flight at a time). */
+let reg_sig = '';
+let need_register = false;
 
 function load_config()
 {
@@ -233,16 +241,59 @@ function enqueue_commands(v)
 		push(queue, c);
 };
 
-/* Single flat continuation: pop the next command if any, otherwise re-arm
- * the long poll (inlined rather than a separate function because ucode has
- * no hoisting and the two would be mutually recursive). Never recurses
- * through a chain of per-command closures. */
-function step()
+/* Serialized signature of the discovered link set — used to detect when a
+ * periodic refresh observes a change (e.g. a tunnel that was still coming up
+ * at boot) and a re-registration is needed. */
+function links_sig()
 {
+	let s = '';
+
+	for (let l in links)
+		s += l.from + '/' + l.to + '/' + l.interface + '|';
+
+	return digest.sha1(s);
+};
+
+/* Single flat continuation: register when the discovered link set changed
+ * (or on first start), else pop the next command, else re-arm the long poll.
+ * Everything is inlined here because ucode has no hoisting — a chain of
+ * mutually recursive named functions would fail at runtime. Never recurses
+ * through a chain of per-command closures. */
+function pump()
+{
+	if (need_register) {
+		need_register = false;
+
+		let body = { agent: cfg.agent, links: [] };
+
+		/* Re-discover on every attempt: picks up links added/reconfigured
+		 * and self-heals if a transient BIRD/ubus outage returned none. */
+		refresh_links();
+
+		for (let l in links)
+			push(body.links, { from: l.from, to: l.to, interface: l.interface });
+
+		log.NOTE('registering %s with %d links\n', cfg.agent, length(links));
+
+		post_json(client, '/v1/agent/register', body, function(err, status, raw) {
+			if (err || status != 200) {
+				log.WARN('register failed: %s / %s — retrying\n', err, status);
+				uloop.timer(3000, pump);
+				return;
+			}
+
+			reg_sig = links_sig();
+			enqueue_commands(parse_json(raw));
+			pump();
+		});
+
+		return;
+	}
+
 	if (length(queue)) {
 		let cmd = shift(queue);
 
-		run_command(cmd, function() { step(); });
+		run_command(cmd, function() { pump(); });
 		return;
 	}
 
@@ -251,38 +302,23 @@ function step()
 	post_json(client, '/v1/agent/command', body, function(err, status, raw) {
 		if (err || status != 200) {
 			log.WARN('command long-poll failed: %s / %s — retrying\n', err, status);
-			uloop.timer(2000, step);
+			uloop.timer(2000, pump);
 			return;
 		}
 
 		enqueue_commands(parse_json(raw));
-		step();
+		pump();
 	});
 };
 
-function register()
+/* Periodic re-discovery: refresh links and mark for re-registration when the
+ * set changed. The pump serializes the actual POST (single in-flight). */
+function resync()
 {
-	let body = { agent: cfg.agent, links: [] };
-
-	/* Re-discover on every attempt: picks up links added/reconfigured and
-	 * self-heals if a transient BIRD/ubus outage previously returned none. */
 	refresh_links();
 
-	for (let l in links)
-		push(body.links, { from: l.from, to: l.to, interface: l.interface });
-
-	log.NOTE('registering %s with %d links\n', cfg.agent, length(links));
-
-	post_json(client, '/v1/agent/register', body, function(err, status, raw) {
-		if (err || status != 200) {
-			log.WARN('register failed: %s / %s — retrying\n', err, status);
-			uloop.timer(3000, register);
-			return;
-		}
-
-		enqueue_commands(parse_json(raw));
-		step();
-	});
+	if (links_sig() != reg_sig)
+		need_register = true;
 };
 
 load_config();
@@ -314,5 +350,15 @@ if (metrics.init()) {
  * reference cycle that sneaks in — every 15 minutes is cheap and bounds RSS. */
 uloop.interval(900000, gc);
 
-register();
+/* Re-discover periodically (tunnels and BGP peers come up a few seconds
+ * apart at boot, so the first register may see a partial link set). The
+ * pump re-registers when the discovered set differs from what was last
+ * registered. */
+uloop.interval(30000, resync);
+
+/* Initial registration. */
+refresh_links();
+reg_sig = links_sig();
+need_register = true;
+pump();
 uloop.run();

@@ -17,7 +17,7 @@ define Package/mielofon-agent
   URL:=https://github.com/vooon/mielofon-qoed
   PKGARCH:=all
   DEPENDS:=+ucode +ucode-mod-uclient +ucode-mod-ubus +ucode-mod-uci +ucode-mod-fs \
-	+ucode-mod-uloop +ucode-mod-log +rpcd +rpcd-mod-bird \
+	+ucode-mod-uloop +ucode-mod-log +ucode-mod-digest +rpcd +rpcd-mod-bird \
 	+iperf3 +netperf +iputils-ping \
 	+MIELOFON_AGENT_TLS_OPENSSL:libustream-openssl \
 	+MIELOFON_AGENT_TLS_MBEDTLS:libustream-mbedtls
