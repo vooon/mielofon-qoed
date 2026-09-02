@@ -246,15 +246,16 @@ function enqueue_commands(v)
  * at boot) and a re-registration is needed. */
 function links_sig()
 {
-	let by_iface = {};
-
-	for (let l in links)
-		by_iface[l.interface] = l.from + l.to;
+	sort(links, function(a, b) {
+		if (a.interface < b.interface) return -1;
+		if (a.interface > b.interface) return 1;
+		return 0;
+	});
 
 	let s = '';
 
-	for (let k in sort(keys(by_iface)))
-		s += k + by_iface[k];
+	for (let l in links)
+		s += l.from + l.to + l.interface;
 
 	return digest.sha1(s);
 };
