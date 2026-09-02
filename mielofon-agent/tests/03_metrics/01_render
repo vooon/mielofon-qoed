@@ -1,6 +1,11 @@
 -- Testcase --
 import * as metrics from 'metrics';
 
+metrics.set_links([
+	{ from: 'spoke-1', to: 'hub-a', interface: 'awg_hub_a' },
+	{ from: 'spoke-1', to: 'hub-b', interface: 'awg_hub_b' },
+]);
+
 metrics.record_always(
 	{ from: 'spoke-1', to: 'hub-a', interface: 'awg_hub_a' },
 	{ rtt_ms: 0.648, loss_pct: 0, rr_tps: 1891.95 }
@@ -21,7 +26,9 @@ function has(needle)
 
 has('mielofon_agent_up 1');
 has('mielofon_agent_links 1');
-has('from="spoke-1",to="hub-a",interface="awg_hub_a"');
+has('mielofon_agent_links_configured 2');
+has('mielofon_agent_link_configured{from="spoke-1",to="hub-a",interface="awg_hub_a"} 1');
+has('mielofon_agent_link_configured{from="spoke-1",to="hub-b",interface="awg_hub_b"} 1');
 has('mielofon_agent_link_rtt_ms{');
 has('mielofon_agent_link_rtt_ms{from="spoke-1",to="hub-a",interface="awg_hub_a"} 0.648');
 has('mielofon_agent_link_rr_tps');
@@ -29,6 +36,18 @@ has('mielofon_agent_link_tcp_mbps');
 has('mielofon_agent_link_util_mbps');
 has('mielofon_agent_link_busy{from="spoke-1",to="hub-a",interface="awg_hub_a"} 0');
 has('mielofon_agent_last_probe_unixtime');
+
+/* set_links() again with a shrink must drop the disappeared link */
+metrics.set_links([
+	{ from: 'spoke-1', to: 'hub-a', interface: 'awg_hub_a' },
+]);
+
+text = metrics.render();
+
+if (index(text, 'mielofon_agent_link_configured{from="spoke-1",to="hub-b"') >= 0)
+	die('stale configured link survived set_links shrink');
+if (index(text, 'mielofon_agent_links_configured 1') < 0)
+	die('links_configured not updated after shrink');
 
 print('OK\n');
 -- Expect stdout --

@@ -33,34 +33,40 @@ pub fn classify(cfg: &QualityCfg, rec: &QualityRecord) -> Option<Quality> {
 }
 
 fn classify_best_effort(cfg: &QualityCfg, rec: &QualityRecord) -> Quality {
-    let rtt_score = score_upper(
-        rec.rtt_ms,
-        [
-            cfg.good.rtt_ms,
-            cfg.acceptable.rtt_ms,
-            cfg.poor.rtt_ms,
-            cfg.bad.rtt_ms,
-        ],
-    );
-    let loss_score = score_upper(
-        rec.loss_pct,
-        [
-            cfg.good.loss_pct,
-            cfg.acceptable.loss_pct,
-            cfg.poor.loss_pct,
-            cfg.bad.loss_pct,
-        ],
-    );
-    let rr_score = score_lower(
-        rec.rr_tps,
-        [
-            cfg.good.rr_tps,
-            cfg.acceptable.rr_tps,
-            cfg.poor.rr_tps,
-            cfg.bad.rr_tps,
-        ],
-    );
-    let tcp_score = if let Some(m) = rec.tcp_mbps {
+    let rtt_score = rec.rtt_ms.map(|m| {
+        score_upper(
+            m,
+            [
+                cfg.good.rtt_ms,
+                cfg.acceptable.rtt_ms,
+                cfg.poor.rtt_ms,
+                cfg.bad.rtt_ms,
+            ],
+        )
+    });
+    let loss_score = rec.loss_pct.map(|m| {
+        score_upper(
+            m,
+            [
+                cfg.good.loss_pct,
+                cfg.acceptable.loss_pct,
+                cfg.poor.loss_pct,
+                cfg.bad.loss_pct,
+            ],
+        )
+    });
+    let rr_score = rec.rr_tps.map(|m| {
+        score_lower(
+            m,
+            [
+                cfg.good.rr_tps,
+                cfg.acceptable.rr_tps,
+                cfg.poor.rr_tps,
+                cfg.bad.rr_tps,
+            ],
+        )
+    });
+    let tcp_score = rec.tcp_mbps.map(|m| {
         score_lower(
             m,
             [
@@ -70,11 +76,14 @@ fn classify_best_effort(cfg: &QualityCfg, rec: &QualityRecord) -> Quality {
                 cfg.bad.tcp_mbps,
             ],
         )
-    } else {
-        0
-    };
+    });
 
-    worst([rtt_score, loss_score, rr_score, tcp_score])
+    worst([
+        rtt_score.unwrap_or(0),
+        loss_score.unwrap_or(0),
+        rr_score.unwrap_or(0),
+        tcp_score.unwrap_or(0),
+    ])
 }
 
 /// Escalate the score while the metric exceeds an upper-bound (≤-ok) class
@@ -117,7 +126,12 @@ mod tests {
     use super::*;
     use crate::model::{ProbeState, QualityRecord};
 
-    fn rec(rtt: f64, loss: f64, tps: f64, tcp: Option<f64>) -> QualityRecord {
+    fn rec(
+        rtt: Option<f64>,
+        loss: Option<f64>,
+        tps: Option<f64>,
+        tcp: Option<f64>,
+    ) -> QualityRecord {
         QualityRecord::new(rtt, loss, tps, tcp, None, 0.0, ProbeState::Quiet)
     }
 
@@ -125,7 +139,7 @@ mod tests {
     fn good_link_classifies_good() {
         let cfg = QualityCfg::default();
         assert_eq!(
-            classify(&cfg, &rec(15.0, 0.0, 90.0, Some(80.0))),
+            classify(&cfg, &rec(Some(15.0), Some(0.0), Some(90.0), Some(80.0))),
             Some(Quality::Good)
         );
     }
@@ -136,7 +150,7 @@ mod tests {
         // LTT 15ms but only 1.5 Mbps through (the key failure mode): tcp
         // crosses good/acceptable/poor thresholds → Bad.
         assert_eq!(
-            classify(&cfg, &rec(15.0, 0.0, 90.0, Some(1.5))),
+            classify(&cfg, &rec(Some(15.0), Some(0.0), Some(90.0), Some(1.5))),
             Some(Quality::Bad)
         );
     }
@@ -144,7 +158,7 @@ mod tests {
     #[test]
     fn busy_link_not_classified() {
         let cfg = QualityCfg::default();
-        let mut r = rec(1000.0, 99.0, 1.0, Some(0.1));
+        let mut r = rec(Some(1000.0), Some(99.0), Some(1.0), Some(0.1));
         r.state = ProbeState::Busy;
         assert_eq!(classify(&cfg, &r), None);
     }
@@ -153,15 +167,15 @@ mod tests {
     fn worse_rtt_escalates_class() {
         let cfg = QualityCfg::default();
         assert_eq!(
-            classify(&cfg, &rec(60.0, 0.0, 90.0, Some(80.0))),
+            classify(&cfg, &rec(Some(60.0), Some(0.0), Some(90.0), Some(80.0))),
             Some(Quality::Acceptable)
         );
         assert_eq!(
-            classify(&cfg, &rec(120.0, 0.0, 90.0, Some(80.0))),
+            classify(&cfg, &rec(Some(120.0), Some(0.0), Some(90.0), Some(80.0))),
             Some(Quality::Poor)
         );
         assert_eq!(
-            classify(&cfg, &rec(400.0, 0.0, 90.0, Some(80.0))),
+            classify(&cfg, &rec(Some(400.0), Some(0.0), Some(90.0), Some(80.0))),
             Some(Quality::Bad)
         );
     }
@@ -184,17 +198,17 @@ mod tests {
         };
         // Terrible loss/tps but in-norm rtt → still acceptable.
         assert_eq!(
-            classify(&cfg, &rec(200.0, 99.0, 1.0, Some(0.1))),
+            classify(&cfg, &rec(Some(200.0), Some(99.0), Some(1.0), Some(0.1))),
             Some(Quality::Acceptable)
         );
         // rtt over the bad line wins.
         assert_eq!(
-            classify(&cfg, &rec(400.0, 0.0, 90.0, Some(80.0))),
+            classify(&cfg, &rec(Some(400.0), Some(0.0), Some(90.0), Some(80.0))),
             Some(Quality::Bad)
         );
         // below good line stays good despite awful tcp.
         assert_eq!(
-            classify(&cfg, &rec(100.0, 0.0, 90.0, Some(0.1))),
+            classify(&cfg, &rec(Some(100.0), Some(0.0), Some(90.0), Some(0.1))),
             Some(Quality::Good)
         );
     }

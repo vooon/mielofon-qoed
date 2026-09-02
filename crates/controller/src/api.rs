@@ -49,9 +49,12 @@ pub struct ReleaseReq {
 pub struct QualityReq {
     pub link: LinkKey,
     pub ts: Option<u64>,
-    pub rtt_ms: f64,
-    pub loss_pct: f64,
-    pub rr_tps: f64,
+    #[serde(default)]
+    pub rtt_ms: Option<f64>,
+    #[serde(default)]
+    pub loss_pct: Option<f64>,
+    #[serde(default)]
+    pub rr_tps: Option<f64>,
     #[serde(default)]
     pub tcp_mbps: Option<f64>,
     #[serde(default)]
@@ -173,9 +176,9 @@ pub async fn post_quality(
 struct Measure {
     link: LinkKey,
     ts: Option<u64>,
-    rtt_ms: f64,
-    loss_pct: f64,
-    rr_tps: f64,
+    rtt_ms: Option<f64>,
+    loss_pct: Option<f64>,
+    rr_tps: Option<f64>,
     tcp_mbps: Option<f64>,
     udp_mbps: Option<f64>,
     util_mbps: f64,
@@ -184,12 +187,16 @@ struct Measure {
 }
 
 /// Shared measurement ingest: classify, store (LWW), and release the fence
-/// when a gated throughput report echoes its token.
+/// when a gated throughput report echoes its token. A report that leaves an
+/// always-tier dimension unset (`None`, e.g. a gated throughput reply that
+/// only carries tcp_mbps) keeps the previously stored value for that
+/// dimension instead of blanking it.
 fn ingest_quality(state: &AppState, m: Measure) -> (Option<Quality>, Option<u32>) {
+    let prev = state.kv.get(&m.link);
     let mut rec = QualityRecord::new(
-        m.rtt_ms,
-        m.loss_pct,
-        m.rr_tps,
+        m.rtt_ms.or(prev.as_ref().and_then(|p| p.rtt_ms)),
+        m.loss_pct.or(prev.as_ref().and_then(|p| p.loss_pct)),
+        m.rr_tps.or(prev.as_ref().and_then(|p| p.rr_tps)),
         m.tcp_mbps,
         m.udp_mbps,
         m.util_mbps,
@@ -324,9 +331,12 @@ pub enum AgentReply {
         id: String,
         link: LinkKey,
         ts: Option<u64>,
-        rtt_ms: f64,
-        loss_pct: f64,
-        rr_tps: f64,
+        #[serde(default)]
+        rtt_ms: Option<f64>,
+        #[serde(default)]
+        loss_pct: Option<f64>,
+        #[serde(default)]
+        rr_tps: Option<f64>,
         #[serde(default)]
         tcp_mbps: Option<f64>,
         #[serde(default)]
@@ -449,11 +459,11 @@ pub async fn metrics(State(state): State<AppState>) -> impl IntoResponse {
         );
         body.push_str(&format!(
             "mielofon_link_rtt_ms{{{labels}}} {}\n",
-            rec.rtt_ms
+            rec.rtt_ms.unwrap_or(-1.0)
         ));
         body.push_str(&format!(
             "mielofon_link_loss_pct{{{labels}}} {}\n",
-            rec.loss_pct
+            rec.loss_pct.unwrap_or(-1.0)
         ));
         let quality = rec
             .quality

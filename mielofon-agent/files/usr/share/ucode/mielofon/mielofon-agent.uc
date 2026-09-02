@@ -98,6 +98,7 @@ function refresh_links()
 	if (bus == null) {
 		log.WARN('ubus connect failed during link discovery\n');
 		links = [];
+		metrics.set_links(links);
 		return;
 	}
 
@@ -114,6 +115,8 @@ function refresh_links()
 
 	for (let l in all)
 		l.from = cfg.agent;
+
+	metrics.set_links(links);
 };
 
 function find_link(iface)

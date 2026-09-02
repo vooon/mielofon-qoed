@@ -60,10 +60,15 @@ pub enum Quality {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct QualityRecord {
     pub ts: u64,
-    pub rtt_ms: f64,
-    pub loss_pct: f64,
-    pub rr_tps: f64,
+    /// Always-tier dimensions are optional: a gated throughput reply carries
+    /// neither RTT/loss nor transaction rate, and unset dimensions never
+    /// constrain classification (`None` is preserved from the previous report).
+    pub rtt_ms: Option<f64>,
+    pub loss_pct: Option<f64>,
+    pub rr_tps: Option<f64>,
+    #[serde(default)]
     pub tcp_mbps: Option<f64>,
+    #[serde(default)]
     pub udp_mbps: Option<f64>,
     pub util_mbps: f64,
     pub state: ProbeState,
@@ -75,9 +80,9 @@ pub struct QualityRecord {
 
 impl QualityRecord {
     pub fn new(
-        rtt_ms: f64,
-        loss_pct: f64,
-        rr_tps: f64,
+        rtt_ms: Option<f64>,
+        loss_pct: Option<f64>,
+        rr_tps: Option<f64>,
         tcp_mbps: Option<f64>,
         udp_mbps: Option<f64>,
         util_mbps: f64,

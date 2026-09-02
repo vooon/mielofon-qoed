@@ -16,8 +16,11 @@ pub fn render(state: &AppState) -> String {
             .unwrap_or_else(|| "—".to_string());
         let state = format!("{:?}", rec.state).to_lowercase();
         rows.push_str(&format!(
-            "<tr><td>{}</td><td>{}</td><td>{}</td><td>{:.1}</td><td>{:.2}</td><td>{}</td><td>{}</td><td>{}</td></tr>",
-            key.from, key.to, key.interface, rec.rtt_ms, rec.loss_pct, state, quality, cost
+            "<tr><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td></tr>",
+            key.from, key.to, key.interface,
+            rec.rtt_ms.map(|v| format!("{v:.1}")).unwrap_or_else(|| "—".to_string()),
+            rec.loss_pct.map(|v| format!("{v:.2}")).unwrap_or_else(|| "—".to_string()),
+            state, quality, cost
         ));
     }
 

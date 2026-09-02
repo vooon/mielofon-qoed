@@ -21,6 +21,7 @@ let file = '';
 let interval_s = 20;
 let out = '';
 let state = {};
+let configured = {};   /* link_key -> {from,to,interface} from discovery */
 
 /* ---- node-exporter metric formatting (adapted) ---------------------- */
 
@@ -120,6 +121,42 @@ function by_link(link)
 	return e;
 }
 
+export function by_configured(link)
+{
+	let k = link_key(link);
+	let e = configured[k];
+
+	if (e == null) {
+		e = configured[k] = {
+			from: link.from,
+			to: link.to,
+			interface: link.interface,
+		};
+	}
+
+	return e;
+};
+
+/* Track the links the agent discovered (autodiscover.uc) so the textfile can
+ * report configured links even before their first probe lands. */
+export function set_links(links)
+{
+	let seen = {};
+
+	for (let l in links) {
+		if (!l.interface)
+			continue;
+
+		by_configured(l);
+		seen[link_key(l)] = true;
+	}
+
+	/* drop links that disappeared from discovery */
+	for (let k in configured)
+		if (!exists(seen, k))
+			delete configured[k];
+};
+
 export function record_always(link, r)
 {
 	let e = by_link(link);
@@ -168,9 +205,11 @@ export function render()
 
 	gauge('mielofon_agent_up', 'Agent is up and reporting.')({}, 1);
 	gauge('mielofon_agent_links', 'Number of links the agent has probed.')({}, length(keys(state)));
+	gauge('mielofon_agent_links_configured', 'Number of links the agent discovered (autodiscover).')({}, length(keys(configured)));
 
 	/* Create each per-link gauge ONCE so TYPE/HELP are emitted a single time;
 	 * repeated calls only add sampled lines with the label set. */
+	let cfg = gauge('mielofon_agent_link_configured', 'Link discovered/managed by the agent (1 if present).');
 	let when = gauge('mielofon_agent_last_probe_unixtime', 'Latest probe timestamp (unix seconds).');
 	let rtt = gauge('mielofon_agent_link_rtt_ms', 'Latest RTT (ms).');
 	let loss = gauge('mielofon_agent_link_loss_pct', 'Latest packet loss (%).');
@@ -178,6 +217,13 @@ export function render()
 	let tcp = gauge('mielofon_agent_link_tcp_mbps', 'Latest TCP throughput (Mbps).');
 	let util = gauge('mielofon_agent_link_util_mbps', 'Latest link utilization (Mbps).');
 	let busy = gauge('mielofon_agent_link_busy', 'Link busy at last throughput probe (1 if busy).');
+
+	for (let k in configured) {
+		let e = configured[k];
+		let labels = { from: e.from, to: e.to, interface: e.interface };
+
+		cfg(labels, 1);
+	}
 
 	for (let k in state) {
 		let e = state[k];

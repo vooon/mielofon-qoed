@@ -80,10 +80,26 @@ mod tests {
     fn lww_keeps_latest_ts() {
         let store = LwwStore::new();
         let key = LinkKey::new("hub-a", "hub-b", "awg0");
-        let mut old = QualityRecord::new(10.0, 0.0, 80.0, Some(70.0), None, 0.0, ProbeState::Quiet);
+        let mut old = QualityRecord::new(
+            Some(10.0),
+            Some(0.0),
+            Some(80.0),
+            Some(70.0),
+            None,
+            0.0,
+            ProbeState::Quiet,
+        );
         old.ts = 100;
         store.put(key.clone(), old);
-        let mut new = QualityRecord::new(200.0, 90.0, 5.0, None, None, 0.0, ProbeState::Conflict);
+        let mut new = QualityRecord::new(
+            Some(200.0),
+            Some(90.0),
+            Some(5.0),
+            None,
+            None,
+            0.0,
+            ProbeState::Conflict,
+        );
         new.ts = 200;
         store.put(key.clone(), new.clone());
         assert_eq!(store.get(&key).unwrap().ts, 200);
@@ -94,10 +110,26 @@ mod tests {
     fn older_does_not_override() {
         let store = LwwStore::new();
         let key = LinkKey::new("a", "p", "if0");
-        let mut fresh = QualityRecord::new(1.0, 0.0, 1.0, None, None, 0.0, ProbeState::Quiet);
+        let mut fresh = QualityRecord::new(
+            Some(1.0),
+            Some(0.0),
+            Some(1.0),
+            None,
+            None,
+            0.0,
+            ProbeState::Quiet,
+        );
         fresh.ts = 500;
         store.put(key.clone(), fresh);
-        let mut stale = QualityRecord::new(2.0, 0.0, 1.0, None, None, 0.0, ProbeState::Quiet);
+        let mut stale = QualityRecord::new(
+            Some(2.0),
+            Some(0.0),
+            Some(1.0),
+            None,
+            None,
+            0.0,
+            ProbeState::Quiet,
+        );
         stale.ts = 400;
         store.put(key.clone(), stale);
         assert_eq!(store.get(&key).unwrap().ts, 500);
