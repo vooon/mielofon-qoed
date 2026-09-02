@@ -23,6 +23,21 @@ let out = '';
 let state = {};
 let configured = {};   /* link_key -> {from,to,interface} from discovery */
 
+/* Shared counters, bumped from the agent / probes / cost modules (exported
+ * object: importers mutate fields directly, e.g. metrics.counters.ping++).
+ * Only referenced while rendering; values reset on agent restart. */
+export let counters = {
+	commands_received: 0,   /* commands drained from the controller */
+	commands_succeeded: 0,  /* commands that completed without error */
+	commands_errored: 0,    /* commands that hit an error/unknown path */
+	probe_ping: 0,          /* ping(1) invocations */
+	probe_netperf: 0,       /* netperf TCP_RR invocations */
+	probe_iperf: 0,         /* iperf3 throughput runs */
+	probe_busy: 0,          /* throughput probes skipped because link busy */
+	apply_cost: 0,          /* OSPF cost applies that succeeded */
+	apply_cost_errors: 0,   /* OSPF cost applies that failed */
+};
+
 /* ---- node-exporter metric formatting (adapted) ---------------------- */
 
 function puts(...s) { out += join('', s) + '\n'; }
@@ -97,6 +112,8 @@ function metric(name, mtype, help, skipdecl)
 }
 
 function gauge(name, help, skipdecl) { return metric(name, 'gauge', help, skipdecl); }
+
+function counter(name, help, skipdecl) { return metric(name, 'counter', help, skipdecl); }
 
 /* ---- state ----------------------------------------------------------- */
 
@@ -206,6 +223,24 @@ export function render()
 	gauge('mielofon_agent_up', 'Agent is up and reporting.')({}, 1);
 	gauge('mielofon_agent_links', 'Number of links the agent has probed.')({}, length(keys(state)));
 	gauge('mielofon_agent_links_configured', 'Number of links the agent discovered (autodiscover).')({}, length(keys(configured)));
+
+	/* Command / probe / cost counters — single series with a label, typed
+	 * counter (they are monotonically increasing since agent start). */
+	let cmds = counter('mielofon_agent_commands_total', 'Commands drained from the controller, by outcome.');
+	let probes = counter('mielofon_agent_probe_total', 'Individual probe tool runs.');
+	let cost = counter('mielofon_agent_apply_cost_total', 'OSPF cost applies by outcome.');
+
+	cmds({ result: 'received' }, counters.commands_received);
+	cmds({ result: 'succeeded' }, counters.commands_succeeded);
+	cmds({ result: 'errored' }, counters.commands_errored);
+
+	probes({ kind: 'ping' }, counters.probe_ping);
+	probes({ kind: 'netperf' }, counters.probe_netperf);
+	probes({ kind: 'iperf' }, counters.probe_iperf);
+	probes({ kind: 'busy' }, counters.probe_busy);
+
+	cost({ result: 'ok' }, counters.apply_cost);
+	cost({ result: 'error' }, counters.apply_cost_errors);
 
 	/* Create each per-link gauge ONCE so TYPE/HELP are emitted a single time;
 	 * repeated calls only add sampled lines with the label set. */

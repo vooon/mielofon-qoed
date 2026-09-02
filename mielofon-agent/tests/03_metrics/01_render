@@ -1,6 +1,17 @@
 -- Testcase --
 import * as metrics from 'metrics';
 
+/* Simulate a few commands hitting the counters exactly as the agent does. */
+metrics.counters.commands_received += 5;
+metrics.counters.commands_succeeded += 4;
+metrics.counters.commands_errored += 1;
+metrics.counters.probe_ping += 4;
+metrics.counters.probe_netperf += 4;
+metrics.counters.probe_iperf += 1;
+metrics.counters.probe_busy += 2;
+metrics.counters.apply_cost += 3;
+metrics.counters.apply_cost_errors += 1;
+
 metrics.set_links([
 	{ from: 'spoke-1', to: 'hub-a', interface: 'awg_hub_a' },
 	{ from: 'spoke-1', to: 'hub-b', interface: 'awg_hub_b' },
@@ -36,6 +47,17 @@ has('mielofon_agent_link_tcp_mbps');
 has('mielofon_agent_link_util_mbps');
 has('mielofon_agent_link_busy{from="spoke-1",to="hub-a",interface="awg_hub_a"} 0');
 has('mielofon_agent_last_probe_unixtime');
+
+/* counters, labeled */
+has('mielofon_agent_commands_total{result="received"} 5');
+has('mielofon_agent_commands_total{result="succeeded"} 4');
+has('mielofon_agent_commands_total{result="errored"} 1');
+has('mielofon_agent_probe_total{kind="ping"} 4');
+has('mielofon_agent_probe_total{kind="netperf"} 4');
+has('mielofon_agent_probe_total{kind="iperf"} 1');
+has('mielofon_agent_probe_total{kind="busy"} 2');
+has('mielofon_agent_apply_cost_total{result="ok"} 3');
+has('mielofon_agent_apply_cost_total{result="error"} 1');
 
 /* set_links() again with a shrink must drop the disappeared link */
 metrics.set_links([

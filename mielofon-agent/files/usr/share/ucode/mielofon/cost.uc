@@ -2,66 +2,70 @@
 
 /* OSPF cost application via rpcd-mod-bird over ubus.
  *
- * The agent only executes the cost it is told to apply. Preferred path is the
- * rpcd `bird set_ospf_cost {interface, cost}` reconfiguration method (it
- * derives the runtime config from the pristine /etc/bird.conf, validates with
- * `configure check`, and applies it) — no raw BIRD CLI string is built here.
- * On devices still running an older rpcd-mod-bird without that method, the
- * agent falls back to `bird query` running an operator-provided `cost_command`
- * template with `{interface}`/`{cost}` substituted. Empty command => no-op.
+ * The agent only executes the cost it is told to apply, via the rpcd
+ * `bird set_ospf_cost {interface, cost}` method. That method is a config
+ * editor: BIRD has no small CLI command to change a single interface cost,
+ * so rpcd derives the runtime config from the pristine /etc/bird.conf,
+ * validates it with `configure check`, and applies it. No raw BIRD CLI
+ * string ever leaves this module — there is intentionally no `cost_command`
+ * template fallback (it was a wrong concept).
+ *
+ * BIRD keeps one configuration and one undo level, so rpcd serializes
+ * reconfigurations with flock and fails fast with `code 5` when another
+ * apply is in flight; that is transient, retry it briefly.
  */
 
 import * as log from 'log';
+import * as uloop from 'uloop';
 import { connect } from 'ubus';
+import * as metrics from './metrics.uc';
 
-export function apply_cost(command, iface, cost, cb)
+const RETRY_MS = 2000;
+const MAX_TRIES = 5;
+
+export function apply_cost(iface, cost, cb, tries)
 {
+	let n = (tries || 0) + 1;
+
+	metrics.counters.apply_cost++;
+
+	if (n > MAX_TRIES) {
+		metrics.counters.apply_cost_errors++;
+		cb('bird reconfiguration busy after ' + MAX_TRIES + ' tries');
+		return;
+	}
+
 	let bus = connect();
 
 	if (!bus) {
+		metrics.counters.apply_cost_errors++;
 		cb('ubus connect failed');
 		return;
 	}
 
-	/* Prefer the structured rpcd method. The ucode ubus binding returns null
-	 * for an unknown method, which is indistinguishable from a transport
-	 * failure — so when it is null we fall back to the template path for
-	 * older rpcd-mod-bird deployments. */
 	let res = bus.call('bird', 'set_ospf_cost', { interface: iface, cost: cost });
 
-	if (res != null) {
-		if (res.code != 0) {
-			log.WARN('bird set_ospf_cost returned code %s: %s\n', res.code, res.stdout);
-			cb('bird returned code ' + res.code);
-			return;
-		}
-
-		log.NOTE('bird set_ospf_cost: %s\n', res.stdout);
-		cb(null);
-		return;
-	}
-
-	if (!command) {
-		cb('no cost mechanism available (set_ospf_cost missing, no cost_command)');
-		return;
-	}
-
-	let cmd = replace(command, '{interface}', iface);
-	cmd = replace(cmd, '{cost}', cost);
-
-	res = bus.call('bird', 'query', { command: cmd });
-
 	if (res == null) {
-		cb('bird query failed: ' + (bus.error() || 'unknown'));
+		metrics.counters.apply_cost_errors++;
+		cb('bird set_ospf_cost failed: ' + (bus.error() || 'unknown'));
+		return;
+	}
+
+	if (res.code == 5) {
+		/* transient busy — confirmed error only if we exhaust retries */
+		metrics.counters.apply_cost--;
+		log.NOTE('bird set_ospf_cost busy, retrying (%s/%s)\n', n, MAX_TRIES);
+		uloop.timer(RETRY_MS, function() { apply_cost(iface, cost, cb, n); });
 		return;
 	}
 
 	if (res.code != 0) {
-		log.WARN('bird returned code %s: %s\n', res.code, res.stdout);
+		metrics.counters.apply_cost_errors++;
+		log.WARN('bird set_ospf_cost returned code %s: %s\n', res.code, res.stdout);
 		cb('bird returned code ' + res.code);
 		return;
 	}
 
-	log.NOTE('bird: %s\n', res.stdout);
+	log.NOTE('bird set_ospf_cost: %s\n', res.stdout);
 	cb(null);
 };

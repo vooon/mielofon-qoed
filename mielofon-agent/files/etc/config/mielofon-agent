@@ -32,9 +32,6 @@ config agent 'main'
 	# Interface prefix stripped to match an interface to a peer node name:
 	#   awg_hub_a minus "awg_" -> "hub_a"
 	option iface_prefix 'awg_'
-	# Global BIRD cost command template; {interface} and {cost} are
-	# substituted and run via `ubus call bird query`. Empty = no-op ack.
-	# option cost_command 'configure'
 	# Quiet threshold in Mbps: above this the throughput tier is skipped.
 	option quiet_max_mbps '15'
 	option ping_count '3'

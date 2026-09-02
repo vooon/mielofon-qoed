@@ -13,6 +13,7 @@
  */
 
 import { readfile, popen, error } from 'fs';
+import * as metrics from './metrics.uc';
 
 /* ── parsers ────────────────────────────────────────────────────────────── */
 
@@ -159,9 +160,11 @@ function iperf_command(link, cfg)
 /* Always-on tier: RTT + loss, then transaction rate. */
 export function run_always(link, cfg, cb)
 {
+	metrics.counters.probe_ping++;
 	run(ping_command(link, cfg), function(ping_err, ping_out) {
 		let p = parse_ping(ping_out);
 
+		metrics.counters.probe_netperf++;
 		run(netperf_command(link, cfg), function(rr_err, rr_out) {
 			cb(null, {
 				rtt_ms: (p.rtt != null) ? p.rtt : null,
@@ -178,10 +181,12 @@ export function run_throughput(link, cfg, cb)
 	let util = util_mbps(link.interface);
 
 	if (util > cfg.quiet_max_mbps) {
+		metrics.counters.probe_busy++;
 		cb(null, { busy: true, util_mbps: util, tcp_mbps: null });
 		return;
 	}
 
+	metrics.counters.probe_iperf++;
 	run(iperf_command(link, cfg), function(e, out) {
 		let tcp = parse_iperf3(out);
 

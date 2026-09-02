@@ -76,7 +76,6 @@ function load_config()
 		bgp_peer_suffix: ctx.get('mielofon-agent', 'main', 'bgp_peer_suffix') || null,
 		iface_prefix: ctx.get('mielofon-agent', 'main', 'iface_prefix') || 'awg_',
 		excludes: [],
-		cost_command: ctx.get('mielofon-agent', 'main', 'cost_command') || null,
 		timeout_ms: int(ctx.get('mielofon-agent', 'main', 'command_timeout_ms') || '30000'),
 		quiet_max_mbps: float(ctx.get('mielofon-agent', 'main', 'quiet_max_mbps'), 15.0),
 		ping_count: int(ctx.get('mielofon-agent', 'main', 'ping_count') || '3'),
@@ -158,7 +157,10 @@ function reply_send(cmd, obj, cb)
 /* Execute one command; always completes via `cb`. */
 function run_command(cmd, cb)
 {
+	metrics.counters.commands_received++;
+
 	if (!cmd || !cmd.type) {
+		metrics.counters.commands_errored++;
 		cb();
 		return;
 	}
@@ -166,12 +168,18 @@ function run_command(cmd, cb)
 	if (cmd.type == 'apply_cost') {
 		let link = find_link(cmd.link.interface);
 
-		if (!link || !cfg.cost_command) {
+		if (!link) {
+			metrics.counters.commands_errored++;
 			reply_send(cmd, { kind: 'applied', link: cmd.link, cost: cmd.cost }, cb);
 			return;
 		}
 
-		apply_cost(cfg.cost_command, cmd.link.interface, cmd.cost, function(err) {
+		apply_cost(cmd.link.interface, cmd.cost, function(err) {
+			if (err)
+				metrics.counters.commands_errored++;
+			else
+				metrics.counters.commands_succeeded++;
+
 			reply_send(cmd, {
 				kind: 'applied',
 				link: cmd.link,
@@ -184,6 +192,7 @@ function run_command(cmd, cb)
 	}
 
 	if (cmd.type != 'probe') {
+		metrics.counters.commands_errored++;
 		log.WARN('unknown command type %s\n', cmd.type);
 		cb();
 		return;
@@ -192,6 +201,7 @@ function run_command(cmd, cb)
 	let link = find_link(cmd.link.interface);
 
 	if (!link) {
+		metrics.counters.commands_errored++;
 		log.WARN('unknown interface %s, skipping\n', cmd.link.interface);
 		cb();
 		return;
@@ -200,6 +210,7 @@ function run_command(cmd, cb)
 	if (cmd.tier == 'throughput') {
 		run_throughput(link, cfg, function(e, r) {
 			metrics.record_throughput(link, r);
+			metrics.counters.commands_succeeded++;
 
 			reply_send(cmd, {
 				kind: 'probe',
@@ -219,6 +230,7 @@ function run_command(cmd, cb)
 
 	run_always(link, cfg, function(e, r) {
 		metrics.record_always(link, r);
+		metrics.counters.commands_succeeded++;
 
 		reply_send(cmd, {
 			kind: 'probe',
