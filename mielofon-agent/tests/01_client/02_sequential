@@ -17,6 +17,7 @@ let fake_new_client = function(url, auth, cb) {
 			body: '',
 			ssl_init: function(opts) { return true; },
 			set_timeout: function(ms) { rec.timeout = ms; },
+			connect: function() { rec.connected = true; return true; },
 			read: function() { return rec.body; },
 			status: function() { return { status: 200, eof: true }; },
 			free: function() { rec.freed = true; },

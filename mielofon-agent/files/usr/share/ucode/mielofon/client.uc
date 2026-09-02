@@ -115,10 +115,14 @@ export function post_json(cl, path, body, cb)
 		verify: true,
 	});
 
+	if (!ucl.connect()) {
+		finish('uclient connect failed', null);
+		return;
+	}
+
 	ucl.set_timeout(cl.timeout_ms);
 
-	ucl.request({
-		method: 'POST',
+	ucl.request('POST', {
 		headers: {
 			'content-type': 'application/json',
 		},

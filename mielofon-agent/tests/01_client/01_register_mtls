@@ -16,12 +16,13 @@ let fake_new_client = function(url, auth, cb) {
 			req: null,
 			freed: false,
 			set_timeout: function(ms) { rec.timeout = ms; },
+			connect: function() { rec.connected = true; return true; },
 			ssl_init: function(opts) { rec.ssl = opts; return true; },
 			read: function() { return null; },
 			status: function() { return { status: 200, eof: true }; },
 			free: function() { rec.freed = true; },
-			request: function(opts) {
-				rec.req = opts;
+			request: function(method, opts) {
+				rec.req = { method: method, headers: opts.headers, post_data: opts.post_data };
 				push(captured, rec);
 				cb.data_eof();
 			},

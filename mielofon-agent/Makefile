@@ -72,6 +72,7 @@ define Package/mielofon-agent/install
 
 	$(INSTALL_DIR) $(1)/usr/share/ucode/mielofon
 	$(INSTALL_DATA) \
+		./files/usr/share/ucode/mielofon/autodiscover.uc \
 		./files/usr/share/ucode/mielofon/mielofon-agent.uc \
 		./files/usr/share/ucode/mielofon/client.uc \
 		./files/usr/share/ucode/mielofon/cost.uc \

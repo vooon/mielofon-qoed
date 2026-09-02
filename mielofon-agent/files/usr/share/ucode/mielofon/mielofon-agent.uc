@@ -231,7 +231,9 @@ function enqueue_commands(v)
 };
 
 /* Single flat continuation: pop the next command if any, otherwise re-arm
- * the long poll. Never recurses through a chain of per-command closures. */
+ * the long poll (inlined rather than a separate function because ucode has
+ * no hoisting and the two would be mutually recursive). Never recurses
+ * through a chain of per-command closures. */
 function step()
 {
 	if (length(queue)) {
@@ -241,7 +243,18 @@ function step()
 		return;
 	}
 
-	command_step();
+	let body = { agent: cfg.agent, timeout_ms: cfg.timeout_ms };
+
+	post_json(client, '/v1/agent/command', body, function(err, status, raw) {
+		if (err || status != 200) {
+			log.WARN('command long-poll failed: %s / %s — retrying\n', err, status);
+			uloop.timer(2000, step);
+			return;
+		}
+
+		enqueue_commands(parse_json(raw));
+		step();
+	});
 };
 
 function register()
@@ -261,22 +274,6 @@ function register()
 		if (err || status != 200) {
 			log.WARN('register failed: %s / %s — retrying\n', err, status);
 			uloop.timer(3000, register);
-			return;
-		}
-
-		enqueue_commands(parse_json(raw));
-		step();
-	});
-};
-
-function command_step()
-{
-	let body = { agent: cfg.agent, timeout_ms: cfg.timeout_ms };
-
-	post_json(client, '/v1/agent/command', body, function(err, status, raw) {
-		if (err || status != 200) {
-			log.WARN('command long-poll failed: %s / %s — retrying\n', err, status);
-			uloop.timer(2000, command_step);
 			return;
 		}
 
