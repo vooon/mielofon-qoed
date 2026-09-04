@@ -60,7 +60,7 @@ function handle_data_eof()
 	finish(null, st ? st.status : null);
 }
 
-function handle_error(code)
+function handle_error(cb, code)
 {
 	finish('uclient error ' + code, null);
 }
