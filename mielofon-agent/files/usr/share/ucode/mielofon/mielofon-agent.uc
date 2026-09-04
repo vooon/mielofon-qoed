@@ -17,7 +17,7 @@
  */
 
 import * as log from 'log';
-import { ulog_open, ULOG_SYSLOG, LOG_DAEMON } from 'log';
+import { ulog_open, ulog_threshold, ULOG_SYSLOG, LOG_DAEMON } from 'log';
 
 ulog_open(ULOG_SYSLOG, LOG_DAEMON, 'mielofon-agent');
 import { cursor } from 'uci';
@@ -76,6 +76,7 @@ function load_config()
 		bgp_peer_suffix: ctx.get('mielofon-agent', 'main', 'bgp_peer_suffix') || null,
 		iface_prefix: ctx.get('mielofon-agent', 'main', 'iface_prefix') || 'awg_',
 		excludes: [],
+		log_level: ctx.get('mielofon-agent', 'main', 'log_level') || 'notice',
 		timeout_ms: int(ctx.get('mielofon-agent', 'main', 'command_timeout_ms') || '30000'),
 		quiet_max_mbps: float(ctx.get('mielofon-agent', 'main', 'quiet_max_mbps'), 15.0),
 		ping_count: int(ctx.get('mielofon-agent', 'main', 'ping_count') || '3'),
@@ -84,6 +85,11 @@ function load_config()
 		tcp_duration: ctx.get('mielofon-agent', 'main', 'tcp_duration') || '4',
 		iperf_port: int(ctx.get('mielofon-agent', 'main', 'iperf_port') || '5201'),
 	};
+
+	/* ulog threshold from `log_level` (debug < info < notice < warning < err);
+	 * 'notice' keeps the registration summary, 'warning' silences routine
+	 * spam without hiding connectivity errors. */
+	ulog_threshold(cfg.log_level);
 
 	/* Interfaces never to manage (probe/cost), autodiscovered or re-registered
 	 * on reload. */

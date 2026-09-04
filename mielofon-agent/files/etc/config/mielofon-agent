@@ -13,6 +13,9 @@
 
 config agent 'main'
 	option enabled '1'
+	# Syslog verbosity: debug < info < notice < warning < err.
+	# 'notice' keeps registration summary; 'warning' silences routine spam.
+	option log_level 'notice'
 	# Agent identity. Empty/defaults to the router hostname.
 	option agent_name 'spoke-1'
 	# Controller clients listener (mTLS). Full URL including scheme and port.
