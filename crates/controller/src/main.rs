@@ -62,6 +62,7 @@ async fn run_daemon(path: &str) -> anyhow::Result<()> {
     let _guard = mielofon_otel::install(
         &cfg.otel,
         &cfg.log.level,
+        cfg.log.format.parse().map_err(anyhow::Error::from)?,
         "mielofon-controller",
         env!("CARGO_PKG_VERSION"),
     )?;

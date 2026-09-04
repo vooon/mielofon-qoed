@@ -7,8 +7,10 @@
 //! An empty endpoint or disabled config yields no-op providers.
 
 mod config;
+mod format;
 
 pub use config::{OTelConfig, OTelSignalConfig, ParseError};
+pub use format::{ConsoleFormat, ParseFormatError};
 
 use anyhow::Context;
 use tracing::{debug, info, level_filters::LevelFilter};
@@ -48,12 +50,14 @@ impl Drop for TelemetryGuard {
 ///
 /// The console layer is always installed at `log_level` (default info) so the
 /// daemon is never silent, even with OTEL disabled — this doubles as the
-/// `[log] level` knob used to debug tests. The console emits structured JSON.
-/// OTLP layers are added only for signals that are enabled AND have a resolved
-/// endpoint; each signal forwards at its own `level` (fallback: console).
+/// `[log] level` knob used to debug tests. `format` selects the console
+/// output (`logfmt` or JSON). OTLP layers are added only for signals that are
+/// enabled AND have a resolved endpoint; each signal forwards at its own
+/// `level` (fallback: console).
 pub fn install(
     cfg: &OTelConfig,
     log_level: &str,
+    format: ConsoleFormat,
     service_name: &str,
     service_version: &str,
 ) -> anyhow::Result<TelemetryGuard> {
@@ -157,11 +161,11 @@ pub fn install(
     let traces_filter = env_filter(cfg.traces.effective_level(log_level));
 
     let registry = tracing_subscriber::registry();
-    let registry = registry.with(
-        tracing_subscriber::fmt::layer()
-            .json()
-            .with_filter(console_filter),
-    );
+    let console_layer = match format {
+        ConsoleFormat::Json => tracing_subscriber::fmt::layer().json().boxed(),
+        ConsoleFormat::Logfmt => tracing_subscriber::fmt::layer().boxed(),
+    };
+    let registry = registry.with(console_layer.with_filter(console_filter));
 
     let lp_layer = match lp.as_ref() {
         Some(lp) => opentelemetry_appender_tracing::layer::OpenTelemetryTracingBridge::new(lp)

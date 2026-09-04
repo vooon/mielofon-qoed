@@ -160,19 +160,23 @@ impl Default for Cluster {
 }
 
 /// Console/logging configuration. `level` is the minimum `tracing` level
-/// emitted to the console as structured JSON (default `info`). It is
-/// independent of the per-signal OTEL levels in `[otel.*]`.
+/// emitted to the console (default `info`), `format` selects the console
+/// output format. Both are independent of the per-signal OTEL levels in
+/// `[otel.*]`.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
 pub struct Log {
     /// Minimum console level: trace, debug, info, warn, error.
     pub level: String,
+    /// Console log format: `logfmt` or `json`.
+    pub format: String,
 }
 
 impl Default for Log {
     fn default() -> Self {
         Log {
             level: "info".into(),
+            format: "logfmt".into(),
         }
     }
 }

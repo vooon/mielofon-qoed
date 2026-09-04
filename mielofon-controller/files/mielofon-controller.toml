@@ -61,10 +61,12 @@ rr_tps = 10.0
 tcp_mbps = 1.0
 ospf_cost = 100
 
-# Console logging (structured JSON lines on stdout). Independent of the
-# per-signal OTEL levels below. Level names: trace, debug, info, warn, error.
+# Console logging. `level` sets the minimum tracing level emitted to the
+# console; `format` selects the console output (logfmt or JSON). Both are
+# independent of the per-signal OTEL levels below.
 [log]
 level = "info"
+format = "logfmt"
 
 # Observability. OTLP/HTTP (no gRPC). A signal exports only when it is enabled
 # AND its resolved endpoint (per-signal override, else the global endpoint) is
