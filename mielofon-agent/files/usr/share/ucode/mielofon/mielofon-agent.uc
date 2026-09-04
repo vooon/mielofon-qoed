@@ -17,7 +17,7 @@
  */
 
 import * as log from 'log';
-import { ulog_open, ulog_threshold, ULOG_SYSLOG, LOG_DAEMON } from 'log';
+import { ulog_open, ulog_threshold, ulog, ULOG_SYSLOG, LOG_DAEMON, LOG_CRIT } from 'log';
 
 ulog_open(ULOG_SYSLOG, LOG_DAEMON, 'mielofon-agent');
 import { cursor } from 'uci';
@@ -349,7 +349,8 @@ function resync()
 load_config();
 
 if (!cfg.agent || !cfg.url || !cfg.cert || !cfg.key) {
-	log.ERR('mielofon-agent: incomplete configuration\n');
+	/* critical: the agent cannot start at all — exit(1) after this */
+	log.ulog(LOG_CRIT, 'mielofon-agent: incomplete configuration\n');
 	exit(1);
 }
 
@@ -385,5 +386,18 @@ uloop.interval(30000, resync);
 refresh_links();
 reg_sig = links_sig();
 need_register = true;
+
+/* Exit promptly on SIGTERM/SIGINT: flush the textfile, then leave. Without a
+ * handler ucode would swallow the signal and procd would SIGKILL us after its
+ * grace period — every stop/restart would cost a 5s timeout. */
+function on_shutdown()
+{
+	/* write() no-ops when the textfile is disabled */
+	metrics.write();
+	exit(0);
+}
+signal('SIGTERM', on_shutdown);
+signal('SIGINT', on_shutdown);
+
 pump();
 uloop.run();
