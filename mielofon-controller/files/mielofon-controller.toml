@@ -61,9 +61,16 @@ rr_tps = 10.0
 tcp_mbps = 1.0
 ospf_cost = 100
 
+# Console logging (structured JSON lines on stdout). Independent of the
+# per-signal OTEL levels below. Level names: trace, debug, info, warn, error.
+[log]
+level = "info"
+
 # Observability. OTLP/HTTP (no gRPC). A signal exports only when it is enabled
 # AND its resolved endpoint (per-signal override, else the global endpoint) is
-# non-empty. Leave everything unset/empty to disable.
+# non-empty. Leave everything unset/empty to disable. Each signal forwards at
+# its own `level` (fallback: the console level above), so you can e.g. emit
+# info to the console but forward debug logs to the collector.
 [otel]
 enabled = true
 endpoint = ""            # optional global endpoint, e.g. "http://127.0.0.1:4318"
@@ -71,6 +78,7 @@ endpoint = ""            # optional global endpoint, e.g. "http://127.0.0.1:4318
 # [otel.traces]
 # enabled = true
 # endpoint = "http://127.0.0.1:4318/v1/traces"
+# level = "info"
 
 # [otel.metrics]
 # enabled = true
@@ -79,3 +87,4 @@ endpoint = ""            # optional global endpoint, e.g. "http://127.0.0.1:4318
 # [otel.logs]
 # enabled = true
 # endpoint = "http://127.0.0.1:4318/v1/logs"
+# level = "debug"

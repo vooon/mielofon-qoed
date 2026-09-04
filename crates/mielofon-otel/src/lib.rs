@@ -46,12 +46,14 @@ impl Drop for TelemetryGuard {
 /// layer + optional OTLP log bridge + OTLP trace layer), and set the global
 /// meter provider. Returns a guard to keep alive for the daemon's lifetime.
 ///
-/// The console layer is always installed at `cfg.log_level` (default info) so
-/// the daemon is never silent, even with OTEL disabled — this doubles as the
-/// `log_level` knob used to debug tests. OTLP layers are added only for the
-/// signals that are enabled AND have a resolved endpoint.
+/// The console layer is always installed at `log_level` (default info) so the
+/// daemon is never silent, even with OTEL disabled — this doubles as the
+/// `[log] level` knob used to debug tests. The console emits structured JSON.
+/// OTLP layers are added only for signals that are enabled AND have a resolved
+/// endpoint; each signal forwards at its own `level` (fallback: console).
 pub fn install(
     cfg: &OTelConfig,
+    log_level: &str,
     service_name: &str,
     service_version: &str,
 ) -> anyhow::Result<TelemetryGuard> {
@@ -147,22 +149,23 @@ pub fn install(
         global::set_meter_provider(mp.clone());
     }
 
-    // Console filter follows the global log_level; the OTLP layers follow the
-    // per-signal level, which defaults to the global one but may be lower
-    // (e.g. info on the console, debug forwarded to the collector).
-    let console_filter = env_filter(cfg.log_level.as_deref().unwrap_or("info"));
-    let otel_filter = env_filter(
-        cfg.level
-            .as_deref()
-            .unwrap_or(cfg.log_level.as_deref().unwrap_or("info")),
-    );
+    // Console filter follows the global `[log] level`; each OTLP layer follows
+    // its signal's own level, falling back to the console level (e.g. info on
+    // the console, debug forwarded to the collector via [otel.logs] level).
+    let console_filter = env_filter(log_level);
+    let logs_filter = env_filter(cfg.logs.effective_level(log_level));
+    let traces_filter = env_filter(cfg.traces.effective_level(log_level));
 
     let registry = tracing_subscriber::registry();
-    let registry = registry.with(tracing_subscriber::fmt::layer().with_filter(console_filter));
+    let registry = registry.with(
+        tracing_subscriber::fmt::layer()
+            .json()
+            .with_filter(console_filter),
+    );
 
     let lp_layer = match lp.as_ref() {
         Some(lp) => opentelemetry_appender_tracing::layer::OpenTelemetryTracingBridge::new(lp)
-            .with_filter(otel_filter.clone())
+            .with_filter(logs_filter)
             .boxed(),
         None => tracing_subscriber::fmt::layer()
             .with_filter(tracing::level_filters::LevelFilter::OFF)
@@ -173,7 +176,7 @@ pub fn install(
     let tp_layer = match tp.as_ref() {
         Some(tp) => tracing_opentelemetry::layer()
             .with_tracer(tp.tracer(service_name.to_string()))
-            .with_filter(otel_filter)
+            .with_filter(traces_filter)
             .boxed(),
         None => tracing_subscriber::fmt::layer()
             .with_filter(tracing::level_filters::LevelFilter::OFF)

@@ -59,8 +59,12 @@ async fn run_daemon(path: &str) -> anyhow::Result<()> {
     let _ =
         rustls::crypto::CryptoProvider::install_default(rustls::crypto::ring::default_provider());
 
-    let _guard =
-        mielofon_otel::install(&cfg.otel, "mielofon-controller", env!("CARGO_PKG_VERSION"))?;
+    let _guard = mielofon_otel::install(
+        &cfg.otel,
+        &cfg.log.level,
+        "mielofon-controller",
+        env!("CARGO_PKG_VERSION"),
+    )?;
 
     // TLS. Members+clients demand mTLS pinned to the same CA; gossip reuses the
     // node client identity for outgoing anti-entropy pushes.

@@ -87,6 +87,9 @@ fi
 	echo "cert = \"${WORK_DIR}/node.crt\""
 	echo "key = \"${WORK_DIR}/node.key\""
 	echo
+	echo "[log]"
+	echo "level = \"info\""
+	echo
 	echo "[otel]"
 	echo "enabled = false"
 } > "${WORK_DIR}/mielofon-controller.toml"

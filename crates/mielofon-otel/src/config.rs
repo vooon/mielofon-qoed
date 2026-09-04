@@ -17,7 +17,7 @@ pub enum ParseError {
 }
 
 /// Singleton-signal configuration. Each signal may override the global
-/// endpoint per-transport; only `enabled` and `endpoint` are wired today.
+/// endpoint and carries its own enabled flag and minimum forwarded level.
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(default)]
 pub struct OTelSignalConfig {
@@ -26,6 +26,9 @@ pub struct OTelSignalConfig {
     pub endpoint: Option<String>,
     /// Override the global enabled flag for this signal.
     pub enabled: Option<bool>,
+    /// Minimum level forwarded to the collector for this signal (e.g.
+    /// `[otel.logs] level = "debug"`). Falls back to the console level.
+    pub level: Option<String>,
 }
 
 impl OTelSignalConfig {
@@ -38,6 +41,11 @@ impl OTelSignalConfig {
     pub fn is_enabled(&self, global_enabled: bool) -> bool {
         self.enabled.unwrap_or(global_enabled)
     }
+
+    /// Resolved minimum level: signal override or the given fallback.
+    pub fn effective_level<'a>(&'a self, fallback: &'a str) -> &'a str {
+        self.level.as_deref().unwrap_or(fallback)
+    }
 }
 
 /// Top-level OpenTelemetry configuration.
@@ -47,7 +55,9 @@ impl OTelSignalConfig {
 /// enabled = true
 /// endpoint = "http://collector.example:4318"
 /// service_name = "mielofon-controller"
-/// level = "info"
+///
+/// [otel.logs]
+/// level = "debug"
 /// ```
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(default)]
@@ -59,15 +69,7 @@ pub struct OTelConfig {
     /// Resource `service.name`. Usually not needed; caller passes it in.
     #[serde(alias = "service_name")]
     pub service_name: Option<String>,
-    /// Minimum level forwarded to the OTEL collector (log bridge + trace
-    /// layer). Independent of the console level; may be lower (e.g. forward
-    /// `debug` to the collector while the console stays at `info`).
-    pub level: Option<String>,
-    /// Console log level (fmt layer). Independent of the OTEL level; the
-    /// console is also installed when OTEL is disabled, so this is the knob
-    /// used to debug the daemon in tests. Defaults to `info`.
-    pub log_level: Option<String>,
-    /// Per-signal overrides.
+    /// Per-signal overrides (endpoint, enabled, min level).
     pub traces: OTelSignalConfig,
     pub metrics: OTelSignalConfig,
     pub logs: OTelSignalConfig,

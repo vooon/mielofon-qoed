@@ -159,6 +159,24 @@ impl Default for Cluster {
     }
 }
 
+/// Console/logging configuration. `level` is the minimum `tracing` level
+/// emitted to the console as structured JSON (default `info`). It is
+/// independent of the per-signal OTEL levels in `[otel.*]`.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+pub struct Log {
+    /// Minimum console level: trace, debug, info, warn, error.
+    pub level: String,
+}
+
+impl Default for Log {
+    fn default() -> Self {
+        Log {
+            level: "info".into(),
+        }
+    }
+}
+
 /// Top-level controller configuration.
 ///
 /// ```toml
@@ -170,6 +188,8 @@ impl Default for Cluster {
 /// [listeners]
 /// [tls]
 /// [quality]
+/// [log]
+/// level = "info"
 /// [otel]
 /// ```
 #[derive(Debug, Clone, Deserialize, Default)]
@@ -181,6 +201,7 @@ pub struct Config {
     pub members: Members,
     pub tls: Tls,
     pub quality: Quality,
+    pub log: Log,
     pub otel: mielofon_otel::OTelConfig,
 }
 
