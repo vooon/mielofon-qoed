@@ -65,9 +65,47 @@ A directed link `{from, to, interface}` maps to a measurement record:
 ```jsonc
 POST /v1/agent/register           // clients
 { "agent": "spoke-1",
-  "links": [ {"from":"spoke-1","to":"hub-a","interface":"awg_hub_a"} ] }
+  "links": [ {"from":"spoke-1","to":"hub-a","interface":"awg_hub_a"} ],
+  "loopback": "fd00:0:0:1::1" }   // mesh loopback (dummy_awg), for /v1/trace
 // -> { "ok": true, "commands": [ {apply_cost …} ] }   // current policy snapshot
 ```
+
+`loopback` is the agent's global IPv6 on `dummy_awg` (the mesh loopback). The
+controller stores it per node and uses it to resolve a destination *node name*
+into the prefix the trace walker asks each hop's BIRD to resolve. Older agents
+omit the field; the trace sets just render the hop unresolvable.
+
+### Trace
+
+```jsonc
+{ "id": "trace2f4e…", "type": "trace", "target": "fd00:0:0:1::3" }
+```
+
+The controller asks a hop agent to resolve `target` against BIRD:
+`ubus call bird route {prefix}` (rpcd-mod-bird ≥ 0.5.0). The reply passes the
+route resolution through untouched — the controller owns ECMP parsing.
+
+```jsonc
+POST /v1/agent/reply              // clients
+{ "id": "trace2f4e…", "kind": "trace",
+  "prefix": "fd00:0:0:1::3",
+  "code": 0,                      // 0 ok, 1 unresolved, 2 bad args
+  "routes": [ {
+      "prefix": "fd00:0:0:1::3/128", "primary": "via",
+      "proto": "ospf3", "preference": 150, "cost": 10,
+      "next_hops": [
+        { "kind": "via", "addr": "fd00:0:0:1::0:2", "iface": "awg_hub_a", "cost": 10 },
+        { "kind": "dev", "iface": "dummy_awg", "cost": 0 }   // destination reached
+      ] } ] }
+```
+
+- `kind: via` — the hop is reachable out `iface`; the controller resolves the
+  peer from the hop's registered links (`interface` is the *from* side, matching
+  BIRD's egress), continues the walk, and annotates the edge with the link's
+  KV measurement.
+- `kind: dev` on the destination's own loopback — branch terminated (reached).
+- `code: 1` / empty `routes` (older rpcd, no `route` method) — unresolvable
+  hop: marked broken, the walk keeps going on the other ECMP branches.
 
 ### Pull commands (long-poll)
 
@@ -132,11 +170,31 @@ tolerated and reported as `conflict`.
 GET /v1/quality?from=..&to=..&interface=..   latest record for a link
 GET /v1/quality/all                          full replicated view
 GET /v1/policy?from=..&to=..&interface=..    quality + ospf_cost decision
+GET /v1/trace?from=..&to=..                  ECMP-aware end-to-end path DAG
 GET /v1/status                               node, readiness, leases, agents
 GET /healthz                                 200 when process is up
 GET /readyz                                  200 when ready, 503 otherwise
 GET /metrics                                 Prometheus text exposition
 ```
+
+`GET /v1/trace?from=spoke-1&to=node-z` walks the mesh from the `from` agent
+to the destination node's registered mesh loopback (a raw `prefix=` overrides
+name resolution). The response is a BFS over every route's `next_hops` —
+equal-cost branches are kept (a DAG), one `edges` row per traversed edge:
+
+```jsonc
+{ "from": "spoke-1", "to": "node-z", "prefix": "fd00:0:0:1::3",
+  "ts": 1747000000, "complete": true, "cap_hit": false,
+  "edges": [ { "depth": 0, "node": "spoke-1", "iface": "awg_hub_a", "to": "hub-a", "rtt_ms": 12.0,
+               "loss_pct": 0.0, "quality": "good", "ospf_cost": 10, "broken": false },
+             { "depth": 1, "node": "hub-a", "iface": "awg_hub_b", "to": "hub-b", … },
+             { "depth": 2, "node": "hub-b", "iface": "dummy_awg", "term": true, "broken": false } ] }
+```
+
+`term` marks "destination reached" (`dev` on the target's own loopback);
+`broken` marks conflict/bad/missing-quality edges, dead-ends (no route), hop
+timeouts, or the hop-cap cut. Results are TTL-cached ~5 s for the map page's
+auto-refresh.
 
 ## Gossip (anti-entropy)
 

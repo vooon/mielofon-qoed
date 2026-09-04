@@ -7,7 +7,7 @@ members = [
 default-members = ["crates/controller"]
 
 [workspace.package]
-version = "0.4.2"
+version = "0.5.0"
 edition = "2021"
 license = "Apache-2.0"
 repository = "https://github.com/vooon/mielofon-qoed"
@@ -16,7 +16,7 @@ repository = "https://github.com/vooon/mielofon-qoed"
 mielofon-otel = { path = "crates/mielofon-otel" }
 
 # Async runtime / HTTP
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "net", "time"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "net", "time", "sync"] }
 axum = { version = "0.8", features = ["http1", "tokio"] }
 tower = { version = "0.5", features = ["util"] }
 http = "1"

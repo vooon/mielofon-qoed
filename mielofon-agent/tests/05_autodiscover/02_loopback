@@ -1,0 +1,40 @@
+-- Testcase --
+import * as ad from 'autodiscover';
+
+/* A dummy_awg status with the mesh loopback before a link-local: the global
+ * (non-link-local) address must be picked. */
+let st = {
+	'ipv6-address': [
+		{ address: 'fe80::4243:40:1', mask: 64 },
+		{ address: 'fd00:0:0:1::1', mask: 128 },
+	],
+};
+
+let lb = ad.loopback_address(st);
+
+if (lb != 'fd00:0:0:1::1')
+	die('expected mesh loopback, got ' + lb);
+
+/* Link-local only → null */
+let lb2 = ad.loopback_address({ 'ipv6-address': [ { address: 'fe80::1', mask: 64 } ] });
+
+if (lb2 != null)
+	die('link-local only should be null');
+
+/* Null status / null address list → null */
+if (ad.loopback_address(null) != null)
+	die('null status should be null');
+
+if (ad.loopback_address({}) != null)
+	die('empty status should be null');
+
+/* A later global wins when the first address is link-local */
+let lb3 = ad.loopback_address({
+	'ipv6-address': [
+		{ address: 'fe80::1', mask: 64 },
+		{ address: 'fd00:0:0:1::2', mask: 128 },
+	],
+});
+
+if (lb3 != 'fd00:0:0:1::2')
+	die('global preferred over link-local');

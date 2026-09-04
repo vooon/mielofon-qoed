@@ -1,0 +1,73 @@
+-- Testcase --
+import { connect } from 'ubus';
+import { query_route } from 'cost';
+
+/* A fresh rpcd-mod-bird (`route` present): ECMP next hops pass through. */
+global.MOCK_UBUS = {
+	'bird.route': {
+		code: 0,
+		routes: [
+			{
+				prefix: 'fd00:0:0:1::3/128',
+				primary: 'via',
+				proto: 'ospf3',
+				preference: 150,
+				cost: 10,
+				local_pref: null,
+				as_path: null,
+				next_hops: [
+					{ kind: 'via', addr: 'fd00:0:0:1::0:2', iface: 'awg_hub_a', cost: 10 },
+					{ kind: 'via', addr: 'fd00:0:0:1::0:9', iface: 'awg_hub_b', cost: 10 },
+				],
+			},
+		],
+	},
+};
+
+let r = query_route(connect(), 'fd00:0:0:1::3');
+
+if (r == null)
+	die('query_route returned null');
+
+if (r.code != 0)
+	die('code mismatch: ' + r.code);
+
+if (length(r.routes) != 1)
+	die('routes length mismatch');
+
+let hops = r.routes[0].next_hops;
+
+if (length(hops) != 2)
+	die('ECMP next_hops not passed through');
+
+if (hops[0].kind != 'via' || hops[0].iface != 'awg_hub_a' || hops[0].cost != 10)
+	die('first hop mismatch');
+
+if (hops[1].iface != 'awg_hub_b')
+	die('second hop mismatch');
+
+/* Missing rpcd method (old plugin): the call returns null and the controller
+ * must treat the hop as unresolvable — code 1, not an agent error. */
+global.MOCK_UBUS = {};
+let r2 = query_route(connect(), 'fd00:0:0:1::ff');
+
+if (r2.code != 1)
+	die('missing route method should be code 1');
+
+/* A route with no next_hops still passes through with its code. */
+global.MOCK_UBUS = { 'bird.route': { code: 1, routes: [] } };
+let r3 = query_route(connect(), 'fd00:0:0:1::ff');
+
+if (r3.code != 1 || length(r3.routes) != 0)
+	die('empty-route passthrough mismatch');
+
+/* Empty/missing target → bad args. */
+if (query_route(connect(), null).code != 2)
+	die('null target should be code 2');
+
+if (query_route(connect(), '').code != 2)
+	die('empty target should be code 2');
+
+/* No ubus bus → unresolvable. */
+if (query_route(null, 'fd00:0:0:1::3').code != 1)
+	die('missing bus should be code 1');

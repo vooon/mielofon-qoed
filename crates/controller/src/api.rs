@@ -96,6 +96,15 @@ pub struct LinkQuery {
     pub interface: String,
 }
 
+/// Trace query: `from` (source agent), `to` (destination node name, resolved
+/// from its reported mesh loopback) or a raw `prefix` override.
+#[derive(Debug, Deserialize)]
+pub struct TraceQuery {
+    pub from: String,
+    pub to: Option<String>,
+    pub prefix: Option<String>,
+}
+
 // ── Members+clients handlers (mTLS) ───────────────────────────────────────
 
 pub async fn fence_acquire(
@@ -237,7 +246,7 @@ pub async fn register_agent(
             commands: Vec::new(),
         });
     }
-    state.workers.register(&req.agent, req.links);
+    state.workers.register(&req.agent, req.links, req.loopback);
 
     // Seed current policy for the agent's links.
     let mut commands = Vec::new();
@@ -359,6 +368,21 @@ pub enum AgentReply {
         #[serde(default)]
         traceparent: Option<String>,
     },
+    /// Answer to a `WorkCmd::Trace`: the hop's BIRD route resolution for the
+    /// command's `target` prefix, passed through from `rpcd-mod-bird route`.
+    /// The controller owns the ECMP parsing (see `crates/controller/src/trace.rs`).
+    Trace {
+        agent: String,
+        id: String,
+        /// Echo of the dispatch span's W3C `traceparent`.
+        #[serde(default)]
+        traceparent: Option<String>,
+        prefix: String,
+        #[serde(default)]
+        code: i64,
+        #[serde(default)]
+        routes: Vec<crate::trace::RouteRep>,
+    },
 }
 
 /// Run `f` inside a span whose W3C parent is `traceparent`, when present.
@@ -426,7 +450,53 @@ pub async fn agent_reply(
             });
             Json(serde_json::json!({"ok": true, "id": id}))
         }
+        AgentReply::Trace {
+            agent,
+            id,
+            traceparent,
+            prefix,
+            code,
+            routes,
+        } => {
+            // Hand the hop resolution back to the trace walker, which is
+            // awaiting it by command id.
+            let delivered = with_traceparent(traceparent.as_deref(), || {
+                state.trace.complete(
+                    &id,
+                    crate::trace::TraceHopReply {
+                        agent,
+                        prefix,
+                        code,
+                        routes,
+                    },
+                )
+            });
+            Json(serde_json::json!({"ok": delivered, "id": id}))
+        }
     }
+}
+
+// ── Mesh map ───────────────────────────────────────────────────────────────
+
+/// The map dashboard page (vis-network, hubs ring + spokes star).
+pub async fn mesh_map() -> Html<String> {
+    Html(crate::map::page())
+}
+
+/// Frontend graph data: nodes + per-link measurements. Sanitized — node ids
+/// are the placeholder agent/hub names, addresses never leave the daemon.
+pub async fn mesh_map_data(State(state): State<AppState>) -> Json<serde_json::Value> {
+    let (nodes, links) = crate::map::graph_part(&state);
+    Json(serde_json::json!({ "nodes": nodes, "links": links }))
+}
+
+/// The bundled vis-network script (Apache-2.0).
+pub async fn mesh_map_asset() -> Response {
+    let mut resp = crate::map::VIS_NETWORK_JS.into_response();
+    if let Ok(h) = header::HeaderValue::from_str("application/javascript; charset=utf-8") {
+        resp.headers_mut().insert(header::CONTENT_TYPE, h);
+    }
+    resp
 }
 
 // ── Admin handlers (plain HTTP on loopback) ───────────────────────────────
@@ -554,6 +624,28 @@ pub async fn get_status(State(state): State<AppState>) -> Json<StatusResp> {
     })
 }
 
+/// Run an end-to-end, ECMP-aware trace from a source agent to a destination
+/// node (resolved via its registered mesh loopback) or a raw prefix.
+pub async fn get_trace(State(state): State<AppState>, Query(q): Query<TraceQuery>) -> Response {
+    match crate::trace::run_trace(
+        &state,
+        crate::trace::TraceRequest {
+            from: q.from,
+            to: q.to,
+            prefix: q.prefix,
+        },
+    )
+    .await
+    {
+        Ok(res) => (StatusCode::OK, Json(res)).into_response(),
+        Err(crate::trace::TraceError::BadRequest(msg)) => (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": msg})),
+        )
+            .into_response(),
+    }
+}
+
 /// Members-listener liveness probe. Nodes ping each other over the mTLS
 /// members port; the gossip loop measures this round-trip for /v1/status.
 pub async fn ping(State(state): State<AppState>) -> Json<serde_json::Value> {
@@ -616,6 +708,10 @@ pub fn client_router() -> Router<AppState> {
 pub fn admin_router() -> Router<AppState> {
     Router::new()
         .route("/", get(index))
+        .route("/map", get(mesh_map))
+        .route("/static/vis-network.min.js", get(mesh_map_asset))
+        .route("/v1/graph", get(mesh_map_data))
+        .route("/v1/trace", get(get_trace))
         .route("/metrics", get(metrics))
         .route("/healthz", get(healthz))
         .route("/readyz", get(readyz))

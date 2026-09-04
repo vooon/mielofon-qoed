@@ -82,6 +82,22 @@ function flip_last_bit(addr)
 	return head + sprintf('%x', v ^ 1);
 }
 
+/* The node's mesh loopback: a global (non-link-local) IPv6 assigned to the
+ * loopback interface (`dummy_awg`). The agent reports this at register so the
+ * controller's trace walker can resolve a destination *node name* into the
+ * prefix it asks each hop's BIRD to resolve. Returns null when absent. */
+export function loopback_address(iface_status)
+{
+	if (iface_status == null || iface_status['ipv6-address'] == null)
+		return null;
+
+	for (let a in iface_status['ipv6-address'])
+		if (!is_linklocal(a.address))
+			return a.address;
+
+	return null;
+};
+
 /* ---- BGP peer / node naming -------------------------------------------- */
 
 /* "peer_hub_a_example_com" minus "peer_" minus "_example_com" -> "hub_a". */

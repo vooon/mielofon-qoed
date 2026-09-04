@@ -7,11 +7,13 @@ this file records the contract they established (so the mielofon side can
 pin against the real field/method names). Sanitized examples throughout
 (`mesh_v3`, `awg_hub_a`, `peer_hub_a_example_com`).
 
-## Scope (both done)
+## Scope (done + planned)
 
 1. `bird status` reports each OSPF interface's **type** (`ptp`/`broadcast`/…).
 2. A dedicated **cost method** `bird set_ospf_cost` changes an OSPF
    interface cost without the caller building a raw BIRD CLI string.
+3. **Planned (rolls next firmware):** a read `bird route` method returning
+   ECMP-aware next hops for the controller's end-to-end trace walker.
 
 `bird query` and `bird status` remain **backwards compatible**; the parser
 helpers moved to `src/birdconfig.uc` (pure, unit-tested with the plugin).
@@ -69,6 +71,45 @@ Behaviour (OpenWrt-specific, kept for whoever maintains the feed later):
    the config; the consumer passes `interface` + `cost` only.
 
 The method is idempotent: setting the same cost twice is a plain success.
+
+## Change 3 — `bird route` (planned, rolls as 0.5.0)
+
+Read-only: resolves a prefix the way BIRD would forward to it. Backed by
+`birdc "show route for <prefix> all"` parsed with `birdconfig.uc`
+(`parseRoute`, `exactRoute`, `bestCoveringRoute` fallback).
+
+Args (mirror `query`'s object style; `socket` optional):
+
+```ucode
+route: { prefix: 'fd00:0:0:1::3', socket: '/run/bird.ctl' }
+```
+
+Return: `{ code, routes: [...] }`:
+
+- `code 0` — at least one usable route found (could be an ECMP group);
+- `code 1` — no route for the prefix;
+- `code 2` — bad args (`prefix` empty/missing).
+
+Each route:
+
+```jsonc
+{ "prefix": "fd00:0:0:1::3/128", "primary": "via",
+  "proto": "ospf3", "preference": 150, "cost": 10,
+  "local_pref": 100, "as_path": null,       // BGP-only fields may be null
+  "next_hops": [
+    { "kind": "via", "addr": "fd00:0:0:1::0:2", "iface": "awg_hub_a", "cost": 10 },
+    { "kind": "dev", "iface": "dummy_awg", "cost": 0 }
+  ] }
+```
+
+- `primary` is `"via"` or `"dev"`; `next_hops` carries one entry per
+  BIRD `via`/`dev` line. **ECMP-aware**: a prefix with N equal-cost paths has
+  N `via` entries in one route object.
+- A locally-attached prefix has `kind: "dev"` (the mesh's `dummy_awg`
+  loopback). The mielofon trace walker treats `dev` as "destination reached"
+  on the destination's own loopback.
+- Field names above are stable for the consumer (the agent passes the reply
+  through untouched; parsing is entirely controller-side).
 
 ## Consumer notes (agent side)
 

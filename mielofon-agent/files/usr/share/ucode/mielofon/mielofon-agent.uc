@@ -26,15 +26,20 @@ import * as uloop from 'uloop';
 import * as digest from 'digest';
 import { create as create_client, post_json } from './client.uc';
 import { new_client } from './transport.uc';
-import { discover as discover_links } from './autodiscover.uc';
+import { discover as discover_links, loopback_address } from './autodiscover.uc';
 import { run_always, run_throughput } from './probes.uc';
-import { apply_cost } from './cost.uc';
+import { apply_cost, query_route } from './cost.uc';
 import * as metrics from './metrics.uc';
 import { float, parse_json, default_agent_name } from './utils.uc';
 
 let cfg = {};
 let links = [];
 let client = null;
+
+/* The node's mesh loopback (from `network.interface.<loopback_iface>
+ * status`), reported at register so the controller's trace walker can resolve
+ * this node as a trace destination. Populated by refresh_links(). */
+let loopback = null;
 
 /* State-machine state. `queue` holds commands drained from the controller.
  * Exactly one async step (a reply post or the long poll) is in flight at any
@@ -75,6 +80,7 @@ function load_config()
 		ospf_protocol: proto,
 		bgp_peer_suffix: ctx.get('mielofon-agent', 'main', 'bgp_peer_suffix') || null,
 		iface_prefix: ctx.get('mielofon-agent', 'main', 'iface_prefix') || 'awg_',
+		loopback_iface: ctx.get('mielofon-agent', 'main', 'loopback_iface') || 'dummy_awg',
 		excludes: [],
 		log_level: ctx.get('mielofon-agent', 'main', 'log_level') || 'notice',
 		timeout_ms: int(ctx.get('mielofon-agent', 'main', 'command_timeout_ms') || '30000'),
@@ -131,6 +137,15 @@ function refresh_links()
 		l.from = cfg.agent;
 
 	metrics.set_links(links);
+
+	/* The mesh loopback for trace destination resolution. A fresh ubus
+	 * snapshot each refresh: the interface may not be up until BIRD/Owrt
+	 * settle, and a later cycle picks it up. */
+	loopback = null;
+	let ls = bus.call('network.interface.' + cfg.loopback_iface, 'status', {});
+
+	if (ls != null)
+		loopback = loopback_address(ls);
 };
 
 function find_link(iface)
@@ -194,6 +209,21 @@ function run_command(cmd, cb)
 				note: err || null,
 			}, cb);
 		});
+
+		return;
+	}
+
+	if (cmd.type == 'trace') {
+		let bus = ubus_connect();
+		let r = query_route(bus, cmd.target);
+
+		metrics.counters.commands_succeeded++;
+		reply_send(cmd, {
+			kind: 'trace',
+			prefix: cmd.target,
+			code: r.code,
+			routes: r.routes,
+		}, cb);
 
 		return;
 	}
@@ -289,7 +319,7 @@ function pump()
 	if (need_register) {
 		need_register = false;
 
-		let body = { agent: cfg.agent, links: [] };
+		let body = { agent: cfg.agent, links: [], loopback: loopback };
 
 		/* Re-discover on every attempt: picks up links added/reconfigured
 		 * and self-heals if a transient BIRD/ubus outage returned none. */

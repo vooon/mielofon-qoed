@@ -41,14 +41,26 @@ pub enum WorkCmd {
         #[serde(skip_serializing_if = "Option::is_none")]
         traceparent: Option<String>,
     },
+    /// Ask an agent to resolve `target` (an IP/prefix) against BIRD and report
+    /// the `next_hops` it would transport to. Used by the end-to-end trace
+    /// walker (`crates/controller/src/trace.rs`).
+    Trace {
+        id: String,
+        target: String,
+        /// W3C `traceparent` of the dispatch span (see above).
+        #[serde(skip_serializing_if = "Option::is_none")]
+        traceparent: Option<String>,
+    },
 }
 
 /// Per-agent state: its managed links, pending work, last-issued timestamps
-/// per tier, and the last cost the controller told it to apply.
+/// per tier, the last cost the controller told it to apply, and the mesh
+/// loopback it reported at register (the trace walker's "to" resolution).
 #[derive(Default)]
 struct Worker {
     links: Vec<LinkKey>,
     queue: VecDeque<WorkCmd>,
+    loopback: Option<String>,
     /// link id -> cost the controller has sent (even if not yet acked)
     applied_sent: HashMap<String, u32>,
     /// link id -> unix secs of last issue per tier
@@ -118,11 +130,12 @@ impl WorkerRegistry {
     /// A registration starts a clean slate: any work the scheduler queued while
     /// the agent was away is dropped, so a (re)connecting agent only receives
     /// commands issued after it came back.
-    pub fn register(&self, agent: &str, links: Vec<LinkKey>) -> bool {
+    pub fn register(&self, agent: &str, links: Vec<LinkKey>, loopback: Option<String>) -> bool {
         let mut map = self.inner.lock().expect("workers lock poisoned");
         let w = map.entry(agent.to_string()).or_default();
         w.last_seen = now_secs();
         w.queue.clear();
+        w.loopback = loopback;
         if links.is_empty() {
             return false;
         }
@@ -225,6 +238,25 @@ impl WorkerRegistry {
             .cloned()
             .collect()
     }
+
+    /// Whether an agent is currently registered.
+    pub fn has_agent(&self, agent: &str) -> bool {
+        self.inner
+            .lock()
+            .expect("workers lock poisoned")
+            .contains_key(agent)
+    }
+
+    /// The mesh loopback an agent reported at register, if any. This is how
+    /// the trace endpoint resolves a destination *node name* to the prefix the
+    /// walker asks each hop to resolve (see `crates/controller/src/trace.rs`).
+    pub fn loopback(&self, agent: &str) -> Option<String> {
+        self.inner
+            .lock()
+            .expect("workers lock poisoned")
+            .get(agent)
+            .and_then(|w| w.loopback.clone())
+    }
 }
 
 fn now_secs() -> u64 {
@@ -239,6 +271,10 @@ fn cmd_key(c: &WorkCmd) -> (String, String) {
     match c {
         WorkCmd::Probe { link, tier, .. } => (link.id(), format!("probe/{tier:?}")),
         WorkCmd::ApplyCost { link, .. } => (link.id(), "apply".into()),
+        // Trace commands are unique per dispatch — the cmd id is the dedup key,
+        // so a walker that retries a dead/unresponsive hop cannot silently lose
+        // a command behind an identical one that is already queued.
+        WorkCmd::Trace { id, .. } => (id.clone(), "trace".into()),
     }
 }
 
@@ -248,6 +284,10 @@ pub struct RegisterReq {
     pub agent: String,
     #[serde(default)]
     pub links: Vec<LinkKey>,
+    /// Mesh loopback address (IPv6) the agent reported, used by the trace
+    /// walker to resolve a destination node name into a routable target.
+    #[serde(default)]
+    pub loopback: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -286,7 +326,7 @@ mod tests {
     #[test]
     fn register_adds_links_and_marks_owned() {
         let r = WorkerRegistry::new();
-        assert!(r.register("spoke-1", vec![link()]));
+        assert!(r.register("spoke-1", vec![link()], None));
         assert_eq!(r.len(), 1);
         let owned = r.owned_links();
         assert_eq!(owned.len(), 1);
@@ -296,7 +336,7 @@ mod tests {
     #[test]
     fn always_due_at_first_then_not_until_interval() {
         let r = WorkerRegistry::new();
-        r.register("spoke-1", vec![link()]);
+        r.register("spoke-1", vec![link()], None);
         assert!(r.always_due("spoke-1", &link(), 1000, 15));
         r.mark_issued("spoke-1", &link(), Tier::Always, 1000);
         assert!(!r.always_due("spoke-1", &link(), 1010, 15));
@@ -306,7 +346,7 @@ mod tests {
     #[test]
     fn pending_commands_are_drained_once() {
         let r = WorkerRegistry::new();
-        r.register("spoke-1", vec![link()]);
+        r.register("spoke-1", vec![link()], None);
         r.push(
             "spoke-1",
             WorkCmd::Probe {
@@ -324,7 +364,7 @@ mod tests {
     #[test]
     fn applied_sent_tracking() {
         let r = WorkerRegistry::new();
-        r.register("spoke-1", vec![link()]);
+        r.register("spoke-1", vec![link()], None);
         assert_eq!(r.applied_sent("spoke-1", &link()), None);
         r.set_applied_sent("spoke-1", &link(), 50);
         assert_eq!(r.applied_sent("spoke-1", &link()), Some(50));
@@ -333,7 +373,7 @@ mod tests {
     #[test]
     fn push_dedups_same_link_tier() {
         let r = WorkerRegistry::new();
-        r.register("spoke-1", vec![link()]);
+        r.register("spoke-1", vec![link()], None);
         let probe = |n: &str| WorkCmd::Probe {
             id: n.into(),
             tier: Tier::Always,
@@ -350,7 +390,7 @@ mod tests {
     #[test]
     fn register_drops_stale_queued_work() {
         let r = WorkerRegistry::new();
-        r.register("spoke-1", vec![link()]);
+        r.register("spoke-1", vec![link()], None);
         r.push(
             "spoke-1",
             WorkCmd::Probe {
@@ -362,7 +402,7 @@ mod tests {
             },
         );
         // Re-register (e.g. agent reconnect) clears anything queued while away.
-        assert!(!r.register("spoke-1", vec![link()]));
+        assert!(!r.register("spoke-1", vec![link()], None));
         assert!(r.drain("spoke-1").is_empty());
         // New work is accepted after the reset.
         r.push(
@@ -376,5 +416,18 @@ mod tests {
             },
         );
         assert_eq!(r.drain("spoke-1").len(), 1);
+    }
+
+    #[test]
+    fn loopback_register_lookup() {
+        let r = WorkerRegistry::new();
+        assert_eq!(r.loopback("spoke-1"), None);
+        assert!(!r.has_agent("spoke-1"));
+        r.register("spoke-1", vec![link()], Some("fd00:0:0:1::1".into()));
+        assert_eq!(r.loopback("spoke-1"), Some("fd00:0:0:1::1".into()));
+        assert!(r.has_agent("spoke-1"));
+        // Re-register without a loopback drops it (agent cannot report it).
+        r.register("spoke-1", vec![link()], None);
+        assert_eq!(r.loopback("spoke-1"), None);
     }
 }

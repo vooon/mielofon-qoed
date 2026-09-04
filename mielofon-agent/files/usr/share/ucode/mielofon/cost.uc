@@ -69,3 +69,27 @@ export function apply_cost(iface, cost, cb, tries)
 	log.NOTE('bird set_ospf_cost: %s\n', res.stdout);
 	cb(null);
 };
+
+/* BIRD route lookup for the controller's end-to-end trace walker (rpcd-mod-
+ * bird >= 0.5.0): `bird route {prefix}` returns `{code, routes:[...]}` with
+ * ECMP-aware next hops. The reply is passed through untouched — the controller
+ * owns the ECMP parsing. Older rpcd snapshots have no `route` method, which
+ * renders as an unresolvable hop, not an agent error. */
+export function query_route(bus, target)
+{
+	if (target == null || !length(target))
+		return { code: 2, routes: [] };
+
+	if (bus == null)
+		return { code: 1, routes: [] };
+
+	let res = bus.call('bird', 'route', { prefix: target });
+
+	if (res == null)
+		return { code: 1, routes: [] };
+
+	let code = (res.code != null) ? int(res.code) : 1;
+	let routes = (res.routes != null) ? res.routes : [];
+
+	return { code: code, routes: routes };
+};
