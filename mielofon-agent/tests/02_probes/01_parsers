@@ -15,6 +15,30 @@ if (p.loss != 0)
 if (!(p.rtt > 11 && p.rtt < 12))
 	die('rtt mismatch: ' + p.rtt);
 
+/* busybox: 100% loss drops the round-trip line entirely → rtt null. */
+let p2 = parse_ping(
+	'PING fd00:0:0:1::1 (fd00:0:0:1::1): 56 data bytes\n' +
+	'\n' +
+	'--- fd00:0:0:1::1 ping statistics ---\n' +
+	'3 packets transmitted, 0 packets received, 100% packet loss\n'
+);
+
+if (p2.loss != 100)
+	die('busybox loss mismatch: ' + p2.loss);
+
+if (p2.rtt != null)
+	die('busybox failed ping must not carry an rtt: ' + p2.rtt);
+
+/* iputils on 100% loss still prints a 0.000 summary → callers null it. */
+let p3 = parse_ping(
+	'--- fd00:0:0:1::1 ping statistics ---\n' +
+	'3 packets transmitted, 0 received, 100% packet loss, time 3ms\n' +
+	'rtt min/avg/max/mdev = 0.000/0.000/0.000/0.000 ms\n'
+);
+
+if (p3.loss != 100 || p3.rtt != 0)
+	die('iputils 100%% loss parse mismatch: loss=' + p3.loss + ' rtt=' + p3.rtt);
+
 let t = parse_transaction_rate(
 	'Socket Message Elapsed Messages\n' +
 	'\n' +

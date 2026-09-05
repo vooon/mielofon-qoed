@@ -196,6 +196,22 @@ export function record_throughput(link, r)
 	e.last_unixtime = time();
 };
 
+/* Latest always-tier measurement for a link ({rtt_ms, loss_pct, rr_tps}, an
+ * entry per field or null). Throughput replies echo these so the controller
+ * keeps the always dims intact without any server-side history carry-forward:
+ * an always probe that could not measure a dimension reports null here and the
+ * controller stores exactly that (never a stale echo). */
+export function last_always(link)
+{
+	let e = by_link(link);
+
+	return {
+		rtt_ms: (exists(e, 'rtt_ms') && e.rtt_ms != null) ? e.rtt_ms : null,
+		loss_pct: (exists(e, 'loss_pct') && e.loss_pct != null) ? e.loss_pct : null,
+		rr_tps: (exists(e, 'rr_tps') && e.rr_tps != null) ? e.rr_tps : null,
+	};
+};
+
 /* ---- config ---------------------------------------------------------- */
 
 /* Read the output path and write interval from the `main` section. Returns

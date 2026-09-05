@@ -1,0 +1,41 @@
+-- Testcase --
+import * as metrics from 'metrics';
+
+let link = { from: 'spoke-1', to: 'hub-a', interface: 'awg_hub_a' };
+
+/* No measurement yet → all null. */
+let a = metrics.last_always(link);
+
+if (a.rtt_ms != null || a.loss_pct != null || a.rr_tps != null)
+	die('no always record yet must echo nulls');
+
+metrics.record_always(link, { rtt_ms: 12.3, loss_pct: 0.5, rr_tps: 88 });
+
+a = metrics.last_always(link);
+
+if (a.rtt_ms != 12.3 || a.loss_pct != 0.5 || a.rr_tps != 88)
+	die('last_always must echo the always record');
+
+/* A throughput run (or idle) must not clobber the always dims. */
+metrics.record_throughput(link, { util_mbps: 3.0, tcp_mbps: 40, busy: 0 });
+
+a = metrics.last_always(link);
+
+if (a.rtt_ms != 12.3 || a.rr_tps != 88)
+	die('throughput must preserve last_always');
+
+/* A fresh always record that could not measure (rtt null) is echoed as null —
+ * never a stale value (this is what removes the 100%-loss stale-rtt rows). */
+metrics.record_always(link, { rtt_ms: null, loss_pct: 100, rr_tps: null });
+
+a = metrics.last_always(link);
+
+if (a.rtt_ms != null || a.loss_pct != 100 || a.rr_tps != null)
+	die('unmeasured always dims must echo null, not stale');
+
+print('OK\n');
+-- Expect stdout --
+OK
+-- Expect exitcode --
+0
+-- End --

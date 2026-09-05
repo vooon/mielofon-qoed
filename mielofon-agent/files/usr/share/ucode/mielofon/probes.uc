@@ -134,18 +134,22 @@ export function run(shell_cmd, cb)
 
 function ping_command(link, cfg)
 {
-	/* Busybox ping rejects fractional `-i`; only pass it for integer values. */
+	/* Busybox ping rejects fractional `-i`; only pass it for integer values.
+	 * `timeout` (busybox/coreutils) bounds a black-holed target so a sync
+	 * popen can never stall the single-threaded agent pump. */
 	let ival = (cfg.ping_interval >= 1) ? ` -i ${cfg.ping_interval}` : '';
 	let src = (link.source != null) ? ` -I ${link.source}` : '';
 
-	return `ping -q -c ${cfg.ping_count} -W 1${ival}${src} ${link.target}`;
+	return `timeout 8 ping -q -c ${cfg.ping_count} -W 1${ival}${src} ${link.target}`;
 };
 
 function netperf_command(link, cfg)
 {
 	let src = (link.source != null) ? ` -L ${link.source}` : '';
 
-	return `netperf -l ${cfg.rr_duration} -t TCP_RR -H ${link.target}${src}`;
+	/* `-l 4` caps the data phase but NOT the TCP connect to netserver; the
+	 * `timeout` bounds a black-holed/refused control connection. */
+	return `timeout 12 netperf -l ${cfg.rr_duration} -t TCP_RR -H ${link.target}${src}`;
 };
 
 function iperf_command(link, cfg)
@@ -153,7 +157,7 @@ function iperf_command(link, cfg)
 	let src = (link.source != null) ? ` -B ${link.source}` : '';
 	let port = (cfg.iperf_port != null && cfg.iperf_port != 5201) ? ` -p ${cfg.iperf_port}` : '';
 
-	return `iperf3 -c ${link.target} -t ${cfg.tcp_duration} -f m -J${port}${src}`;
+	return `timeout 15 iperf3 -c ${link.target} -t ${cfg.tcp_duration} -f m -J${port}${src}`;
 };
 
 /* ── executors (order: everthing above is already declared) ─────────────── */
@@ -165,34 +169,57 @@ export function run_always(link, cfg, cb)
 	run(ping_command(link, cfg), function(ping_err, ping_out) {
 		let p = parse_ping(ping_out);
 
+		/* A ping that produced no statistics line (tool error) must not turn
+		 * into a fake `-1 loss` figure: an unmeasured dimension never
+		 * constrains quality on the controller. A 100%-loss ping keeps its
+		 * real `loss` but has no round-trip time — iputils still prints a
+		 * stale `0.000` summary line, so null the rtt explicitly. */
+		if (ping_err || p.loss < 0)
+			p = { loss: null, rtt: null };
+		else if (p.loss >= 100)
+			p.rtt = null;
+
+		if (ping_err || p.rtt == null)
+			metrics.counters.probe_errors.ping = (metrics.counters.probe_errors.ping || 0) + 1;
+
 		metrics.counters.probe_netperf++;
 		run(netperf_command(link, cfg), function(rr_err, rr_out) {
-			/* a probe that could not be answered (nothing to measure) is an
-			 * error, distinct from a busy link */
-			if (ping_err || p.rtt == null)
-				metrics.counters.probe_errors.ping = (metrics.counters.probe_errors.ping || 0) + 1;
-
 			let tps = parse_transaction_rate(rr_out);
+
+			/* A failed TCP_RR run (control connect refused, test aborted) is a
+			 * measurement failure, never a real "0 trans/s": report it as
+			 * unmeasured so it cannot escalate the link to bad. Zero was the
+			 * old behaviour and it silently re-routed whole links to cost 100. */
 			if (rr_err || tps <= 0)
 				metrics.counters.probe_errors.netperf = (metrics.counters.probe_errors.netperf || 0) + 1;
 
 			cb(null, {
-				rtt_ms: (p.rtt != null) ? p.rtt : null,
+				rtt_ms: p.rtt,
 				loss_pct: p.loss,
-				rr_tps: tps,
+				rr_tps: (rr_err || tps <= 0) ? null : tps,
 			});
 		});
 	});
 };
 
-/* Gated throughput tier: quiet gate first, then iperf3. */
+/* Gated throughput tier: quiet gate first, then iperf3. Echoes the last
+ * always-tier measurement (metrics.last_always) so the controller keeps the
+ * rtt/loss/rr dims without any server-side history carry-forward. */
 export function run_throughput(link, cfg, cb)
 {
+	let a = metrics.last_always(link);
 	let util = util_mbps(link.interface);
 
 	if (util > cfg.quiet_max_mbps) {
 		metrics.counters.probe_busy++;
-		cb(null, { busy: true, util_mbps: util, tcp_mbps: null });
+		cb(null, {
+			busy: true,
+			util_mbps: util,
+			tcp_mbps: null,
+			rtt_ms: a.rtt_ms,
+			loss_pct: a.loss_pct,
+			rr_tps: a.rr_tps,
+		});
 		return;
 	}
 
@@ -207,6 +234,9 @@ export function run_throughput(link, cfg, cb)
 			busy: (tcp == null),
 			util_mbps: util,
 			tcp_mbps: tcp,
+			rtt_ms: a.rtt_ms,
+			loss_pct: a.loss_pct,
+			rr_tps: a.rr_tps,
 		});
 	});
 };

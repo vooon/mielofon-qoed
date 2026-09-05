@@ -252,9 +252,9 @@ function run_command(cmd, cb)
 			reply_send(cmd, {
 				kind: 'probe',
 				link: { from: link.from, to: link.to, interface: link.interface },
-				rtt_ms: null,
-				loss_pct: null,
-				rr_tps: null,
+				rtt_ms: r.rtt_ms,
+				loss_pct: r.loss_pct,
+				rr_tps: r.rr_tps,
 				token: cmd.token || null,
 				util_mbps: r.util_mbps,
 				tcp_mbps: r.tcp_mbps,

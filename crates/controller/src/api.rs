@@ -49,6 +49,10 @@ pub struct ReleaseReq {
 pub struct QualityReq {
     pub link: LinkKey,
     pub ts: Option<u64>,
+    /// Always-tier dimensions. Always probes always send what they measured
+    /// (`null` when unmeasurable); throughput replies echo the agent's last
+    /// always-tier measurement so these stay populated across fence-gated
+    /// runs. Stored verbatim — no history carry-forward on the controller.
     #[serde(default)]
     pub rtt_ms: Option<f64>,
     #[serde(default)]
@@ -196,16 +200,22 @@ struct Measure {
 }
 
 /// Shared measurement ingest: classify, store (LWW), and release the fence
-/// when a gated throughput report echoes its token. A report that leaves an
-/// always-tier dimension unset (`None`, e.g. a gated throughput reply that
-/// only carries tcp_mbps) keeps the previously stored value for that
-/// dimension instead of blanking it.
+/// when a gated throughput report echoes its token.
+///
+/// No history carry-forward happens here: an always-tier probe always sends
+/// the rtt/loss/rr it measured (null when it could not), and a throughput
+/// reply echoes the agent's last always-tier measurement. Storing exactly
+/// what arrives means a failed probe clears the stale dimension instead of
+/// resurrecting it (e.g. a 100%-loss ping must not keep an old rtt).
 fn ingest_quality(state: &AppState, m: Measure) -> (Option<Quality>, Option<u32>) {
-    let prev = state.kv.get(&m.link);
+    // Legacy agents on an always probe report a failed TCP_RR run as rr_tps 0.0
+    // — a measurement failure, never a real sustained rate. Treat it as
+    // unmeasured so it cannot silently re-classify the link to bad.
+    let rr = normalize_rr(m.rr_tps);
     let mut rec = QualityRecord::new(
-        m.rtt_ms.or(prev.as_ref().and_then(|p| p.rtt_ms)),
-        m.loss_pct.or(prev.as_ref().and_then(|p| p.loss_pct)),
-        m.rr_tps.or(prev.as_ref().and_then(|p| p.rr_tps)),
+        m.rtt_ms,
+        m.loss_pct,
+        rr,
         m.tcp_mbps,
         m.udp_mbps,
         m.util_mbps,
@@ -383,6 +393,12 @@ pub enum AgentReply {
         #[serde(default)]
         routes: Vec<crate::trace::RouteRep>,
     },
+}
+
+/// A real sustained TCP_RR rate is never 0 — a `0.0` from a (legacy) agent
+/// always means the netperf run failed, so treat it as unmeasured.
+fn normalize_rr(v: Option<f64>) -> Option<f64> {
+    v.filter(|v| *v > 0.0)
 }
 
 /// Run `f` inside a span whose W3C parent is `traceparent`, when present.
@@ -736,4 +752,18 @@ fn reports_total() -> u64 {
     use std::sync::atomic::{AtomicU64, Ordering};
     static C: AtomicU64 = AtomicU64::new(0);
     C.load(Ordering::Relaxed)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn failed_rr_is_unmeasured_not_zero() {
+        // A legacy agent's failed TCP_RR run reports 0.0 — must not constrain.
+        assert_eq!(normalize_rr(Some(0.0)), None);
+        assert_eq!(normalize_rr(Some(-1.0)), None);
+        assert_eq!(normalize_rr(None), None);
+        assert_eq!(normalize_rr(Some(3.7)), Some(3.7));
+    }
 }

@@ -153,6 +153,13 @@ POST /v1/agent/reply              // clients
 
 - Always-on replies carry no token. Throughput replies echo the fence token
   from the command; the controller releases the lease on receipt.
+- Always-on probes always send what they measured and report `rtt_ms`/`loss_pct`/
+  `rr_tps` as `null` when they could not measure (a failed ping must not turn
+  into a fake loss, a failed netperf TCP_RR must not turn into a `0` — an
+  unmeasured dimension never constrains classification). Throughput replies
+  echo the agent's **last always-on measurement** for those fields so they stay
+  populated across fence-gated runs. The controller stores reports verbatim —
+  no history carry-forward.
 - A busy link is reported `state: "busy"` (with `util_mbps`) and is never
   classified as degraded.
 - `/v1/quality` and `/v1/apply/ack` remain supported as the equivalent
