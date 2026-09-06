@@ -13,6 +13,7 @@
  */
 
 import { readfile, popen, error } from 'fs';
+import { ulog, LOG_DEBUG } from 'log';
 import * as metrics from './metrics.uc';
 
 /* ── parsers ────────────────────────────────────────────────────────────── */
@@ -105,10 +106,16 @@ export function util_mbps(iface)
 
 /* ── command execution ───────────────────────────────────────────────────── */
 
-/* Run a shell command; cb(err, stdout). */
+/* Run a shell command; cb(err, stdout). stderr is merged into the captured
+ * output (`2>&1`) and, at debug level (`log_level = debug`), both the exact
+ * command string and its combined output are logged — so a probe failure
+ * (netperf control error, iperf3 error, ping timeout) is observable without
+ * extra tooling. */
 export function run(shell_cmd, cb)
 {
-	let pipe = popen(shell_cmd, 'r');
+	ulog(LOG_DEBUG, 'cmd: %s\n', shell_cmd);
+
+	let pipe = popen(shell_cmd + ' 2>&1', 'r');
 
 	if (pipe == null) {
 		cb('popen failed: ' + (error() || 'unknown'));
@@ -127,6 +134,7 @@ export function run(shell_cmd, cb)
 	}
 
 	pipe.close();
+	ulog(LOG_DEBUG, 'cmd out: %s\n%s\n', shell_cmd, out);
 	cb(null, out);
 };
 
@@ -193,10 +201,18 @@ export function run_always(link, cfg, cb)
 			if (rr_err || tps <= 0)
 				metrics.counters.probe_errors.netperf = (metrics.counters.probe_errors.netperf || 0) + 1;
 
+			let rr = (rr_err || tps <= 0) ? null : tps;
+
+			/* Debug: the resolved numbers, alongside the raw `cmd`/`cmd out`
+			 * lines above — this is the "is it really a netperf failure?"
+			 * answer (output absent/aborted vs a low-but-real rate). */
+			ulog(LOG_DEBUG, 'always %s -> %s: rtt=%s loss=%s rr=%s\n',
+				link.interface, link.target, p.rtt, p.loss, rr);
+
 			cb(null, {
 				rtt_ms: p.rtt,
 				loss_pct: p.loss,
-				rr_tps: (rr_err || tps <= 0) ? null : tps,
+				rr_tps: rr,
 			});
 		});
 	});
@@ -209,6 +225,9 @@ export function run_throughput(link, cfg, cb)
 {
 	let a = metrics.last_always(link);
 	let util = util_mbps(link.interface);
+
+	ulog(LOG_DEBUG, 'throughput %s -> %s: util=%s Mbps (gate %s)\n',
+		link.interface, link.target, util, cfg.quiet_max_mbps);
 
 	if (util > cfg.quiet_max_mbps) {
 		metrics.counters.probe_busy++;
@@ -229,6 +248,11 @@ export function run_throughput(link, cfg, cb)
 
 		if (e || tcp == null)
 			metrics.counters.probe_errors.iperf = (metrics.counters.probe_errors.iperf || 0) + 1;
+
+		/* Debug: gate + iperf outcome; the raw `cmd`/`cmd out` lines carry the
+		 * iperf3 -J output (or its error) that sets `tcp`. */
+		ulog(LOG_DEBUG, 'iperf3 %s -> %s: tcp_mbps=%s busy=%s\n',
+			link.interface, link.target, tcp, (tcp == null) ? 'true' : 'false');
 
 		cb(null, {
 			busy: (tcp == null),
