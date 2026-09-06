@@ -59,7 +59,7 @@ uuid = { version = "1", features = ["v4"] }
 
 # Embedded ACID key-value store (durable per-link quality history). Pure Rust,
 # zero C deps — builds for glibc, musl-static and the OpenWrt target.
-redb = "2"
+redb = "4"
 
 # CLI parsing
 clap = { version = "4", features = ["derive"] }
