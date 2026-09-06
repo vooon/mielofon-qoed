@@ -102,6 +102,13 @@ async fn run_daemon(path: &str) -> anyhow::Result<()> {
         }
     });
 
+    // Time-series durability + retention (drains in-memory samples/buckets into
+    // the redb file when persisting, and bounds the hot rings).
+    let tsdb_state = state.clone();
+    tokio::spawn(mielofon_controller::tsdb::flush_loop(
+        tsdb_state.tsdb.clone(),
+    ));
+
     // Bind admin (plain HTTP on loopback) up front so a port clash is caught.
     let admin_bind = state.cfg.listeners.admin();
     let admin_listener = TcpListener::bind(admin_bind)

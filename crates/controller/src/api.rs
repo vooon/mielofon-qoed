@@ -109,6 +109,16 @@ pub struct TraceQuery {
     pub prefix: Option<String>,
 }
 
+/// Time-series query window for a link (raw samples + 60s buckets).
+#[derive(Debug, Deserialize)]
+pub struct TsQuery {
+    pub from: String,
+    pub to: String,
+    pub interface: String,
+    pub since: Option<u64>,
+    pub until: Option<u64>,
+}
+
 // ── Members+clients handlers (mTLS) ───────────────────────────────────────
 
 pub async fn fence_acquire(
@@ -230,13 +240,30 @@ fn ingest_quality(state: &AppState, m: Measure) -> (Option<Quality>, Option<u32>
     rec.ospf_cost = quality.map(|q| quality::cost_for_quality(&state.cfg.quality, q));
 
     let ospf_cost = rec.ospf_cost; // Copy
-    let link_id = m.link.id();
-    state.kv.put(m.link, rec);
+    let sample_ts = rec.ts;
+    state.kv.put(m.link.clone(), rec);
+
+    // History: every ingested report becomes one raw sample (per-link rings +
+    // 60s buckets, replicated via gossip). The normalized `rr` is used so a
+    // failed-measurement 0 is recorded as unmeasured, same as classification.
+    state.tsdb.append(
+        &m.link,
+        crate::tsdb::RawSample::from_dims(
+            m.probe_state,
+            sample_ts,
+            m.rtt_ms,
+            m.loss_pct,
+            rr,
+            m.tcp_mbps,
+            m.util_mbps,
+        ),
+    );
+
     bump_reports();
 
     // A gated throughput report carries the fence token — release the lease.
     if let Some(t) = m.token {
-        state.fence.release(&link_id, &t);
+        state.fence.release(&m.link.id(), &t);
     }
 
     (quality, ospf_cost)
@@ -662,6 +689,23 @@ pub async fn get_trace(State(state): State<AppState>, Query(q): Query<TraceQuery
     }
 }
 
+/// History for one link: raw samples and 60s aggregate buckets in `[since,
+/// until)` (defaults: last hour). `since > until` is rejected.
+pub async fn get_ts(State(state): State<AppState>, Query(q): Query<TsQuery>) -> Response {
+    let key = crate::model::LinkKey::new(q.from, q.to, q.interface);
+    let now = crate::tsdb::now_secs();
+    let until = q.until.unwrap_or(now);
+    let since = q.since.unwrap_or_else(|| until.saturating_sub(3600));
+    if since > until {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": "since must be <= until"})),
+        )
+            .into_response();
+    }
+    (StatusCode::OK, Json(state.tsdb.query(&key, since, until))).into_response()
+}
+
 /// Members-listener liveness probe. Nodes ping each other over the mTLS
 /// members port; the gossip loop measures this round-trip for /v1/status.
 pub async fn ping(State(state): State<AppState>) -> Json<serde_json::Value> {
@@ -728,6 +772,7 @@ pub fn admin_router() -> Router<AppState> {
         .route("/static/vis-network.min.js", get(mesh_map_asset))
         .route("/v1/graph", get(mesh_map_data))
         .route("/v1/trace", get(get_trace))
+        .route("/v1/ts", get(get_ts))
         .route("/metrics", get(metrics))
         .route("/healthz", get(healthz))
         .route("/readyz", get(readyz))

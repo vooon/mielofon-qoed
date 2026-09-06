@@ -118,11 +118,13 @@ header{padding:12px 20px;border-bottom:1px solid #ddd;background:#fff;display:fl
 #graph{width:100vw;height:calc(100vh - 150px)}
 #tracebar{margin-left:auto;white-space:nowrap}
 #traceout{max-height:38vh;overflow:auto;border-top:1px solid #ddd;background:#fff;padding:6px 20px;font-size:12px}
+#trend{max-height:30vh;overflow:auto;border-top:1px solid #ddd;background:#fff;padding:6px 20px;font-size:12px}
 #traceout table{border-collapse:collapse;width:100%}
 #traceout th,#traceout td{padding:3px 12px;text-align:left;border-bottom:1px solid #eee;white-space:nowrap}
 #traceout tr.term td{background:#f0fff4}
 #traceout tr.broken td{color:#e7040f;font-style:italic}
 #traceout .meta{color:#666;padding:3px 0}
+#trend .meta{color:#666;padding:3px 0}
 .legend{display:flex;gap:16px;align-items:center}
 .legend .lbl{opacity:.7}
 .swatch{width:14px;height:4px;border-radius:2px;display:inline-block;margin-right:4px}
@@ -149,6 +151,7 @@ header{padding:12px 20px;border-bottom:1px solid #ddd;background:#fff;display:fl
 </header>
 <div id="graph"></div>
 <div id="traceout"></div>
+<div id="trend"></div>
 <script src="/static/vis-network.min.js"></script>
 <script>
 "use strict";
@@ -213,7 +216,11 @@ function render(node, graph) {
 		x: n.x, y: n.y,
 		fixed: { x: true, y: true },
 	}));
-	const edges = graph.links.map(l => ({
+	// Edge ids mirror graph.links indices so the click handler can fetch the
+	// link's /v1/ts history.
+	window.__links = graph.links;
+	const edges = graph.links.map((l, i) => ({
+		id: i,
 		from: l.from, to: l.to, label: l.interface,
 		width: widthOf(l.quality),
 		color: isBroken(l) ? { color: "#e7040f" } : { color: colorOf(l.quality) },
@@ -238,7 +245,14 @@ function render(node, graph) {
 		interaction: { hover: true, dragNodes: false },
 		edges: { smooth: { enabled: true, type: "continuous" }, selectionWidth: 2 },
 	};
-	return new vis.Network(node, { nodes: new vis.DataSet(nodes), edges: new vis.DataSet(edges) }, opts);
+	const net = new vis.Network(node, { nodes: new vis.DataSet(nodes), edges: new vis.DataSet(edges) }, opts);
+	net.on("click", params => {
+		if (params.edges && params.edges.length) {
+			const l = window.__links[params.edges[0]];
+			if (l) showTrend(l);
+		}
+	});
+	return net;
 }
 
 // ── trace controlbar ────────────────────────────────────────────────────
@@ -304,6 +318,72 @@ function renderTrace(res) {
 	});
 
 	out.appendChild(table);
+}
+
+// ── link history sparkline (click an edge) ──────────────────────────────
+
+function svgEl(tag, attrs) {
+	const el = document.createElementNS("http://www.w3.org/2000/svg", tag);
+	for (const k in attrs) el.setAttribute(k, attrs[k]);
+	return el;
+}
+
+function renderTrend(res) {
+	const el = document.getElementById("trend");
+	el.innerHTML = "";
+	const head = document.createElement("div");
+	head.className = "meta";
+	head.textContent = "history: " + res.link.from + " → " + res.link.to + " " + res.link.interface +
+		"   rtt avg (blue) / loss avg (red)";
+	el.appendChild(head);
+
+	const buckets = res.buckets.filter(b => b.rtt != null);
+	if (!buckets.length) {
+		el.appendChild(document.createTextNode("no aggregated rtt in the window yet"));
+		return;
+	}
+
+	const W = 560, H = 64, PAD = 4;
+	let max = 100;
+	buckets.forEach(b => { if (b.rtt.max > max) max = b.rtt.max; });
+	const t0 = buckets[0].ts, t1 = buckets[buckets.length - 1].ts;
+	const span = Math.max(1, t1 - t0);
+	const px = b => PAD + (b.ts - t0) / span * (W - 2 * PAD);
+	const py = v => H - PAD - v / max * (H - 2 * PAD);
+
+	const svg = svgEl("svg", { width: W, height: H + 16 });
+	const poly = svgEl("polyline", {
+		points: buckets.map(b => px(b).toFixed(1) + "," + py(b.rtt.avg).toFixed(1)).join(" "),
+		fill: "none", stroke: "#2f80ed", "stroke-width": "1.5",
+	});
+	svg.appendChild(poly);
+	const lossPts = buckets.filter(b => b.loss != null)
+		.map(b => px(b).toFixed(1) + "," + (H - PAD - b.loss.avg / 100 * (H - 2 * PAD)).toFixed(1)).join(" ");
+	if (lossPts) {
+		svg.appendChild(svgEl("polyline", {
+			points: lossPts, fill: "none", stroke: "#e7040f", "stroke-width": "1",
+		}));
+	}
+	const maxLabel = svgEl("text", { x: W - 48, y: 10, "font-size": 9, fill: "#666" });
+	maxLabel.textContent = max + "ms";
+	svg.appendChild(maxLabel);
+	el.appendChild(svg);
+}
+
+function showTrend(link) {
+	const since = Math.floor(Date.now() / 1000) - 3600;
+	fetch("/v1/ts?from=" + encodeURIComponent(link.from) +
+		"&to=" + encodeURIComponent(link.to) +
+		"&interface=" + encodeURIComponent(link.interface) +
+		"&since=" + since)
+		.then(r => {
+			if (!r.ok) return r.json().then(j => { throw new Error(j.error); });
+			return r.json();
+		})
+		.then(renderTrend)
+		.catch(err => {
+			document.getElementById("trend").textContent = "history failed: " + err.message;
+		});
 }
 
 let traceTimer = null;

@@ -181,6 +181,29 @@ impl Default for Log {
     }
 }
 
+/// Time-series history configuration.
+///
+/// `path` selects the durable embedded redb file; an empty path keeps history
+/// in memory only (lost on restart). `raw_retention_secs` bounds the raw
+/// sample ring, `agg_retention_secs` the 60s aggregate buckets.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+pub struct TsConfig {
+    pub path: String,
+    pub raw_retention_secs: u64,
+    pub agg_retention_secs: u64,
+}
+
+impl Default for TsConfig {
+    fn default() -> Self {
+        TsConfig {
+            path: String::new(),
+            raw_retention_secs: 7200,
+            agg_retention_secs: 86400,
+        }
+    }
+}
+
 /// Top-level controller configuration.
 ///
 /// ```toml
@@ -194,6 +217,8 @@ impl Default for Log {
 /// [quality]
 /// [log]
 /// level = "info"
+/// [ts]
+/// path = "/etc/mielofon/tsdb.redb"
 /// [otel]
 /// ```
 #[derive(Debug, Clone, Deserialize, Default)]
@@ -207,6 +232,7 @@ pub struct Config {
     pub quality: Quality,
     pub log: Log,
     pub otel: mielofon_otel::OTelConfig,
+    pub ts: TsConfig,
 }
 
 impl Config {

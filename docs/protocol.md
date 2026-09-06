@@ -178,11 +178,37 @@ GET /v1/quality?from=..&to=..&interface=..   latest record for a link
 GET /v1/quality/all                          full replicated view
 GET /v1/policy?from=..&to=..&interface=..    quality + ospf_cost decision
 GET /v1/trace?from=..&to=..                  ECMP-aware end-to-end path DAG
+GET /v1/ts?from=..&to=..&interface=..        per-link time-series history
 GET /v1/status                               node, readiness, leases, agents
 GET /healthz                                 200 when process is up
 GET /readyz                                  200 when ready, 503 otherwise
 GET /metrics                                 Prometheus text exposition
 ```
+
+## Time-series history (TSDB)
+
+Every ingested report is appended to a per-link time-series: a raw sample
+(always probes every 15 s, throughput every 300 s) plus a 60 s aggregate
+bucket (min/avg/max per dimension). Raw samples are **replicated** between
+cluster members through the gossip exchange (each push carries the fresh
+samples since the per-peer watermark, idempotent on the receiver); buckets
+are a local rollup and are not gossiped. History is kept in-memory (raw
+`raw_retention_secs`, buckets `agg_retention_secs`) and, when `[ts] path` is
+set, durably mirrored to an embedded redb file flushed in batches.
+
+```jsonc
+GET /v1/ts?from=spoke-1&to=hub-a&interface=awg_hub_a&since=1746996000&until=1746999600
+// raw (within retention) + 60s buckets:
+{ "link": { "from": "spoke-1", "to": "hub-a", "interface": "awg_hub_a" },
+  "since": 1746996000, "until": 1746999600,
+  "samples": [ { "ts": 1746996000, "rtt_ms": 11.5, "loss_pct": 0.0, "rr_tps": 188.0, "util_mbps": 0.0, "state": 0 } ],
+  "buckets": [ { "ts": 1746996000, "n": 4,
+                 "rtt": { "n": 4, "min": 9.8, "avg": 11.2, "max": 13.4 }, "util": { "n": 4, "min": 0, "avg": 0, "max": 0 } } ] }
+```
+
+Defaults: `since` = `until - 3600`, `until` = now. A failed measurement is
+recorded as an unset (`null`) dimension, never a fake `0`/`-1`. Busy/conflict
+samples are included with their `state` code (0 quiet, 1 busy, 2 conflict).
 
 `GET /v1/trace?from=spoke-1&to=node-z` walks the mesh from the `from` agent
 to the destination node's registered mesh loopback (a raw `prefix=` overrides

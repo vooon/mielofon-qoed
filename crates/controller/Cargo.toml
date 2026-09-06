@@ -28,6 +28,7 @@ prometheus = { workspace = true }
 thiserror = { workspace = true }
 anyhow = { workspace = true }
 uuid = { workspace = true }
+redb = { workspace = true }
 clap = { workspace = true, features = ["derive"] }
 
 [dependencies.rustls]

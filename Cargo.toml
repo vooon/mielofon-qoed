@@ -7,7 +7,7 @@ members = [
 default-members = ["crates/controller"]
 
 [workspace.package]
-version = "0.5.2"
+version = "0.6.0"
 edition = "2021"
 license = "Apache-2.0"
 repository = "https://github.com/vooon/mielofon-qoed"
@@ -56,6 +56,10 @@ anyhow = "1"
 
 # Unique identifiers (fence tokens, command ids — like an X-Request-Id)
 uuid = { version = "1", features = ["v4"] }
+
+# Embedded ACID key-value store (durable per-link quality history). Pure Rust,
+# zero C deps — builds for glibc, musl-static and the OpenWrt target.
+redb = "2"
 
 # CLI parsing
 clap = { version = "4", features = ["derive"] }

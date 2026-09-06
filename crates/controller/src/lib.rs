@@ -16,4 +16,5 @@ pub mod state;
 pub mod tls;
 pub mod trace;
 pub mod tracectx;
+pub mod tsdb;
 pub mod worker;

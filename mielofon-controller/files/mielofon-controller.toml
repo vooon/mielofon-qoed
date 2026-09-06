@@ -68,6 +68,14 @@ ospf_cost = 100
 level = "info"
 format = "logfmt"
 
+# Time-series history (per-link raw samples + 60s aggregates, replicated via
+# gossip). `path` enables the durable embedded redb file; an empty path keeps
+# history in memory only (lost on restart).
+[ts]
+path = "/etc/mielofon/tsdb.redb"
+raw_retention_secs = 7200
+agg_retention_secs = 86400
+
 # Observability. OTLP/HTTP (no gRPC). A signal exports only when it is enabled
 # AND its resolved endpoint (per-signal override, else the global endpoint) is
 # non-empty. Leave everything unset/empty to disable. Each signal forwards at
