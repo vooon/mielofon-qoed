@@ -106,6 +106,44 @@ export function util_mbps(iface)
 
 /* ── command execution ───────────────────────────────────────────────────── */
 
+/* Whether a `timeout` applet is available to bound probe runs. Busybox does
+ * not always include it (the live routers' busybox lacks the timeout applet),
+ * so we probe once at load and degrade gracefully: with no timeout we run the
+ * probe unbounded rather than failing every invocation with "timeout: not
+ * found". The package DEPENDS now guarantees the applet for new images. */
+let timeout_ok = null;
+
+function detect_timeout()
+{
+	if (timeout_ok != null)
+		return timeout_ok;
+
+	let pipe = popen('command -v timeout >/dev/null 2>&1 && echo yes || echo no', 'r');
+	let out = '';
+
+	if (pipe != null) {
+		while (true) {
+			let chunk = pipe.read(128);
+
+			if (chunk == null || !length(chunk))
+				break;
+
+			out += chunk;
+		}
+		pipe.close();
+	}
+
+	timeout_ok = (match(out, /yes/) != null);
+	ulog(LOG_DEBUG, 'busybox timeout applet: %s\n', timeout_ok ? 'present' : 'absent');
+	return timeout_ok;
+}
+
+/* Prefix a probe command with `timeout <secs>` when the applet is available. */
+function maybe_timeout(secs, cmd)
+{
+	return detect_timeout() ? `timeout ${secs} ${cmd}` : cmd;
+}
+
 /* Run a shell command; cb(err, stdout). stderr is merged into the captured
  * output (`2>&1`) and, at debug level (`log_level = debug`), both the exact
  * command string and its combined output are logged — so a probe failure
@@ -148,7 +186,7 @@ function ping_command(link, cfg)
 	let ival = (cfg.ping_interval >= 1) ? ` -i ${cfg.ping_interval}` : '';
 	let src = (link.source != null) ? ` -I ${link.source}` : '';
 
-	return `timeout 8 ping -q -c ${cfg.ping_count} -W 1${ival}${src} ${link.target}`;
+	return maybe_timeout(8, `ping -q -c ${cfg.ping_count} -W 1${ival}${src} ${link.target}`);
 };
 
 function netperf_command(link, cfg)
@@ -157,7 +195,7 @@ function netperf_command(link, cfg)
 
 	/* `-l 4` caps the data phase but NOT the TCP connect to netserver; the
 	 * `timeout` bounds a black-holed/refused control connection. */
-	return `timeout 12 netperf -l ${cfg.rr_duration} -t TCP_RR -H ${link.target}${src}`;
+	return maybe_timeout(12, `netperf -l ${cfg.rr_duration} -t TCP_RR -H ${link.target}${src}`);
 };
 
 function iperf_command(link, cfg)
@@ -165,7 +203,7 @@ function iperf_command(link, cfg)
 	let src = (link.source != null) ? ` -B ${link.source}` : '';
 	let port = (cfg.iperf_port != null && cfg.iperf_port != 5201) ? ` -p ${cfg.iperf_port}` : '';
 
-	return `timeout 15 iperf3 -c ${link.target} -t ${cfg.tcp_duration} -f m -J${port}${src}`;
+	return maybe_timeout(15, `iperf3 -c ${link.target} -t ${cfg.tcp_duration} -f m -J${port}${src}`);
 };
 
 /* ── executors (order: everthing above is already declared) ─────────────── */

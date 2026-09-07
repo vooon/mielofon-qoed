@@ -19,6 +19,7 @@ define Package/mielofon-agent
   DEPENDS:=+ucode +ucode-mod-uclient +ucode-mod-ubus +ucode-mod-uci +ucode-mod-fs \
 	+ucode-mod-uloop +ucode-mod-log +ucode-mod-digest +rpcd +rpcd-mod-bird \
 	+iperf3 +netperf +iputils-ping \
+	+@BUSYBOX_CONFIG_TIMEOUT \
 	+MIELOFON_AGENT_TLS_OPENSSL:libustream-openssl \
 	+MIELOFON_AGENT_TLS_MBEDTLS:libustream-mbedtls
 endef
