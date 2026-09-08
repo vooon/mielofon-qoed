@@ -188,31 +188,36 @@ key = "/etc/mielofon/node.key"
 [quality.good]
 rtt_ms = 40
 loss_pct = 1.0
-rr_tps = 50.0
+rr_tps = 25.0
 tcp_mbps = 10.0
 ospf_cost = 10
 
 [quality.acceptable]
 rtt_ms = 90
 loss_pct = 2.5
-rr_tps = 35.0
+rr_tps = 11.0
 tcp_mbps = 5.0
 ospf_cost = 20
 
 [quality.poor]
 rtt_ms = 250
 loss_pct = 5.0
-rr_tps = 20.0
+rr_tps = 4.0
 tcp_mbps = 2.0
 ospf_cost = 50
 
 [quality.bad]
 rtt_ms = 500
 loss_pct = 10.0
-rr_tps = 10.0
+rr_tps = 2.0
 tcp_mbps = 1.0
 ospf_cost = 100
 ```
+
+`rr_tps` is calibrated 1:1 to the `rtt_ms` boundaries (25/11/4/2 ≈ 1000/rtt at
+40/90/250/500 ms) because netperf TCP_RR is lockstep (one request in flight),
+so its rate is physically capped at ~1000/rtt and is a latency cross-check, not
+a multi-stream throughput.
 
 Agent config (`/etc/config/mielofon-agent` example) uses the same placeholder pattern.
 

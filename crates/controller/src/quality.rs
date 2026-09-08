@@ -214,6 +214,30 @@ mod tests {
     }
 
     #[test]
+    fn lockstep_rr_does_not_punish_medium_rtt() {
+        let cfg = QualityCfg::default();
+        // netperf TCP_RR is lockstep (1 request in flight), so a healthy 50ms
+        // path measures rr ~ 1000/50 = 20/s. The rr thresholds are calibrated
+        // to the rtt boundaries, so (20/s, 50ms) classifies by rtt only.
+        assert_eq!(
+            classify(&cfg, &rec(Some(50.0), Some(0.0), Some(20.0), Some(80.0))),
+            Some(Quality::Acceptable)
+        );
+        // A long-but-healthy hub link (~125ms / rr ~8/s) is poor by rtt — not
+        // dragged to bad by an rr value that is physically normal for it.
+        assert_eq!(
+            classify(&cfg, &rec(Some(125.0), Some(0.0), Some(8.0), Some(80.0))),
+            Some(Quality::Poor)
+        );
+        // Real congestion on the same 50ms path (rr 1.5/s, far below 1000/rtt)
+        // is still caught — the rr cross-check survives.
+        assert_eq!(
+            classify(&cfg, &rec(Some(50.0), Some(0.0), Some(1.5), Some(80.0))),
+            Some(Quality::Bad)
+        );
+    }
+
+    #[test]
     fn cost_is_conservative() {
         let cfg = QualityCfg::default();
         assert_eq!(cost_for_quality(&cfg, Quality::Good), 10);

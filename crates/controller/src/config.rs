@@ -121,6 +121,13 @@ impl QualityClass {
 /// Quality classification. A measurement is assigned the worst class whose
 /// threshold it crosses; only dims listed per class take part. Conservative
 /// defaults (per handoff): good/acceptable/poor/bad with increasing costs.
+///
+/// `rr_tps` is calibrated to the SAME rtt boundaries because netperf TCP_RR is
+/// lockstep (1 request in flight): the rate is physically capped at ~1000/rtt,
+/// so `rr` is a latency proxy, not a multi-stream throughput. Thresholds below
+/// map 1:1 to the rtt cutoffs (40/90/250/500 ms → 25/11/4/2 trans/s), making
+/// `rr` a congestion cross-check (a link far worse than its rtt still drops a
+/// class) rather than a harsher duplicate of `rtt_ms`.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
 pub struct Quality {
@@ -133,10 +140,10 @@ pub struct Quality {
 impl Default for Quality {
     fn default() -> Self {
         Quality {
-            good: QualityClass::with(40.0, 1.0, 50.0, 10.0, 10),
-            acceptable: QualityClass::with(90.0, 2.5, 35.0, 5.0, 20),
-            poor: QualityClass::with(250.0, 5.0, 20.0, 2.0, 50),
-            bad: QualityClass::with(500.0, 10.0, 10.0, 1.0, 100),
+            good: QualityClass::with(40.0, 1.0, 25.0, 10.0, 10),
+            acceptable: QualityClass::with(90.0, 2.5, 11.0, 5.0, 20),
+            poor: QualityClass::with(250.0, 5.0, 4.0, 2.0, 50),
+            bad: QualityClass::with(500.0, 10.0, 2.0, 1.0, 100),
         }
     }
 }
