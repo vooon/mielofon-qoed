@@ -108,9 +108,10 @@ export function util_mbps(iface)
 
 /* Whether a `timeout` applet is available to bound probe runs. Busybox does
  * not always include it (the live routers' busybox lacks the timeout applet),
- * so we probe once at load and degrade gracefully: with no timeout we run the
- * probe unbounded rather than failing every invocation with "timeout: not
- * found". The package DEPENDS now guarantees the applet for new images. */
+ * so we probe once at load and degrade gracefully: with no timeout we bound
+ * the probe from inside the shell (background+kill) rather than failing every
+ * invocation with "timeout: not found". The package DEPENDS guarantees the
+ * applet for new images. */
 let timeout_ok = null;
 
 function detect_timeout()
@@ -138,22 +139,34 @@ function detect_timeout()
 	return timeout_ok;
 }
 
-/* Prefix a probe command with `timeout <secs>` when the applet is available. */
-function maybe_timeout(secs, cmd)
+/* Bound a probe run to `secs` and merge its stderr (2>&1) so the captured
+ * output carries both streams. Preferred: the `timeout` applet. On legacy
+ * firmware without it, bound from inside the shell: the tool runs as a direct
+ * background child (single command, so `$!` is a killable pid — no compound
+ * subshell), a killer subshell SIGKILLs it after `secs`, and the parent waits.
+ * The killer's own fds are redirected so it does NOT hold the pipe write-end
+ * (otherwise popen can't see EOF and fast probes would be held to the full
+ * bound). This keeps a black-holed TCP connect (netperf can hang ~2 min) from
+ * stalling the single-threaded agent pump on routers that lack the applet. */
+function bounded(secs, cmd)
 {
-	return detect_timeout() ? `timeout ${secs} ${cmd}` : cmd;
+	if (detect_timeout())
+		return `timeout ${secs} ${cmd} 2>&1`;
+
+	return `${cmd} 2>&1 & p=$!; ( sleep ${secs}; kill -9 $p 2>/dev/null ) >/dev/null 2>&1 & w=$!; wait $p 2>/dev/null; kill -9 $w 2>/dev/null`;
 }
 
-/* Run a shell command; cb(err, stdout). stderr is merged into the captured
- * output (`2>&1`) and, at debug level (`log_level = debug`), both the exact
- * command string and its combined output are logged — so a probe failure
- * (netperf control error, iperf3 error, ping timeout) is observable without
- * extra tooling. */
-export function run(shell_cmd, cb)
+/* Run a probe command bounded to `secs` seconds; cb(err, stdout). At debug
+ * level (`log_level = debug`) both the exact command string and its combined
+ * output are logged — so a probe failure (netperf control error, iperf3
+ * error, ping timeout) is observable without extra tooling. */
+export function run(secs, tool_cmd, cb)
 {
-	ulog(LOG_DEBUG, 'cmd: %s\n', shell_cmd);
+	let shell_cmd = bounded(secs, tool_cmd);
 
-	let pipe = popen(shell_cmd + ' 2>&1', 'r');
+	ulog(LOG_DEBUG, 'cmd: %s\n', tool_cmd);
+
+	let pipe = popen(shell_cmd, 'r');
 
 	if (pipe == null) {
 		cb('popen failed: ' + (error() || 'unknown'));
@@ -181,12 +194,11 @@ export function run(shell_cmd, cb)
 function ping_command(link, cfg)
 {
 	/* Busybox ping rejects fractional `-i`; only pass it for integer values.
-	 * `timeout` (busybox/coreutils) bounds a black-holed target so a sync
-	 * popen can never stall the single-threaded agent pump. */
+	 * The bound is applied by `run()` (see `bounded`). */
 	let ival = (cfg.ping_interval >= 1) ? ` -i ${cfg.ping_interval}` : '';
 	let src = (link.source != null) ? ` -I ${link.source}` : '';
 
-	return maybe_timeout(8, `ping -q -c ${cfg.ping_count} -W 1${ival}${src} ${link.target}`);
+	return `ping -q -c ${cfg.ping_count} -W 1${ival}${src} ${link.target}`;
 };
 
 function netperf_command(link, cfg)
@@ -194,8 +206,8 @@ function netperf_command(link, cfg)
 	let src = (link.source != null) ? ` -L ${link.source}` : '';
 
 	/* `-l 4` caps the data phase but NOT the TCP connect to netserver; the
-	 * `timeout` bounds a black-holed/refused control connection. */
-	return maybe_timeout(12, `netperf -l ${cfg.rr_duration} -t TCP_RR -H ${link.target}${src}`);
+	 * bound in `run()` cuts a black-holed/refused control connection. */
+	return `netperf -l ${cfg.rr_duration} -t TCP_RR -H ${link.target}${src}`;
 };
 
 function iperf_command(link, cfg)
@@ -203,7 +215,7 @@ function iperf_command(link, cfg)
 	let src = (link.source != null) ? ` -B ${link.source}` : '';
 	let port = (cfg.iperf_port != null && cfg.iperf_port != 5201) ? ` -p ${cfg.iperf_port}` : '';
 
-	return maybe_timeout(15, `iperf3 -c ${link.target} -t ${cfg.tcp_duration} -f m -J${port}${src}`);
+	return `iperf3 -c ${link.target} -t ${cfg.tcp_duration} -f m -J${port}${src}`;
 };
 
 /* ── executors (order: everthing above is already declared) ─────────────── */
@@ -212,7 +224,7 @@ function iperf_command(link, cfg)
 export function run_always(link, cfg, cb)
 {
 	metrics.counters.probe_ping++;
-	run(ping_command(link, cfg), function(ping_err, ping_out) {
+	run(8, ping_command(link, cfg), function(ping_err, ping_out) {
 		let p = parse_ping(ping_out);
 
 		/* A ping that produced no statistics line (tool error) must not turn
@@ -229,7 +241,7 @@ export function run_always(link, cfg, cb)
 			metrics.counters.probe_errors.ping = (metrics.counters.probe_errors.ping || 0) + 1;
 
 		metrics.counters.probe_netperf++;
-		run(netperf_command(link, cfg), function(rr_err, rr_out) {
+		run(12, netperf_command(link, cfg), function(rr_err, rr_out) {
 			let tps = parse_transaction_rate(rr_out);
 
 			/* A failed TCP_RR run (control connect refused, test aborted) is a
@@ -281,7 +293,7 @@ export function run_throughput(link, cfg, cb)
 	}
 
 	metrics.counters.probe_iperf++;
-	run(iperf_command(link, cfg), function(e, out) {
+	run(15, iperf_command(link, cfg), function(e, out) {
 		let tcp = parse_iperf3(out);
 
 		if (e || tcp == null)
