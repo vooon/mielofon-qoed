@@ -779,7 +779,6 @@ pub fn client_router() -> Router<AppState> {
 pub fn admin_router() -> Router<AppState> {
     Router::new()
         .route("/", get(frontend_index))
-        .route("/map", get(frontend_index))
         .route("/assets/{*path}", get(frontend_asset))
         .route("/static/{*path}", get(frontend_asset))
         .route("/v1/graph", get(frontend_graph))

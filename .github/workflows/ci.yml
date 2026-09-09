@@ -17,6 +17,9 @@ jobs:
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
+      - name: Install frontend deps (build.rs embeds the SPA)
+        run: |
+          cd crates/controller/frontend && npm ci
       - name: fmt
         run: cargo fmt --all -- --check
       - name: clippy
@@ -37,6 +40,9 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends musl-tools make pkg-config
+      - name: Install frontend deps (build.rs embeds the SPA)
+        run: |
+          cd crates/controller/frontend && npm ci
       - name: build release
         run: cargo build --release --package mielofon-controller --target x86_64-unknown-linux-musl
       - name: upload artifact
@@ -162,10 +168,3 @@ jobs:
       - name: Build
         working-directory: crates/controller/frontend
         run: npm run build
-      - name: Ensure the committed bundle is current
-        run: |
-          # dist/ is committed for the feed; fail if a rebuild differs.
-          if [ -n "$(git status --porcelain -- crates/controller/frontend/dist)" ]; then
-            echo "::error::frontend/dist is out of date; run 'npm run build' and commit it."
-            exit 1
-          fi

@@ -5,7 +5,9 @@ PKG_VERSION:=0.6.2
 PKG_RELEASE:=1
 
 PKG_BUILD_DIR:=$(BUILD_DIR)/mielofon-controller-$(PKG_VERSION)
-PKG_BUILD_DEPENDS:=rust/host
+# rust/host = controller crate; node/host = host `node`+`npm` for the Vue
+# dashboard SPA (built in Build/Compile, embedded via build.rs -> rust-embed).
+PKG_BUILD_DEPENDS:=rust/host node/host
 PKG_BUILD_PARALLEL:=1
 
 PKG_LICENSE:=Apache-2.0
@@ -46,7 +48,13 @@ define Build/Prepare
 	$(CP) $(CURDIR)/../crates $(PKG_BUILD_DIR)/
 endef
 
+# Build the Vue dashboard into <crate>/frontend/dist first so build.rs ->
+# rust-embed embed the current bundle during the cargo build below. The host
+# node/npm come from node/host (mirrors gotify's `yarn install` pattern).
 define Build/Compile
+	(cd $(PKG_BUILD_DIR)/crates/controller/frontend && \
+		$(STAGING_DIR_HOSTPKG)/bin/npm ci && \
+		$(STAGING_DIR_HOSTPKG)/bin/npm run build)
 	cd $(PKG_BUILD_DIR); \
 	$(CARGO_PKG_VARS) \
 	CC="$(TARGET_CC)" \

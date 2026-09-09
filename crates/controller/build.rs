@@ -2,11 +2,11 @@
 // `rust-embed` picks up the current SPA bundle from `frontend/dist`, and
 // inject the build-info env vars the metrics endpoint reports.
 //
-// The frontend is a Vue 3 + Vite project (see crates/controller/frontend).
-// On a development box with node/npm present we build it here so the daemon
-// always embeds fresh assets; in a strict offline/CI build that never touched
-// the frontend, this step is skipped and the committed `dist/` is embedded as
-// shipped (see AGENTS.md: commit built artifacts for the feed).
+// The frontend is a Vue 3 + Vite project (see crates/controller/frontend),
+// built either by the OpenWrt package (Build/Compile runs `npm ci && npm run
+// build` into frontend/dist before cargo) or locally/CI via npm when the
+// bundle is absent. `dist/` is intentionally NOT committed — the OpenWrt
+// toolchain builds it (node/host, mirroring gotify's yarn UI build).
 
 use std::path::Path;
 use std::process::Command;
@@ -43,19 +43,20 @@ fn main() {
     let dist = Path::new("frontend/dist");
     let has_bundle = dist.join("index.html").is_file();
 
-    // When a committed bundle exists (feed/CI path), embed it as-is and do NOT
-    // require the frontend toolchain — CI's Rust jobs don't run npm.
+    // The OpenWrt build (Build/Compile) and any external build already produced
+    // the bundle into frontend/dist — embed it as-is rather than rebuilding.
     if has_bundle {
         println!("cargo:rustc-env=MIELOFON_FRONTEND_BUILT=1");
         return;
     }
 
-    // No committed bundle: we are expected to build it. Require npm.
+    // No bundle present: build it with npm (local dev / CI). dist/ is not
+    // committed, so this is the normal path everywhere but the feed build.
     let npm = Command::new("npm").arg("--version").output().is_ok();
     if !npm {
         panic!(
-            "frontend/dist is missing and npm is unavailable — commit the built \
-             bundle (npm run build) or install the frontend toolchain"
+            "frontend/dist is missing and npm is unavailable — install the frontend \
+             toolchain or let the OpenWrt build produce the bundle first"
         );
     }
     let status = Command::new("npm")
