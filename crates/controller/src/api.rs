@@ -5,9 +5,9 @@
 use crate::model::{LinkKey, ProbeState, Quality, QualityRecord};
 use crate::quality;
 use crate::state::AppState;
-use axum::extract::{Query, State};
+use axum::extract::{Path, Query, State};
 use axum::http::{header, StatusCode};
-use axum::response::{Html, IntoResponse, Response};
+use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
@@ -519,34 +519,45 @@ pub async fn agent_reply(
     }
 }
 
-// ── Mesh map ───────────────────────────────────────────────────────────────
+// ── Frontend (embedded SPA) ───────────────────────────────────────────────
 
-/// The map dashboard page (vis-network, hubs ring + spokes star).
-pub async fn mesh_map() -> Html<String> {
-    Html(crate::map::page())
-}
-
-/// Frontend graph data: nodes + per-link measurements. Sanitized — node ids
-/// are the placeholder agent/hub names, addresses never leave the daemon.
-pub async fn mesh_map_data(State(state): State<AppState>) -> Json<serde_json::Value> {
-    let (nodes, links) = crate::map::graph_part(&state);
-    Json(serde_json::json!({ "nodes": nodes, "links": links }))
-}
-
-/// The bundled vis-network script (Apache-2.0).
-pub async fn mesh_map_asset() -> Response {
-    let mut resp = crate::map::VIS_NETWORK_JS.into_response();
-    if let Ok(h) = header::HeaderValue::from_str("application/javascript; charset=utf-8") {
-        resp.headers_mut().insert(header::CONTENT_TYPE, h);
+/// The emctl embedded dashboard (Vue3 SPA, built into the binary).
+pub async fn frontend_index() -> Response {
+    match crate::assets::get("/") {
+        Some(r) => r,
+        None => (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": "frontend not built"})),
+        )
+            .into_response(),
     }
-    resp
+}
+
+/// Serve a built asset from the embedded bundle (vis-network, SPA chunks).
+pub async fn frontend_asset(Path(path): Path<String>) -> Response {
+    match crate::assets::get(&path) {
+        Some(r) => r,
+        None => (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": "not found"})),
+        )
+            .into_response(),
+    }
+}
+
+/// Frontend graph data: nodes + per-link measurements + registered agents.
+/// Sanitized — node ids are the placeholder agent/hub names, addresses never
+/// leave the daemon.
+pub async fn frontend_graph(State(state): State<AppState>) -> Json<serde_json::Value> {
+    let (nodes, links) = crate::map::graph_part(&state);
+    Json(serde_json::json!({
+        "nodes": nodes,
+        "links": links,
+        "agents": state.workers.agents(),
+    }))
 }
 
 // ── Admin handlers (plain HTTP on loopback) ───────────────────────────────
-
-pub async fn index(State(state): State<AppState>) -> Html<String> {
-    Html(crate::dashboard::render(&state))
-}
 
 pub async fn metrics(State(state): State<AppState>) -> impl IntoResponse {
     let mut body = String::new();
@@ -767,10 +778,11 @@ pub fn client_router() -> Router<AppState> {
 
 pub fn admin_router() -> Router<AppState> {
     Router::new()
-        .route("/", get(index))
-        .route("/map", get(mesh_map))
-        .route("/static/vis-network.min.js", get(mesh_map_asset))
-        .route("/v1/graph", get(mesh_map_data))
+        .route("/", get(frontend_index))
+        .route("/map", get(frontend_index))
+        .route("/assets/{*path}", get(frontend_asset))
+        .route("/static/{*path}", get(frontend_asset))
+        .route("/v1/graph", get(frontend_graph))
         .route("/v1/trace", get(get_trace))
         .route("/v1/ts", get(get_ts))
         .route("/metrics", get(metrics))

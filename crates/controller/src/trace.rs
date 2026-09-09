@@ -25,7 +25,7 @@ use std::time::Instant;
 use tokio::sync::oneshot;
 
 const HOP_CAP: usize = 24;
-const HOP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(12);
+const HOP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 const CACHE_TTL: std::time::Duration = std::time::Duration::from_secs(5);
 const CACHE_MAX: usize = 32;
 
@@ -442,7 +442,10 @@ async fn dispatch_hop(
         target: target.to_string(),
         traceparent: None,
     };
-    if !state.workers.push(agent, cmd) {
+    // Push to the FRONT of the agent queue: trace hops must not wait behind a
+    // 2-minute netperf/throughput probe, or the per-hop timeout would expire
+    // while the command is merely queued.
+    if !state.workers.push_front(agent, cmd) {
         state.trace.drop_pending(&id);
         return Err(format!("cannot queue trace for '{agent}'"));
     }

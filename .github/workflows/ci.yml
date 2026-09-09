@@ -142,3 +142,30 @@ jobs:
           UCODE_BIN="${{ steps.ucode.outputs.bin }}" \
           UCODE_MODULES="${{ steps.ucode.outputs.mods }}" \
             mielofon-agent/tests/run_tests.sh
+
+  frontend:
+    name: Frontend (Vue dashboard) — test + build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: crates/controller/frontend/package-lock.json
+      - name: Install
+        working-directory: crates/controller/frontend
+        run: npm ci
+      - name: Unit tests
+        working-directory: crates/controller/frontend
+        run: npm test
+      - name: Build
+        working-directory: crates/controller/frontend
+        run: npm run build
+      - name: Ensure the committed bundle is current
+        run: |
+          # dist/ is committed for the feed; fail if a rebuild differs.
+          if [ -n "$(git status --porcelain -- crates/controller/frontend/dist)" ]; then
+            echo "::error::frontend/dist is out of date; run 'npm run build' and commit it."
+            exit 1
+          fi

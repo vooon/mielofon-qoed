@@ -124,6 +124,28 @@ impl WorkerRegistry {
         false
     }
 
+    /// Queue a command at the FRONT of an agent's queue. Trace hops jump the
+    /// probe backlog (a trace must answer promptly, not wait behind a 2-min
+    /// netperf), so the walker's per-hop timeout does not expire because the
+    /// command sat queued. `from` (the agent) and its target are deduped only
+    /// by id, so a retried hop is never silently dropped.
+    pub fn push_front(&self, agent: &str, cmd: WorkCmd) -> bool {
+        let mut map = self.inner.lock().expect("workers lock poisoned");
+        if let Some(w) = map.get_mut(agent) {
+            let key = cmd_key(&cmd);
+            if w.queue.iter().any(|c| cmd_key(c) == key) {
+                drop(map);
+                self.notify(agent).notify_waiters();
+                return false;
+            }
+            w.queue.push_front(cmd);
+            drop(map);
+            self.notify(agent).notify_waiters();
+            return true;
+        }
+        false
+    }
+
     /// Register (or refresh) an agent and its managed links. Returns true when
     /// newly added (so the scheduler seeds the policy snapshot).
     ///

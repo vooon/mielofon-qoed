@@ -30,6 +30,7 @@ anyhow = { workspace = true }
 uuid = { workspace = true }
 redb = { workspace = true }
 clap = { workspace = true, features = ["derive"] }
+rust-embed = "8"
 
 [dependencies.rustls]
 workspace = true
@@ -43,3 +44,5 @@ workspace = true
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["full"] }
+http-body-util = "0.1"
+axum = { workspace = true, features = ["http1", "tokio"] }
