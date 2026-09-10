@@ -29,11 +29,12 @@ config agent 'main'
 	# OSPF protocol whose point-to-point interfaces are managed links.
 	# Nodes may run unrelated OSPF instances; they are ignored.
 	option ospf_protocol 'mesh_v3'
-	# Node name = BGP protocol name minus this suffix:
-	#   peer_hub_a_example_com minus "_example_com" -> "hub_a"
-	option bgp_peer_suffix '_example_com'
-	# Interface prefix stripped to match an interface to a peer node name:
-	#   awg_hub_a minus "awg_" -> "hub_a"
+	# The peer node identifier comes straight from the BGP peer protocol name
+	# (peer_<hostname>, dots as underscores) — never shortened. An interface
+	# is matched to a peer by its short label: the first dot-label of the
+	# peer hostname (awg_hub1 <-> hub1.example.com), so only the prefix
+	# convention is configured here:
+	#   awg_hub1 minus "awg_" -> "hub1" (matches the peer hostname's first label)
 	option iface_prefix 'awg_'
 	# Quiet threshold in Mbps: above this the throughput tier is skipped.
 	option quiet_max_mbps '15'

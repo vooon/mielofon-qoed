@@ -100,8 +100,16 @@ export function loopback_address(iface_status)
 
 /* ---- BGP peer / node naming -------------------------------------------- */
 
-/* "peer_hub_a_example_com" minus "peer_" minus "_example_com" -> "hub_a". */
-export function peer_node_name(name, suffix)
+/* The peer's FULL hostname straight from its BGP protocol name. The peer
+ * protocol is "peer_<hostname>" with the hostname's dots as underscores, so
+ * this is a pure decode, never a shortening:
+ *   "peer_hub1.example.com" -> "hub1.example.com"   (dots already ASCII-safe)
+ *   "peer_hub1_example_com" -> "hub1.example.com"   (underscore-joined, dotted back)
+ * The result is THE node identifier: it is resolvable from BIRD (it is the
+ * peer protocol name) and it names the same node as the peer's own agent
+ * name (`from`), so a link's two endpoints are symmetric and a hub is not
+ * split into a shortened name plus a full-hostname one. */
+export function peer_hostname(name)
 {
 	let n = name;
 
@@ -110,13 +118,26 @@ export function peer_node_name(name, suffix)
 
 	n = substr(n, 5);
 
-	if (suffix != null && length(suffix) && rindex(n, suffix) == length(n) - length(suffix))
-		n = substr(n, 0, length(n) - length(suffix));
+	if (!length(n))
+		return null;
 
-	return length(n) ? n : null;
+	return replace(n, '_', '.');
 };
 
-/* Interface token by a prefix convention ("awg_hub_a" -> "hub_a"). */
+/* The short label used to match an interface token to a peer: the first
+ * dot-label of the peer's hostname. "hub1.example.com" -> "hub1"; a dotless
+ * hostname is its own label. Tunnel interfaces are named awg_<label>. */
+export function peer_short_label(host)
+{
+	if (host == null)
+		return null;
+
+	let i = index(host, '.');
+
+	return i >= 0 ? substr(host, 0, i) : host;
+};
+
+/* Interface token by a prefix convention ("awg_hub1" -> "hub1"). */
 export function iface_token(iface, prefix)
 {
 	if (iface == null)
@@ -149,15 +170,18 @@ export function select_links(status, cfg)
 	if (ospf == null || ospf.interfaces == null)
 		return links;
 
-	/* map node name -> present, from BGP peer protocol names */
+	/* map short label -> full hostname, from BGP peer protocol names. The
+	 * interface token matches the SHORT (first-dot) label; the reported `to`
+	 * is the peer's FULL hostname so both link endpoints are the same node
+	 * identifier the agent itself registers under. */
 	let nodes = {};
 
 	if (status.bgp != null) {
 		for (let b in status.bgp) {
-			let n = peer_node_name(b.name, cfg.bgp_peer_suffix);
+			let h = peer_hostname(b.name);
 
-			if (n != null)
-				nodes[n] = true;
+			if (h != null)
+				nodes[peer_short_label(h)] = h;
 		}
 	}
 
@@ -180,7 +204,7 @@ export function select_links(status, cfg)
 			continue;
 		}
 
-		push(links, { interface: iface, to: token, source: null, target: null });
+		push(links, { interface: iface, to: nodes[token], source: null, target: null });
 	}
 
 	return links;

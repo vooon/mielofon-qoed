@@ -64,7 +64,7 @@ for each iface in candidate ifaces:
     addrs = ubus call network.interface.<iface> status   # no `ip` needed
     source = first global IPv6 addr on the iface    # address+mask from JSON
     target = far end of the /127 (flip last address bit of source)
-    links += { from: agent_name, to: peer.node_name,
+    links += { from: agent_name, to: peer.hostname,
                interface, target, source }
 ```
 
@@ -91,8 +91,8 @@ rpcd.
 | field | source | notes |
 |---|---|---|
 | `interface` | `status.ospf[]` iface of `cfg.ospf_protocol`, `type==ptp` | `dummy`/broadcast + unrelated OSPF excluded by protocol/type |
-| `to` (peer) | BGP peer protocol name (`peer_<node>_<domain>`) | strip `peer_` + `cfg.bgp_peer_suffix` (`_example_com`) → `node`; match `awg_<token>` ↔ `<token>` |
-| `from` | `[main] agent_name` (unchanged) | |
+| `to` (peer) | BGP peer protocol name (`peer_<hostname>`, dots as underscores) | decode `peer_<hostname>` → the peer's FULL hostname (`peer_hub1_example_com` → `hub1.example.com`); an interface is matched to a peer by its short label — the first dot-label of the peer hostname (`awg_hub1` ↔ `hub1.example.com`). No suffix stripping / shortening: `to` names the exact same node the peer registers as `from` |
+| `from` | `[main] agent_name` (the node's full hostname) | |
 | `source` | `network.interface.<iface>` `ipv6-address[]` | first global addr; no `ip`/shell |
 | `target` | far side of the `/127` | flip last address bit of `source` |
 | `cost` | `bird set_ospf_cost {interface, cost}` | no raw BIRD command in UCI; falls back to `cost_command` only on older rpcd |
@@ -112,9 +112,11 @@ config agent 'main'
 	# cost-driven. Chosen by protocol name (simpler than remembering an
 	# area number) — an unrelated second OSPF instance is ignored.
 	option ospf_protocol 'mesh_v3'
-	# Node name = BGP protocol name minus this suffix:
-	#   peer_hub_a_example_com minus "_example_com" -> "hub_a"
-	option bgp_peer_suffix '_example_com'
+	# The peer node identifier comes straight from the BGP peer protocol name
+	# (peer_<hostname>, dots as underscores) — never shortened. Only the
+	# interface prefix convention is configured here:
+	#   awg_hub1 minus "awg_" -> "hub1" (matches the peer hostname's first label)
+	option iface_prefix 'awg_'
 
 # Links are autodiscovered from BIRD. This list un-manages specific ones.
 config exclude
@@ -144,8 +146,11 @@ config exclude
 - **`type` field in `status`**: implemented; agents tolerate both
   `type == "ptp"` filtering and its absence (older rpcd) via the BGP-peer
   match.
-- **BGP-name ↔ node-name suffix**: `bgp_peer_suffix` required initially;
-  revisit once stable.
+- **Node identifier = full hostname**: the `to` of every link is the peer's
+  full hostname, decoded from `peer_<hostname>` (never shortened), so `from`/
+  `to` stay symmetric and each hub is one node on the map, not a shortened
+  name plus a full-hostname one. The operator must name BIRD/BGP peers and
+  tunnel interfaces accordingly (`peer_<hostname>`, `awg_<first-label>`).
 - **Discovery cadence**: startup + `reload_service` + every register retry;
   periodic refresh (pick up added links without a restart) is a cheap
   follow-up.

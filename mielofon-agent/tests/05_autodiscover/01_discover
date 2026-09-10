@@ -10,8 +10,8 @@ let status = {
 			ip_version: '6',
 			interfaces: [
 				{ interface: 'dummy_awg', type: 'broadcast', cost: 10 },
-				{ interface: 'awg_hub_a', type: 'ptp', cost: 10 },
-				{ interface: 'awg_hub_b', type: 'ptp', cost: 10 },
+				{ interface: 'awg_hub1', type: 'ptp', cost: 10 },
+				{ interface: 'awg_hub2', type: 'ptp', cost: 10 },
 				{ interface: 'awg_legacy', type: 'ptp', cost: 10 },
 			],
 		},
@@ -25,16 +25,15 @@ let status = {
 		},
 	],
 	bgp: [
-		{ name: 'peer_hub_a_example_com', state: 'Established' },
-		{ name: 'peer_hub_b_example_com', state: 'Established' },
-		/* hub_c has a BGP session but no awg_* OSPF interface: no link */
-		{ name: 'peer_hub_c_example_com', state: 'Established' },
+		{ name: 'peer_hub1_example_com', state: 'Established' },
+		{ name: 'peer_hub2_example_com', state: 'Established' },
+		/* hub3 has a BGP session but no awg_* OSPF interface: no link */
+		{ name: 'peer_hub3_example_com', state: 'Established' },
 	],
 };
 
 let cfg = {
 	ospf_protocol: 'mesh_v3',
-	bgp_peer_suffix: '_example_com',
 	iface_prefix: 'awg_',
 	excludes: [ 'awg_legacy' ],
 };
@@ -45,23 +44,28 @@ if (length(links) != 2)
 	die('expected 2 links, got ' + length(links) +
 	    ' (broadcast stub + excluded + eth* must be filtered)');
 
-if (links[0].interface != 'awg_hub_a' || links[0].to != 'hub_a')
+if (links[0].interface != 'awg_hub1' || links[0].to != 'hub1.example.com')
 	die('link[0] mismatch: ' + links[0].interface + ' -> ' + links[0].to);
 
-if (links[1].interface != 'awg_hub_b' || links[1].to != 'hub_b')
+if (links[1].interface != 'awg_hub2' || links[1].to != 'hub2.example.com')
 	die('link[1] mismatch: ' + links[1].interface + ' -> ' + links[1].to);
 
-/* peer_node_name / iface_token */
-if (ad.peer_node_name('peer_hub_a_example_com', '_example_com') != 'hub_a')
-	die('peer_node_name failed');
-
-if (ad.peer_node_name('peer_hub_a_example_com', null) != 'hub_a_example_com')
-	die('peer_node_name without suffix failed');
-
-if (ad.peer_node_name('other_proto', '_example_com') != null)
+/* peer_hostname / peer_short_label / iface_token */
+if (ad.peer_hostname('peer_hub1_example_com') != 'hub1.example.com')
+	die('peer_hostname failed');
+if (ad.peer_hostname('peer_nr') != 'nr')
+	die('peer_hostname (dotless) failed');
+if (ad.peer_hostname('other_proto') != null)
 	die('non-peer protocol name should be rejected');
+if (ad.peer_hostname('peer_') != null)
+	die('empty peer name should be rejected');
 
-if (ad.iface_token('awg_hub_a', 'awg_') != 'hub_a')
+if (ad.peer_short_label('hub1.example.com') != 'hub1')
+	die('peer_short_label failed');
+if (ad.peer_short_label('nr') != 'nr')
+	die('peer_short_label (dotless) failed');
+
+if (ad.iface_token('awg_hub1', 'awg_') != 'hub1')
 	die('iface_token failed');
 
 /* derive_address: pick the /127 global, target = far side */

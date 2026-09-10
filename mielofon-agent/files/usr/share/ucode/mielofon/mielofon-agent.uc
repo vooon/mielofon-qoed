@@ -78,7 +78,6 @@ function load_config()
 		cert: cert,
 		key: key,
 		ospf_protocol: proto,
-		bgp_peer_suffix: ctx.get('mielofon-agent', 'main', 'bgp_peer_suffix') || null,
 		iface_prefix: ctx.get('mielofon-agent', 'main', 'iface_prefix') || 'awg_',
 		loopback_iface: ctx.get('mielofon-agent', 'main', 'loopback_iface') || 'dummy_awg',
 		excludes: [],
