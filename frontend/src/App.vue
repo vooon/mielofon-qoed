@@ -63,6 +63,11 @@ function toggleAuto() {
 	schedule();
 }
 
+function onSelect(link) {
+	selected.value = link;
+	selectedKey.value = link ? link.from + '/' + link.to + '/' + link.interface : '';
+}
+
 onMounted(() => {
 	refresh();
 	schedule();

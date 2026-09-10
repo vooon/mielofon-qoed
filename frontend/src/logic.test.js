@@ -3,7 +3,6 @@ import {
 	qualityColor,
 	qualityWidth,
 	isBrokenLink,
-	computePositions,
 	linkStats,
 	sortLinks,
 	traceRows,
@@ -31,61 +30,6 @@ describe('isBrokenLink', () => {
 		expect(isBrokenLink({ state: 'quiet', quality: null })).toBe(true);
 		expect(isBrokenLink({ state: 'quiet', quality: 'poor' })).toBe(false);
 		expect(isBrokenLink({ state: 'busy', quality: null })).toBe(false); // busy ≠ degraded
-	});
-});
-
-// ── layout ───────────────────────────────────────────────────────────
-
-describe('computePositions', () => {
-	const node = (id, group = 'spoke') => ({ id, label: id, group });
-
-	it('places unique hubs evenly on a ring of the requested radius', () => {
-		const nodes = [node('cr', 'hub'), node('kr', 'hub'), node('rr', 'hub'), node('nr', 'hub')];
-		const pos = computePositions(nodes, [], { hubRadius: 100, spokeRadius: 240 });
-		const r = (id) => Math.hypot(pos.get(id).x, pos.get(id).y);
-		expect(r('cr')).toBeCloseTo(100, 5);
-		expect(r('kr')).toBeCloseTo(100, 5);
-		expect(r('rr')).toBeCloseTo(100, 5);
-		expect(r('nr')).toBeCloseTo(100, 5);
-		// Adjacent hubs are 90° apart (4 hubs → ring starts at -90°).
-		const a = (id) => Math.atan2(pos.get(id).y, pos.get(id).x);
-		expect(a('cr')).toBeCloseTo(-Math.PI / 2, 5);
-		expect(a('kr')).toBeCloseTo(0, 5);
-	});
-
-	it('places a spoke toward the centroid of its hub neighbours at spokeRadius', () => {
-		const nodes = [node('hub-a', 'hub'), node('hub-b', 'hub'), node('s1')];
-		const links = [
-			{ from: 's1', to: 'hub-a', interface: 'awg_a' },
-			{ from: 's1', to: 'hub-b', interface: 'awg_b' },
-		];
-		const pos = computePositions(nodes, links, { hubRadius: 100, spokeRadius: 240 });
-		const s = pos.get('s1');
-		expect(Math.hypot(s.x, s.y)).toBeCloseTo(240, 5);
-		// The spoke is on the outward ray; its angle bisects the two hubs.
-		const hubA = pos.get('hub-a');
-		const hubB = pos.get('hub-b');
-		const mid = { x: (hubA.x + hubB.x) / 2, y: (hubA.y + hubB.y) / 2 };
-		expect(Math.atan2(s.y, s.x)).toBeCloseTo(Math.atan2(mid.y, mid.x), 5);
-	});
-
-	it('fans unlinked spokes on an outer ring so nothing hides at origin', () => {
-		const nodes = [node('hub-a', 'hub'), node('orphan-1'), node('orphan-2')];
-		const pos = computePositions(nodes, [], { hubRadius: 100, spokeRadius: 240 });
-		expect(pos.has('orphan-1')).toBe(true);
-		expect(Math.hypot(pos.get('orphan-1').x, pos.get('orphan-1').y)).toBeCloseTo(240, 5);
-		expect(Math.hypot(pos.get('orphan-2').x, pos.get('orphan-2').y)).toBeCloseTo(240, 5);
-		const a1 = Math.atan2(pos.get('orphan-1').y, pos.get('orphan-1').x);
-		const a2 = Math.atan2(pos.get('orphan-2').y, pos.get('orphan-2').x);
-		expect(a1).not.toBeCloseTo(a2, 1); // distinct positions
-	});
-
-	it('never mutates its inputs', () => {
-		const nodes = [{ id: 'hub-a', group: 'hub' }];
-		const links = [];
-		const snapshot = JSON.stringify(nodes);
-		computePositions(nodes, links);
-		expect(JSON.stringify(nodes)).toBe(snapshot);
 	});
 });
 

@@ -34,55 +34,6 @@ export function isBrokenLink(link) {
 	return link.state === 'conflict' || link.quality === 'bad' || link.quality == null;
 }
 
-// Compute a deterministic layout: hubs on a ring, spokes on the outward ray to
-// the centroid of their neighbours (star), unlinked / agent-only nodes fanned
-// on an outer ring. Pure: returns a Map<id, {x,y}>; never mutates input.
-export function computePositions(nodes, links, opts = {}) {
-	const hubRadius = opts.hubRadius != null ? opts.hubRadius : 200;
-	const spokeRadius = opts.spokeRadius != null ? opts.spokeRadius : Math.round(hubRadius * 2.4);
-	const byId = new Map(nodes.map(n => [n.id, n]));
-	const hubs = nodes.filter(n => n.group === 'hub');
-	const spokes = nodes.filter(n => n.group !== 'hub');
-	const pos = new Map();
-
-	hubs.forEach((n, i) => {
-		const a = (2 * Math.PI * i) / Math.max(1, hubs.length) - Math.PI / 2;
-		pos.set(n.id, { x: Math.cos(a) * hubRadius, y: Math.sin(a) * hubRadius });
-	});
-
-	const unlinked = [];
-	spokes.forEach(s => {
-		const ties = links.filter(l => l.from === s.id || l.to === s.id);
-		let cx = 0;
-		let cy = 0;
-		let k = 0;
-		ties.forEach(l => {
-			const peer = l.from === s.id ? byId.get(l.to) : byId.get(l.from);
-			if (peer && pos.has(peer.id)) {
-				cx += pos.get(peer.id).x;
-				cy += pos.get(peer.id).y;
-				k += 1;
-			}
-		});
-		if (k) {
-			cx /= k;
-			cy /= k;
-			const d = Math.hypot(cx, cy) || 1;
-			pos.set(s.id, { x: (cx / d) * spokeRadius, y: (cy / d) * spokeRadius });
-		} else {
-			pos.set(s.id, { x: 0, y: 0 });
-			unlinked.push(s);
-		}
-	});
-
-	unlinked.forEach((s, i) => {
-		const a = (2 * Math.PI * i) / Math.max(1, unlinked.length) - Math.PI / 2;
-		pos.set(s.id, { x: Math.cos(a) * spokeRadius, y: Math.sin(a) * spokeRadius });
-	});
-
-	return pos;
-}
-
 // Per-link quality census.
 export function linkStats(links) {
 	const stats = { good: 0, acceptable: 0, poor: 0, bad: 0, busy: 0, nodata: 0 };
