@@ -3,9 +3,8 @@ import vue from '@vitejs/plugin-vue';
 
 // Base is relative so the built assets resolve from any path the daemon
 // serves them at (the admin listener serves the SPA under "/"). The built
-// JS/CSS and the bundled vis-network library all live in "assets/" — one
-// self-contained directory. No CDN, no absolute paths — everything is
-// offline-capable.
+// JS/CSS live in "assets/"; vis-network comes from npm and is bundled in.
+// No CDN, no absolute paths — everything is offline-capable.
 export default defineConfig({
 	plugins: [vue()],
 	base: './',

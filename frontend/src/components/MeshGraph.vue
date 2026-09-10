@@ -1,5 +1,7 @@
 <script setup>
 import { onBeforeUnmount, onMounted, ref, watch } from 'vue';
+import { Network, DataSet } from 'vis-network/standalone';
+import 'vis-network/styles/vis-network.css';
 import { qualityColor, qualityWidth, isBrokenLink } from '../logic';
 
 const props = defineProps({
@@ -51,6 +53,8 @@ function edgeOpts(l) {
 		to: l.to,
 		label: l.interface,
 		width: qualityWidth(l.quality),
+		// Show the from→to direction the record encodes.
+		arrows: { to: { enabled: true, scaleFactor: 0.4 } },
 		color: isBrokenLink(l)
 			? { color: '#e7040f', highlight: '#e7040f' }
 			: { color: qualityColor(l.quality), highlight: qualityColor(l.quality) },
@@ -68,8 +72,8 @@ function build() {
 	firstStable = true;
 	if (!props.nodes.length) return;
 
-	nodes = new window.vis.DataSet(props.nodes.map(nodeOpts));
-	edges = new window.vis.DataSet(props.links.map(edgeOpts));
+	nodes = new DataSet(props.nodes.map(nodeOpts));
+	edges = new DataSet(props.links.map(edgeOpts));
 
 	const opts = {
 		groups: {
@@ -80,7 +84,7 @@ function build() {
 		interaction: { hover: true, dragNodes: true },
 		edges: { smooth: { enabled: true, type: 'continuous' }, selectionWidth: 2 },
 	};
-	net = new window.vis.Network(el.value, { nodes, edges }, opts);
+	net = new Network(el.value, { nodes, edges }, opts);
 
 	net.on('stabilized', () => {
 		if (firstStable) {
