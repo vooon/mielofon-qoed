@@ -65,6 +65,21 @@ rr_tps = 2.0
 tcp_mbps = 1.0
 ospf_cost = 100
 
+# Policy classifier. Classification is decoupled from measurement: probe
+# replies are appended to the replicated time-series store, and this loop
+# re-derives each link's quality/cost from a window of recent samples.
+# `always_fresh_secs` bounds how fresh the rtt/loss/rr must be; the gated
+# throughput dim is used fresh within `tcp_fresh_secs` and carried (last-known)
+# within `tcp_carry_secs`, so a busy/skipped throughput probe does not blank
+# mbps from classification. `busy_hold_secs` keeps a busy link's last cost
+# instead of reclassifying it as degraded.
+[classifier]
+interval_secs = 5
+always_fresh_secs = 60
+tcp_fresh_secs = 1200
+tcp_carry_secs = 3600
+busy_hold_secs = 120
+
 # Console logging. `level` sets the minimum tracing level emitted to the
 # console; `format` selects the console output (logfmt or JSON). Both are
 # independent of the per-signal OTEL levels below.

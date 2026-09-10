@@ -77,8 +77,11 @@ log "all nodes ready with ${PEER_COUNT} members"
 
 # Gossip replication: report a link on mielofon-0, watch it appear on the
 # other two nodes. The report is pushed over the mTLS clients listener using
-# mielofon-0's own node identity.
-PAYLOAD='{"link":{"from":"spoke-1","to":"hub-a","interface":"awg0"},"ts":1700000000,"rtt_ms":21,"loss_pct":0.7,"rr_tps":88,"tcp_mbps":7,"udp_mbps":null,"util_mbps":3,"state":"quiet"}'
+# mielofon-0's own node identity. The `ts` is the ingest time (matching live
+# agents) so the classifier derives a live policy record from the replicated
+# sample set.
+TS="$(date +%s)"
+PAYLOAD="{\"link\":{\"from\":\"spoke-1\",\"to\":\"hub-a\",\"interface\":\"awg0\"},\"ts\":${TS},\"rtt_ms\":21,\"loss_pct\":0.7,\"rr_tps\":88,\"tcp_mbps\":7,\"util_mbps\":3,\"state\":\"quiet\"}"
 
 ingest() {
 	local pod="$1"

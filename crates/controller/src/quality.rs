@@ -10,8 +10,10 @@
 //! The controller never writes a "dead/broken" state/cost — hard outages are
 //! owned by the underlay's dead-interval.
 
+/// Classification quality config + record types.
 use crate::config::Quality as QualityCfg;
 use crate::model::{ProbeState, Quality, QualityRecord};
+use crate::store::WindowView;
 
 /// OSPF cost for `q`, taken from the configured class.
 pub fn cost_for_quality(cfg: &QualityCfg, q: Quality) -> u32 {
@@ -30,6 +32,27 @@ pub fn classify(cfg: &QualityCfg, rec: &QualityRecord) -> Option<Quality> {
         return None; // no measurement of real quality while busy
     }
     Some(classify_best_effort(cfg, rec))
+}
+
+/// Classify a measurement collapsed from a TSDB window. Dimensions that fell
+/// outside their freshness/carry horizon are `None` and simply do not
+/// constrain; a carried `tcp_mbps` (older but within the carry window) still
+/// participates, which is the point of decoupling classification from the
+/// latest datapoint.
+pub fn classify_window(cfg: &QualityCfg, view: &WindowView) -> Quality {
+    let rec = QualityRecord {
+        ts: view.ts,
+        rtt_ms: view.rtt_ms,
+        loss_pct: view.loss_pct,
+        rr_tps: view.rr_tps,
+        tcp_mbps: view.tcp_mbps,
+        udp_mbps: None,
+        util_mbps: view.util_mbps,
+        state: view.state,
+        quality: None,
+        ospf_cost: None,
+    };
+    classify_best_effort(cfg, &rec)
 }
 
 fn classify_best_effort(cfg: &QualityCfg, rec: &QualityRecord) -> Quality {
@@ -242,5 +265,46 @@ mod tests {
         let cfg = QualityCfg::default();
         assert_eq!(cost_for_quality(&cfg, Quality::Good), 10);
         assert_eq!(cost_for_quality(&cfg, Quality::Bad), 100);
+    }
+
+    fn view(rtt: Option<f64>, loss: Option<f64>, tps: Option<f64>, tcp: Option<f64>) -> WindowView {
+        WindowView {
+            rtt_ms: rtt,
+            loss_pct: loss,
+            rr_tps: tps,
+            tcp_mbps: tcp,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn window_classify_uses_carried_throughput() {
+        // Low RTT but the carried throughput is throttled → still penalised.
+        // This is the exact case the old "latest datapoint" logic lost because
+        // the always probe wiped tcp_mbps.
+        let cfg = QualityCfg::default();
+        assert_eq!(
+            classify_window(&cfg, &view(Some(15.0), Some(0.0), Some(90.0), Some(1.5))),
+            Quality::Bad
+        );
+        // Healthy carried throughput keeps it good despite low rtt.
+        assert_eq!(
+            classify_window(&cfg, &view(Some(15.0), Some(0.0), Some(90.0), Some(80.0))),
+            Quality::Good
+        );
+    }
+
+    #[test]
+    fn window_classify_unset_dims_do_not_constrain() {
+        // Only rtt set; carried tcp and rr absent → rtt alone decides.
+        let cfg = QualityCfg::default();
+        assert_eq!(
+            classify_window(&cfg, &view(Some(400.0), None, None, None)),
+            Quality::Bad
+        );
+        assert_eq!(
+            classify_window(&cfg, &view(Some(15.0), None, None, None)),
+            Quality::Good
+        );
     }
 }

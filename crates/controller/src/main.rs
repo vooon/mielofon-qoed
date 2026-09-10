@@ -88,6 +88,13 @@ async fn run_daemon(path: &str) -> anyhow::Result<()> {
     let sched_state = state.clone();
     tokio::spawn(mielofon_controller::scheduler::scheduler_loop(sched_state));
 
+    // Policy classifier — derives quality/cost from a window of stored samples
+    // (decoupled from measurement ingest).
+    let class_state = state.clone();
+    tokio::spawn(mielofon_controller::classifier::classifier_loop(
+        class_state,
+    ));
+
     let prune_state = state.clone();
     let grace = state.cfg.cluster.grace_ttl_secs.max(10);
     tokio::spawn(async move {

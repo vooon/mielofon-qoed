@@ -38,9 +38,10 @@ impl LinkKey {
 }
 
 /// Probe state reported by the agent alongside measurements.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum ProbeState {
+    #[default]
     Quiet,
     Busy,
     Conflict,
@@ -56,13 +57,17 @@ pub enum Quality {
     Bad,
 }
 
-/// A single link measurement, keyed by LinkKey (LWW by `ts`).
+/// A per-link quality/policy record, keyed by LinkKey (LWW by `ts`).
+///
+/// The KV holds the *derived* record written by the classifier: the collapsed
+/// measurement window (rtt/loss/rr/tcp/util/state) plus the controller-assigned
+/// `quality` and `ospf_cost`. Each dimension is optional — unset dimensions
+/// never constrain classification, and the window collapse (see `store.rs`)
+/// carries a sparse dimension (e.g. the gated throughput probe) so it is not
+/// blanked by a more frequent probe of the others.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct QualityRecord {
     pub ts: u64,
-    /// Always-tier dimensions are optional: a gated throughput reply carries
-    /// neither RTT/loss nor transaction rate, and unset dimensions never
-    /// constrain classification (`None` is preserved from the previous report).
     pub rtt_ms: Option<f64>,
     pub loss_pct: Option<f64>,
     pub rr_tps: Option<f64>,

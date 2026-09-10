@@ -2,8 +2,7 @@
 //! admin listener (9553) is plain HTTP on loopback serving dashboard, metrics,
 //! healthz and read-only query endpoints.
 
-use crate::model::{LinkKey, ProbeState, Quality, QualityRecord};
-use crate::quality;
+use crate::model::{LinkKey, ProbeState, QualityRecord};
 use crate::state::AppState;
 use axum::extract::{Path, Query, State};
 use axum::http::{header, StatusCode};
@@ -61,8 +60,6 @@ pub struct QualityReq {
     pub rr_tps: Option<f64>,
     #[serde(default)]
     pub tcp_mbps: Option<f64>,
-    #[serde(default)]
-    pub udp_mbps: Option<f64>,
     pub util_mbps: f64,
     pub state: ProbeState,
     /// Echo of the fence token from a gated throughput command. When present,
@@ -74,10 +71,6 @@ pub struct QualityReq {
 #[derive(Debug, Serialize)]
 pub struct QualityResp {
     pub accepted: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub quality: Option<Quality>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub ospf_cost: Option<u32>,
 }
 
 #[derive(Debug, Serialize)]
@@ -172,8 +165,8 @@ pub async fn fence_release(
 pub async fn post_quality(
     State(state): State<AppState>,
     Json(req): Json<QualityReq>,
-) -> Result<Json<QualityResp>, StatusCode> {
-    let (quality, ospf_cost) = ingest_quality(
+) -> Json<QualityResp> {
+    ingest_quality(
         &state,
         Measure {
             link: req.link,
@@ -182,20 +175,15 @@ pub async fn post_quality(
             loss_pct: req.loss_pct,
             rr_tps: req.rr_tps,
             tcp_mbps: req.tcp_mbps,
-            udp_mbps: req.udp_mbps,
             util_mbps: req.util_mbps,
             probe_state: req.state,
             token: req.token,
         },
     );
-    Ok(Json(QualityResp {
-        accepted: true,
-        quality,
-        ospf_cost,
-    }))
+    Json(QualityResp { accepted: true })
 }
 
-/// A single measurement to ingest (avoids a 11-arg function; clippy too_many_arguments).
+/// A single measurement to ingest.
 struct Measure {
     link: LinkKey,
     ts: Option<u64>,
@@ -203,54 +191,31 @@ struct Measure {
     loss_pct: Option<f64>,
     rr_tps: Option<f64>,
     tcp_mbps: Option<f64>,
-    udp_mbps: Option<f64>,
     util_mbps: f64,
     probe_state: ProbeState,
     token: Option<String>,
 }
 
-/// Shared measurement ingest: classify, store (LWW), and release the fence
-/// when a gated throughput report echoes its token.
+/// Shared measurement ingest: append the raw sample to the replicated store and
+/// release the fence when a gated throughput report echoes its token.
 ///
-/// No history carry-forward happens here: an always-tier probe always sends
-/// the rtt/loss/rr it measured (null when it could not), and a throughput
-/// reply echoes the agent's last always-tier measurement. Storing exactly
-/// what arrives means a failed probe clears the stale dimension instead of
-/// resurrecting it (e.g. a 100%-loss ping must not keep an old rtt).
-fn ingest_quality(state: &AppState, m: Measure) -> (Option<Quality>, Option<u32>) {
+/// No classification or KV write happens here — policy is derived asynchronously
+/// by the classifier from a window of stored samples (measurement and decision
+/// are decoupled). Storing exactly what arrives means a failed probe clears the
+/// stale dimension in the *sample* instead of resurrecting it (e.g. a 100%-loss
+/// ping must not keep an old rtt); the derived live record reflects the window.
+fn ingest_quality(state: &AppState, m: Measure) {
     // Legacy agents on an always probe report a failed TCP_RR run as rr_tps 0.0
     // — a measurement failure, never a real sustained rate. Treat it as
     // unmeasured so it cannot silently re-classify the link to bad.
     let rr = normalize_rr(m.rr_tps);
-    let mut rec = QualityRecord::new(
-        m.rtt_ms,
-        m.loss_pct,
-        rr,
-        m.tcp_mbps,
-        m.udp_mbps,
-        m.util_mbps,
-        m.probe_state,
-    );
-    if let Some(ts) = m.ts {
-        rec.ts = ts;
-    }
+    let ts = m.ts.unwrap_or_else(crate::tsdb::now_secs);
 
-    let quality = quality::classify(&state.cfg.quality, &rec);
-    rec.quality = quality;
-    rec.ospf_cost = quality.map(|q| quality::cost_for_quality(&state.cfg.quality, q));
-
-    let ospf_cost = rec.ospf_cost; // Copy
-    let sample_ts = rec.ts;
-    state.kv.put(m.link.clone(), rec);
-
-    // History: every ingested report becomes one raw sample (per-link rings +
-    // 60s buckets, replicated via gossip). The normalized `rr` is used so a
-    // failed-measurement 0 is recorded as unmeasured, same as classification.
     state.tsdb.append(
         &m.link,
         crate::tsdb::RawSample::from_dims(
             m.probe_state,
-            sample_ts,
+            ts,
             m.rtt_ms,
             m.loss_pct,
             rr,
@@ -265,8 +230,6 @@ fn ingest_quality(state: &AppState, m: Measure) -> (Option<Quality>, Option<u32>
     if let Some(t) = m.token {
         state.fence.release(&m.link.id(), &t);
     }
-
-    (quality, ospf_cost)
 }
 
 // ── Agent pull endpoints (clients listener) ───────────────────────────────
@@ -385,8 +348,6 @@ pub enum AgentReply {
         rr_tps: Option<f64>,
         #[serde(default)]
         tcp_mbps: Option<f64>,
-        #[serde(default)]
-        udp_mbps: Option<f64>,
         util_mbps: f64,
         state: ProbeState,
         #[serde(default)]
@@ -454,13 +415,12 @@ pub async fn agent_reply(
             loss_pct,
             rr_tps,
             tcp_mbps,
-            udp_mbps,
             util_mbps,
             state: probe_state,
             token,
             traceparent,
         } => {
-            let (quality, ospf_cost) = with_traceparent(traceparent.as_deref(), || {
+            with_traceparent(traceparent.as_deref(), || {
                 ingest_quality(
                     &state,
                     Measure {
@@ -470,16 +430,13 @@ pub async fn agent_reply(
                         loss_pct,
                         rr_tps,
                         tcp_mbps,
-                        udp_mbps,
                         util_mbps,
                         probe_state,
                         token,
                     },
                 )
             });
-            Json(serde_json::json!({
-                "ok": true, "id": id, "quality": quality, "ospf_cost": ospf_cost,
-            }))
+            Json(serde_json::json!({"ok": true, "id": id}))
         }
         AgentReply::Applied {
             agent,

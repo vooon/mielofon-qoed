@@ -52,30 +52,43 @@ boundary.
 
 ### Coordination model
 
-The controller is the **decision-maker** for the whole mesh. A scheduler runs
-inside each controller and:
+The controller is the **decision-maker** for the whole mesh. Two background loops
+run inside each controller, decoupling measurement from decision:
 
-1. issues per-link always-on probe work on a cadence;
-2. issues gated throughput probe work only when the link's fence lease is free
-   (acquiring the lease itself before dispatch);
-3. classifies the reported quality and derives the OSPF cost policy;
-4. dispatches `apply_cost` commands when the derived cost differs from what an
-   agent last applied.
+1. **Measurement**: probe reports are appended to the replicated time-series
+   store (`tsdb`). No classification happens at ingest.
+2. **Policy classifier**: a loop re-derives each link's quality class and OSPF
+   cost from a *window* of stored samples (per-dimension freshness, with the
+   sparse throughput dimension carried for a longer window), and writes the
+   derived record to the LWW KV.
+3. **Scheduler** issues per-link always-on probe work on a cadence, and gated
+   throughput probe work only when the link's fence lease is free (acquiring
+   the lease itself before dispatch).
+4. The scheduler dispatches `apply_cost` commands when the derived cost differs
+   from what an agent last applied.
+
+Because decisions come from the replicated store (a window, not the latest
+datapoint), a sparse probe — the gated TCP-throughput probe, skipped while a
+link is busy — no longer blanks that dimension from classification: the last
+measured value is carried within its freshness window. Measurement and policy
+are thus independent; the store is the single source of truth.
 
 ```mermaid
 flowchart LR
     subgraph Controller
         S[Scheduler]
         F[Fence]
-        Q[(Quality KV)]
-        P[Policy]
+        T[(Measurement store)]
+        C[Policy classifier]
+        Q[Derived policy KV]
     end
+    T --> C
     S -->|issue probe / acquire lease| F
     S -->|commands| A[ucode agent]
-    F -->|fence token| S
-    A -->|replies / job id| Q
-    Q --> P
-    P -->|apply_cost| A
+    A -->|replies / job id| T
+    C -->|derived quality/cost| Q
+    Q -->|apply_cost| S
+    S -->|apply_cost| A
     A -->|ubus / rpcd-mod-bird| B[BIRD]
 ```
 
@@ -156,12 +169,14 @@ crates/controller/src/
   config.rs      TOML config (node, members, listeners, tls, quality, otel)
   tls.rs         rustls mTLS (server + client) built from a pinned CA
   state.rs       shared AppState
-  kv.rs          LWW per-link store
+  store.rs       measurement-store envelope (trait: append/query/window/gossip)
+  tsdb.rs        embedded redb-backed ring store implementing `Store`
+  kv.rs          LWW per-link store (holds *derived* policy records)
+  classifier.rs  background loop: window -> quality/cost -> derived KV
   model.rs       Link, QualityRecord, Quality, ProbeState
   fence.rs       soft-lease probe mutex
-  quality.rs     classification + OSPF cost derivation
+  quality.rs     classification + OSPF cost derivation (window-aware)
   api.rs         axum handlers and routers for the three listeners
   gossip.rs      anti-entropy exchange + periodic push loop
   remote.rs      minimal mTLS HTTPS client for gossip pushes
-  dashboard.rs   embedded static dashboard
 ```

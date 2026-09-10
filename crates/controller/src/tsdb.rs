@@ -19,6 +19,7 @@
 
 use crate::config::TsConfig;
 use crate::model::{LinkKey, ProbeState};
+use crate::store::{Store, WindowSpec, WindowView};
 use redb::{Database, ReadableDatabase, ReadableTable, TableDefinition};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, VecDeque};
@@ -589,6 +590,115 @@ fn parse_link_id(id: &str) -> LinkKey {
     }
 }
 
+// ── Store impl (the measurement-store envelope) ──────────────────────────
+
+impl Store for Tsdb {
+    fn append(&self, link: &LinkKey, s: RawSample) {
+        Tsdb::append(self, link, s);
+    }
+
+    fn query(&self, link: &LinkKey, since: u64, until: u64) -> TsQueryResp {
+        Tsdb::query(self, link, since, until)
+    }
+
+    /// Collapse recent raw samples into the classifier's per-dimension view.
+    ///
+    /// Semantics follow the RRD approach the classifier wanted: no "no data"
+    /// gaps are fabricated. The always-tier dims (rtt/loss/rr) are taken from
+    /// the most recent sample within `always_fresh_secs`; the gated throughput
+    /// dim is the most recent value within `tcp_fresh_secs`, else the last-known
+    /// carried within `tcp_carry_secs`. The per-link timestamps are monotonic
+    /// (single producer), so scanning the ring backward from the newest sample
+    /// yields exactly the "latest within each horizon" per dimension.
+    fn window(&self, link: &LinkKey, spec: &WindowSpec, now: u64) -> Option<WindowView> {
+        let map = self.by_link.read().expect("tsdb by_link read");
+        let ring = map.get(link)?;
+
+        // Newest sample overall anchors ts/state/util.
+        let newest = ring.iter().rev().find(|s| {
+            // Only samples inside the widest horizon count as "current".
+            now.saturating_sub(s.ts) <= spec.tcp_carry_secs
+        })?;
+        let mut view = WindowView {
+            ts: newest.ts,
+            state: code_to_state(newest.state),
+            util_mbps: newest.util_mbps as f64,
+            ..Default::default()
+        };
+
+        // Always-tier dims: freshest value within always_fresh_secs.
+        for s in ring.iter().rev() {
+            let age = now.saturating_sub(s.ts);
+            if age > spec.always_fresh_secs {
+                break;
+            }
+            if view.rtt_ms.is_none() {
+                view.rtt_ms = s.rtt_ms.map(|v| v as f64);
+            }
+            if view.loss_pct.is_none() {
+                view.loss_pct = s.loss_pct.map(|v| v as f64);
+            }
+            if view.rr_tps.is_none() {
+                view.rr_tps = s.rr_tps.map(|v| v as f64);
+            }
+        }
+
+        // Throughput dim: freshest value within tcp_fresh_secs, else the
+        // last-known value carried within tcp_carry_secs.
+        let mut carried = false;
+        for s in ring.iter().rev() {
+            let age = now.saturating_sub(s.ts);
+            if age > spec.tcp_carry_secs {
+                break;
+            }
+            if let Some(v) = s.tcp_mbps {
+                carried = age > spec.tcp_fresh_secs;
+                view.tcp_mbps = Some(v as f64);
+                break;
+            }
+        }
+        view.tcp_carried = carried;
+
+        Some(view)
+    }
+
+    fn merge_delta(&self, samples: &[(LinkKey, RawSample)]) {
+        Tsdb::merge_delta(self, samples);
+    }
+
+    fn take_delta(&self, after: u64, limit: usize) -> (Vec<(u64, LinkKey, RawSample)>, u64) {
+        Tsdb::take_delta(self, after, limit)
+    }
+
+    fn sent_watermark(&self, peer: &str) -> u64 {
+        Tsdb::sent_watermark(self, peer)
+    }
+
+    fn note_sent(&self, peer: &str, watermark: u64) {
+        Tsdb::note_sent(self, peer, watermark);
+    }
+
+    fn links(&self) -> Vec<LinkKey> {
+        Tsdb::links(self)
+    }
+
+    fn prune(&self, now: u64) {
+        Tsdb::prune(self, now);
+    }
+
+    fn flush(&self) {
+        Tsdb::flush(self);
+    }
+}
+
+fn code_to_state(code: u8) -> ProbeState {
+    match code {
+        0 => ProbeState::Quiet,
+        1 => ProbeState::Busy,
+        _ => ProbeState::Conflict,
+    }
+}
+
 fn info_loaded(_path: &str) {}
 
 pub fn now_secs() -> u64 {
@@ -599,13 +709,13 @@ pub fn now_secs() -> u64 {
 }
 
 /// Background durability + retention loop.
-pub async fn flush_loop(tsdb: Arc<Tsdb>) {
+pub async fn flush_loop(store: Arc<dyn Store>) {
     let mut tick = tokio::time::interval(std::time::Duration::from_secs(30));
     loop {
         tick.tick().await;
         let now = now_secs();
-        tsdb.prune(now);
-        tsdb.flush();
+        store.prune(now);
+        store.flush();
     }
 }
 
@@ -632,6 +742,69 @@ mod tests {
             None,
             0.0,
         )
+    }
+
+    fn window_spec() -> WindowSpec {
+        WindowSpec {
+            always_fresh_secs: 60,
+            tcp_fresh_secs: 1200,
+            tcp_carry_secs: 3600,
+        }
+    }
+
+    #[test]
+    fn window_carries_latest_throughput_despite_fresh_always_probes() {
+        let tsdb = Tsdb::new(TsConfig::default());
+        let a = LinkKey::new("spoke-1", "hub-a", "awg_hub_a");
+        let base = 1_700_000_000_u64;
+        // A throughput sample 300s ago (older than always_fresh but within
+        // tcp_fresh), then always probes with no tcp dim every 15s after it.
+        tsdb.append(
+            &a,
+            RawSample::from_dims(ProbeState::Quiet, base, None, None, None, Some(80.0), 0.0),
+        );
+        for i in 1..=20 {
+            tsdb.append(&a, sample(base + i * 15, 15.0 + i as f64));
+        }
+        let v = tsdb.window(&a, &window_spec(), base + 300).expect("window");
+        // tcp is carried from the older throughput sample, not wiped by always.
+        assert_eq!(v.tcp_mbps, Some(80.0));
+        assert!(!v.tcp_carried, "still within tcp_fresh");
+        assert!(v.rtt_ms.is_some());
+    }
+
+    #[test]
+    fn window_carries_tcp_beyond_fresh_but_within_carry() {
+        let tsdb = Tsdb::new(TsConfig::default());
+        let a = LinkKey::new("spoke-1", "hub-a", "awg_hub_a");
+        let base = 1_700_000_000_u64;
+        tsdb.append(
+            &a,
+            RawSample::from_dims(ProbeState::Quiet, base, None, None, None, Some(50.0), 0.0),
+        );
+        // Now 2000s later: past tcp_fresh (1200) but within carry (3600).
+        tsdb.append(&a, sample(base + 2000, 20.0));
+        let v = tsdb
+            .window(&a, &window_spec(), base + 2000)
+            .expect("window");
+        assert_eq!(v.tcp_mbps, Some(50.0));
+        assert!(v.tcp_carried, "beyond tcp_fresh, still carried");
+        // Always dims come from the fresh probe at base+2000.
+        assert_eq!(v.rtt_ms, Some(20.0));
+    }
+
+    #[test]
+    fn window_drops_tcp_past_carry_horizon() {
+        let tsdb = Tsdb::new(TsConfig::default());
+        let a = LinkKey::new("spoke-1", "hub-a", "awg_hub_a");
+        let base = 1_700_000_000_u64;
+        tsdb.append(
+            &a,
+            RawSample::from_dims(ProbeState::Quiet, base, None, None, None, Some(50.0), 0.0),
+        );
+        // Beyond the 3600s carry horizon => the link has no current data.
+        let v = tsdb.window(&a, &window_spec(), base + 7200);
+        assert!(v.is_none());
     }
 
     #[test]

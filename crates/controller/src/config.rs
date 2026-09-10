@@ -208,6 +208,47 @@ impl Default for Frontend {
     }
 }
 
+/// Policy classifier configuration.
+///
+/// Classification is decoupled from measurement: every probe report is
+/// appended to the replicated time-series store, and a background loop
+/// (`classifier.rs`) derives each link's quality class / OSPF cost from a
+/// window of recent samples rather than the latest single datapoint. These
+/// knobs control that derivation.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+pub struct Classifier {
+    /// How often (seconds) the classifier recomputes per-link policy.
+    pub interval_secs: u64,
+    /// Freshness window (seconds) for the always-tier dimensions
+    /// (rtt/loss/rr). Always probes run every ~15s, so 60s keeps them current.
+    pub always_fresh_secs: u64,
+    /// Freshness window (seconds) for the gated throughput dimension
+    /// (tcp_mbps). Throughput probes run every ~300s and are skipped while a
+    /// link is busy, so a longer window keeps mbps usable most of the time.
+    pub tcp_fresh_secs: u64,
+    /// Hard horizon (seconds) past which a dimension's last-known value is no
+    /// longer carried: a tcp sample older than `tcp_carry_secs` does not
+    /// constrain classification. Bounds how stale a carried value may be.
+    pub tcp_carry_secs: u64,
+    /// How long (seconds) a link whose most recent state is `busy`/`conflict`
+    /// keeps its last derived cost instead of being re-classified. A busy link
+    /// is never reported degraded while in use.
+    pub busy_hold_secs: u64,
+}
+
+impl Default for Classifier {
+    fn default() -> Self {
+        Classifier {
+            interval_secs: 5,
+            always_fresh_secs: 60,
+            tcp_fresh_secs: 1200,
+            tcp_carry_secs: 3600,
+            busy_hold_secs: 120,
+        }
+    }
+}
+
 /// Time-series history configuration.
 ///
 /// `path` selects the durable embedded redb file; an empty path keeps history
@@ -259,6 +300,7 @@ pub struct Config {
     pub members: Members,
     pub tls: Tls,
     pub quality: Quality,
+    pub classifier: Classifier,
     pub log: Log,
     pub otel: mielofon_otel::OTelConfig,
     pub ts: TsConfig,

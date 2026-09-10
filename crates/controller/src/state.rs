@@ -68,12 +68,14 @@ pub struct AppState {
     /// Trace walker bookkeeping (pending hop replies + result TTL cache).
     pub trace: Arc<crate::trace::TraceRegistry>,
     /// Replicated time-series history (raw samples + 60s aggregates).
-    pub tsdb: Arc<crate::tsdb::Tsdb>,
+    pub tsdb: Arc<dyn crate::store::Store>,
+    /// Last-derived per-link policy (for busy/conflict cost hold).
+    pub classifier: Arc<crate::classifier::ClassifierState>,
 }
 
 impl AppState {
     pub fn new(cfg: Config) -> Self {
-        let tsdb = Arc::new(crate::tsdb::Tsdb::new(cfg.ts.clone()));
+        let tsdb: Arc<dyn crate::store::Store> = Arc::new(crate::tsdb::Tsdb::new(cfg.ts.clone()));
         AppState {
             cfg: Arc::new(cfg),
             kv: Arc::new(LwwStore::new()),
@@ -84,6 +86,7 @@ impl AppState {
             started_at: Arc::new(Instant::now()),
             trace: Arc::new(crate::trace::TraceRegistry::new()),
             tsdb,
+            classifier: Arc::new(crate::classifier::ClassifierState::new()),
         }
     }
 
