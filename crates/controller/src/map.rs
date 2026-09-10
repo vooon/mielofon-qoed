@@ -28,6 +28,9 @@ pub struct GraphLink {
     pub rtt_ms: Option<f64>,
     pub loss_pct: Option<f64>,
     pub rr_tps: Option<f64>,
+    /// Best-effort TCP throughput (Mbps), only present for throughput probes.
+    pub tcp_mbps: Option<f64>,
+    pub udp_mbps: Option<f64>,
     pub util_mbps: f64,
     pub state: String,
     pub quality: Option<String>,
@@ -72,6 +75,8 @@ pub fn graph_part(state: &AppState) -> (Vec<GraphNode>, Vec<GraphLink>) {
             rtt_ms: rec.rtt_ms,
             loss_pct: rec.loss_pct,
             rr_tps: rec.rr_tps,
+            tcp_mbps: rec.tcp_mbps,
+            udp_mbps: rec.udp_mbps,
             util_mbps: rec.util_mbps,
             state: match rec.state {
                 ProbeState::Quiet => "quiet",

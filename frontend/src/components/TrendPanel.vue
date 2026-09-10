@@ -20,19 +20,27 @@ const RATE = 'rate';
 const MBPS = 'mbps';
 
 const seriesDefs = [
-	{ key: 'rtt', label: 'rtt', scale: MS, stroke: '#2f80ed', width: 1.5, fmt: v => v.toFixed(1) + ' ms' },
-	{ key: 'loss', label: 'loss', scale: PCT, stroke: '#e7040f', width: 1, fmt: v => v.toFixed(1) + '%' },
-	{ key: 'util', label: 'util', scale: PCT, stroke: '#19a974', width: 1, fmt: v => v.toFixed(1) + '%' },
-	{ key: 'rr', label: 'rr', scale: RATE, stroke: '#d9a400', width: 1, fmt: v => v.toFixed(1) + ' tps' },
-	{ key: 'tcp', label: 'tcp', scale: MBPS, stroke: '#9d5cff', width: 1.5, fmt: v => v.toFixed(2) + ' Mbps' },
+	{ key: 'rtt', label: 'rtt', scale: MS, stroke: '#2f80ed', width: 1.5, fmt: v => v.toFixed(1) + ' ms', points: false, gaps: false },
+	{ key: 'loss', label: 'loss', scale: PCT, stroke: '#e7040f', width: 1, fmt: v => v.toFixed(1) + '%', points: false, gaps: false },
+	{ key: 'util', label: 'util', scale: PCT, stroke: '#19a974', width: 1, fmt: v => v.toFixed(1) + '%', points: false, gaps: false },
+	{ key: 'rr', label: 'rr', scale: RATE, stroke: '#d9a400', width: 1, fmt: v => v.toFixed(1) + ' tps', points: false, gaps: false },
+	// tcp throughput is probed on a sparse 5-minute cadence, so connect the
+	// samples (spanGaps) and keep small point markers so isolated dots remain
+	// legible without a fabricated dense line.
+	{ key: 'tcp', label: 'tcp', scale: MBPS, stroke: '#9d5cff', width: 1.75, fmt: v => v.toFixed(2) + ' Mbps', points: { show: true, size: 3 }, gaps: true },
 ];
 
-function fmtAxis(v) {
-	if (v >= 1000) return (v / 1000).toFixed(1) + ' s';
-	return v + ' ms';
+// uPlot axis `values` functions receive (self, splits) and must return the
+// label strings, one per split value.
+function fmtAxis(_self, splits) {
+	return splits.map(v => (v >= 1000 ? (v / 1000).toFixed(1) + ' s' : v + ' ms'));
 }
 
-function optsFor() {
+function fmtAxisMbps(_self, splits) {
+	return splits.map(v => (v >= 10 ? v.toFixed(0) : v.toFixed(1)));
+}
+
+function optsFor(tcpMax) {
 	const width = el.value ? el.value.clientWidth : 340;
 	const series = [
 		{}, // x/time
@@ -41,11 +49,14 @@ function optsFor() {
 			scale: s.scale,
 			stroke: s.stroke,
 			width: s.width,
-			spanGaps: false,
-			points: { show: false },
+			spanGaps: !!s.gaps,
+			points: s.points || { show: false },
 			value: (_self, v) => (v == null ? '' : s.fmt(v)),
 		})),
 	];
+	// Give the sparse throughput scale an explicit ceiling so its points
+	// actually render (uPlot won't auto-range a scale whose axis is hidden and
+	// whose data is sparse at the window edge).
 	return {
 		width,
 		height: 200,
@@ -54,15 +65,15 @@ function optsFor() {
 			x: { time: true },
 			[MS]: { time: false },
 			[RATE]: { time: false },
-			[MBPS]: { time: false },
+			[MBPS]: { time: false, min: 0, max: tcpMax },
 			[PCT]: { min: 0, max: 100, time: false },
 		},
 		axes: [
-			{ stroke: '#8a94a6', grid: { stroke: '#334' } },
-			{ stroke: '#8a94a6', grid: { stroke: '#334' }, values: fmtAxis, label: 'rtt/ms' },
-			{ scale: PCT, side: 1, stroke: '#8a94a6', grid: { stroke: '#334' } },
+			{ scale: 'x', stroke: '#8a94a6', grid: { stroke: '#eef1f5', width: 1 } },
+			{ scale: 'ms', stroke: '#8a94a6', grid: { stroke: '#eef1f5', width: 1 }, values: fmtAxis, label: 'rtt/ms' },
+			{ scale: PCT, side: 1, stroke: '#8a94a6', grid: { stroke: '#eef1f5', width: 1 } },
 			{ scale: RATE, show: false },
-			{ scale: MBPS, show: false },
+			{ scale: MBPS, side: 1, stroke: '#9d5cff', grid: { show: false }, values: fmtAxisMbps },
 		],
 		series,
 	};
@@ -88,7 +99,14 @@ function render(buckets) {
 		return;
 	}
 	hint.value = '';
-	plot = new uPlot(optsFor(), dataFor(buckets), el.value);
+	// Ceiling for the sparse throughput scale: a little headroom above the
+	// max tcp sample so points sit comfortably inside the plot area.
+	let tcpMax = 0;
+	buckets.forEach(b => {
+		if (b.tcp && b.tcp.avg > tcpMax) tcpMax = b.tcp.avg;
+	});
+	tcpMax *= 1.15;
+	plot = new uPlot(optsFor(tcpMax), dataFor(buckets), el.value);
 }
 
 watch(
