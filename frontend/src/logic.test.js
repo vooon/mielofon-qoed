@@ -6,7 +6,6 @@ import {
 	linkStats,
 	sortLinks,
 	traceRows,
-	sparklineSeries,
 	cellText,
 } from './logic';
 
@@ -87,49 +86,6 @@ describe('traceRows', () => {
 		expect(rows[2].broken).toBe(true);
 		expect(rows[2].status).toBe('no route');
 		expect(rows[2].iface).toBe('\u2014');
-	});
-});
-
-// ── sparkline ────────────────────────────────────────────────────────
-
-describe('sparklineSeries', () => {
-	it('returns null without any rtt-bearing bucket', () => {
-		expect(sparklineSeries([])).toBeNull();
-		expect(sparklineSeries([{ ts: 1, n: 2 }])).toBeNull();
-	});
-
-	it('normalises x to [0,1] and y by the rtt max (floored at 100)', () => {
-		// 20 rtt-bearing buckets over 19 seconds.
-		const buckets = [];
-		for (let i = 0; i < 20; i++) {
-			buckets.push({ ts: 1000 + i, n: 1, rtt: { avg: i + 1, max: i + 1 } });
-		}
-		const s = sparklineSeries(buckets);
-		expect(s.rtt).toHaveLength(20);
-		expect(s.rtt[0].x).toBeCloseTo(0, 5);
-		expect(s.rtt[19].x).toBeCloseTo(1, 5);
-		// max = 20 < 100 → y scaled by 100.
-		expect(s.rtt[19].y).toBeCloseTo(20 / 100, 5);
-		expect(s.max).toBe(100);
-	});
-
-	it('raises the ceiling to the largest max seen', () => {
-		const buckets = [
-			{ ts: 0, rtt: { avg: 10, max: 90 } },
-			{ ts: 60, rtt: { avg: 400, max: 900 } },
-		];
-		const s = sparklineSeries(buckets);
-		expect(s.max).toBe(900);
-		expect(s.rtt[1].y).toBeCloseTo(400 / 900, 5);
-	});
-
-	it('excludes loss when absent but includes it when present', () => {
-		const s = sparklineSeries([
-			{ ts: 0, rtt: { avg: 5, max: 5 } },
-			{ ts: 60, rtt: { avg: 5, max: 5 }, loss: { avg: 3 } },
-		]);
-		expect(s.loss).toHaveLength(1);
-		expect(s.loss[0].y).toBeCloseTo(3 / 100, 5);
 	});
 });
 

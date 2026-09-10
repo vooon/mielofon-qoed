@@ -71,27 +71,6 @@ export function traceRows(trace) {
 	}));
 }
 
-// Sparkline series from /v1/ts buckets: normalized 0..1 x/y points. Returns
-// null when no bucket carries an rtt. `max` is the rtt ceiling used for the
-// y axis (min 100ms so a flat low-rtt link still looks flat, not noisy).
-export function sparklineSeries(buckets) {
-	const withRtt = (buckets || []).filter(b => b.rtt != null);
-	if (!withRtt.length) return null;
-	let max = 100;
-	withRtt.forEach(b => {
-		if (b.rtt.max > max) max = b.rtt.max;
-	});
-	const span = Math.max(1, withRtt[withRtt.length - 1].ts - withRtt[0].ts);
-	const x = b => (b.ts - withRtt[0].ts) / span;
-	return {
-		max,
-		t0: withRtt[0].ts,
-		t1: withRtt[withRtt.length - 1].ts,
-		rtt: withRtt.map(b => ({ x: x(b), y: b.rtt.avg / max })),
-		loss: withRtt.filter(b => b.loss != null).map(b => ({ x: x(b), y: b.loss.avg / 100 })),
-	};
-}
-
 // Humanized cell value ("—" for unset, fixed decimals for numbers).
 export function cellText(v, digits) {
 	if (v == null) return '\u2014';

@@ -1,7 +1,8 @@
 <script setup>
-import { ref, watch } from 'vue';
+import { onBeforeUnmount, ref, watch } from 'vue';
+import uPlot from 'uplot';
+import 'uplot/dist/uPlot.min.css';
 import { fetchTs } from '../api';
-import { sparklineSeries } from '../logic';
 
 const props = defineProps({
 	link: { type: Object, default: null },
@@ -9,19 +10,104 @@ const props = defineProps({
 
 const error = ref('');
 const label = ref('');
-const points = ref(null);
+const hint = ref('');
+const el = ref(null);
+let plot = null;
+
+const MS = 'ms';
+const PCT = 'pct';
+const RATE = 'rate';
+const MBPS = 'mbps';
+
+const seriesDefs = [
+	{ key: 'rtt', label: 'rtt', scale: MS, stroke: '#2f80ed', width: 1.5, fmt: v => v.toFixed(1) + ' ms' },
+	{ key: 'loss', label: 'loss', scale: PCT, stroke: '#e7040f', width: 1, fmt: v => v.toFixed(1) + '%' },
+	{ key: 'util', label: 'util', scale: PCT, stroke: '#19a974', width: 1, fmt: v => v.toFixed(1) + '%' },
+	{ key: 'rr', label: 'rr', scale: RATE, stroke: '#d9a400', width: 1, fmt: v => v.toFixed(1) + ' tps' },
+	{ key: 'tcp', label: 'tcp', scale: MBPS, stroke: '#9d5cff', width: 1.5, fmt: v => v.toFixed(2) + ' Mbps' },
+];
+
+function fmtAxis(v) {
+	if (v >= 1000) return (v / 1000).toFixed(1) + ' s';
+	return v + ' ms';
+}
+
+function optsFor() {
+	const width = el.value ? el.value.clientWidth : 340;
+	const series = [
+		{}, // x/time
+		...seriesDefs.map(s => ({
+			label: s.label,
+			scale: s.scale,
+			stroke: s.stroke,
+			width: s.width,
+			spanGaps: false,
+			points: { show: false },
+			value: (_self, v) => (v == null ? '' : s.fmt(v)),
+		})),
+	];
+	return {
+		width,
+		height: 200,
+		legend: { show: true, live: true },
+		scales: {
+			x: { time: true },
+			[MS]: { time: false },
+			[RATE]: { time: false },
+			[MBPS]: { time: false },
+			[PCT]: { min: 0, max: 100, time: false },
+		},
+		axes: [
+			{ stroke: '#8a94a6', grid: { stroke: '#334' } },
+			{ stroke: '#8a94a6', grid: { stroke: '#334' }, values: fmtAxis, label: 'rtt/ms' },
+			{ scale: PCT, side: 1, stroke: '#8a94a6', grid: { stroke: '#334' } },
+			{ scale: RATE, show: false },
+			{ scale: MBPS, show: false },
+		],
+		series,
+	};
+}
+
+function dataFor(buckets) {
+	const xs = buckets.map(b => b.ts);
+	const cols = seriesDefs.map(s => buckets.map(b => (b[s.key] != null ? b[s.key].avg : null)));
+	return [xs, ...cols];
+}
+
+function destroyPlot() {
+	if (plot) {
+		plot.destroy();
+		plot = null;
+	}
+}
+
+function render(buckets) {
+	destroyPlot();
+	if (!el.value || !buckets || !buckets.length) {
+		hint.value = 'no history in the last hour yet.';
+		return;
+	}
+	hint.value = '';
+	plot = new uPlot(optsFor(), dataFor(buckets), el.value);
+}
 
 watch(
 	() => props.link,
 	async (link) => {
 		error.value = '';
-		label.value = '';
-		points.value = null;
-		if (!link) return;
-		label.value = link.from + ' → ' + link.to + ' ' + link.interface;
+		hint.value = '';
+		label.value = link ? link.from + ' → ' + link.to + ' ' + link.interface : '';
+		// If the selected link changes while mounted, redraw. The el ref may be
+		// unset on first setup pass (component not yet mounted) — the mounted
+		// hook handles the initial draw.
+		if (link && el.value) render(null);
+		if (!link) {
+			destroyPlot();
+			return;
+		}
 		try {
 			const ts = await fetchTs(link);
-			points.value = sparklineSeries(ts.buckets);
+			render(ts.buckets || []);
 		} catch (err) {
 			error.value = String(err.message || err);
 		}
@@ -29,12 +115,7 @@ watch(
 	{ immediate: true },
 );
 
-// Build the SVG path string (polyline through the normalized points).
-function linePath(series, key, height) {
-	const pts = series[key];
-	if (!pts || !pts.length) return '';
-	return pts.map(p => p.x * 340 + ',' + (height - 2 - p.y * (height - 6)).toFixed(1)).join(' ');
-}
+onBeforeUnmount(destroyPlot);
 </script>
 
 <template>
@@ -44,13 +125,8 @@ function linePath(series, key, height) {
     <template v-else>
       <div class="meta">{{ label }}</div>
       <div v-if="error" class="error">{{ error }}</div>
-      <div v-else-if="!points" class="hint">no history in the last hour yet.</div>
-      <svg v-else :viewBox="'0 0 340 70'" width="100%" height="70" role="img" aria-label="rtt history">
-        <polyline :points="linePath(points, 'rtt', 70)" fill="none" stroke="#2f80ed" stroke-width="1.5" />
-        <polyline v-if="points.loss.length" :points="linePath(points, 'loss', 70)" fill="none" stroke="#e7040f" stroke-width="1" />
-        <text x="300" y="10" font-size="9" fill="#8a94a6">{{ points.max }}ms</text>
-      </svg>
-      <div class="legend-inline"><i class="sw" style="background:#2f80ed"></i>rtt <i class="sw" style="background:#e7040f"></i>loss</div>
+      <div v-else-if="hint" class="hint">{{ hint }}</div>
+      <div ref="el" class="trend"></div>
     </template>
   </div>
 </template>
@@ -61,6 +137,7 @@ function linePath(series, key, height) {
 .meta { color: var(--muted); margin-bottom: 6px; font-size: 12px; }
 .hint { color: var(--muted); font-size: 13px; }
 .error { color: var(--bad); font-size: 13px; }
-.legend-inline { margin-top: 4px; font-size: 11px; color: var(--muted); display: flex; gap: 10px; align-items: center; }
-.sw { display: inline-block; width: 14px; height: 3px; border-radius: 2px; margin-right: 3px; }
+.trend :deep(.u-title) { display: none; }
+.trend :deep(.u-legend) { font-size: 11px; }
+.trend :deep(.u-off) { opacity: 0.45; }
 </style>
