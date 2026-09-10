@@ -188,6 +188,26 @@ impl Default for Log {
     }
 }
 
+/// Frontend (dashboard) configuration.
+///
+/// `root_dir` is the directory containing the built Vue SPA (`index.html` +
+/// `assets/`, including the bundled vis-network library). The controller
+/// serves these files directly from disk (no embedding), so a package update
+/// can ship a new bundle without rebuilding the daemon.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+pub struct Frontend {
+    pub root_dir: String,
+}
+
+impl Default for Frontend {
+    fn default() -> Self {
+        Frontend {
+            root_dir: "/usr/share/mielofon/dashboard".into(),
+        }
+    }
+}
+
 /// Time-series history configuration.
 ///
 /// `path` selects the durable embedded redb file; an empty path keeps history
@@ -226,6 +246,8 @@ impl Default for TsConfig {
 /// level = "info"
 /// [ts]
 /// path = "/etc/mielofon/tsdb.redb"
+/// [frontend]
+/// root_dir = "/usr/share/mielofon/dashboard"
 /// [otel]
 /// ```
 #[derive(Debug, Clone, Deserialize, Default)]
@@ -240,6 +262,7 @@ pub struct Config {
     pub log: Log,
     pub otel: mielofon_otel::OTelConfig,
     pub ts: TsConfig,
+    pub frontend: Frontend,
 }
 
 impl Config {

@@ -1,6 +1,6 @@
-//! Mesh map: graph data for the embedded dashboard.
+//! Mesh map: graph data for the dashboard.
 //!
-//! The graph is consumed by the Vue 3 SPA (`crates/controller/frontend`) via
+//! The graph is consumed by the Vue 3 SPA (`frontend/`) via
 //! `GET /v1/graph`: cluster members on a ring, spokes radiating out, edges
 //! colored by quality class, broken links drawn red/dashed. Registered agents
 //! appear even before their first measurement so spokes do not vanish while

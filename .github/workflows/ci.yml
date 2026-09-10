@@ -17,9 +17,6 @@ jobs:
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
-      - name: Install frontend deps (build.rs embeds the SPA)
-        run: |
-          cd crates/controller/frontend && npm ci
       - name: fmt
         run: cargo fmt --all -- --check
       - name: clippy
@@ -40,9 +37,6 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends musl-tools make pkg-config
-      - name: Install frontend deps (build.rs embeds the SPA)
-        run: |
-          cd crates/controller/frontend && npm ci
       - name: build release
         run: cargo build --release --package mielofon-controller --target x86_64-unknown-linux-musl
       - name: upload artifact
@@ -87,7 +81,7 @@ jobs:
           for dir in */; do
             dir="${dir%/}"
             case "$dir" in
-              .github|docs|crates|scripts|tests) continue ;;
+              .github|docs|crates|scripts|tests|frontend) continue ;;
             esac
             if [ -d "$dir" ] && [ ! -f "$dir/Makefile" ]; then
               echo "::error::$dir/ exists but has no Makefile"
@@ -158,13 +152,13 @@ jobs:
         with:
           node-version: 20
           cache: npm
-          cache-dependency-path: crates/controller/frontend/package-lock.json
+          cache-dependency-path: frontend/package-lock.json
       - name: Install
-        working-directory: crates/controller/frontend
+        working-directory: frontend
         run: npm ci
       - name: Unit tests
-        working-directory: crates/controller/frontend
+        working-directory: frontend
         run: npm test
       - name: Build
-        working-directory: crates/controller/frontend
+        working-directory: frontend
         run: npm run build

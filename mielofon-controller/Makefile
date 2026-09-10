@@ -6,7 +6,7 @@ PKG_RELEASE:=1
 
 PKG_BUILD_DIR:=$(BUILD_DIR)/mielofon-controller-$(PKG_VERSION)
 # rust/host = controller crate; node/host = host `node`+`npm` for the Vue
-# dashboard SPA (built in Build/Compile, embedded via build.rs -> rust-embed).
+# dashboard SPA (built in Build/Compile, installed to /usr/share at runtime).
 PKG_BUILD_DEPENDS:=rust/host node/host
 PKG_BUILD_PARALLEL:=1
 
@@ -40,19 +40,22 @@ define Package/mielofon-controller/conffiles
 endef
 
 # This repo is both the source and the feed; build from the working tree
-# (no PKG_SOURCE download). Copy the Cargo workspace into the build dir.
+# (no PKG_SOURCE download). Copy the Cargo workspace and the dashboard app
+# into the build dir.
 define Build/Prepare
 	mkdir -p $(PKG_BUILD_DIR)
 	$(CP) $(CURDIR)/../Cargo.toml $(PKG_BUILD_DIR)/
 	$(CP) $(CURDIR)/../Cargo.lock $(PKG_BUILD_DIR)/
 	$(CP) $(CURDIR)/../crates $(PKG_BUILD_DIR)/
+	$(CP) $(CURDIR)/../frontend $(PKG_BUILD_DIR)/
 endef
 
-# Build the Vue dashboard into <crate>/frontend/dist first so build.rs ->
-# rust-embed embed the current bundle during the cargo build below. The host
-# node/npm come from node/host (mirrors gotify's `yarn install` pattern).
+# Build the Vue dashboard into frontend/dist during compile; the cargo build
+# above does NOT embed it — the daemon serves it from disk ([frontend]
+# root_dir). The host node/npm come from node/host (mirrors gotify's `yarn
+# install` pattern).
 define Build/Compile
-	(cd $(PKG_BUILD_DIR)/crates/controller/frontend && \
+	(cd $(PKG_BUILD_DIR)/frontend && \
 		$(STAGING_DIR_HOSTPKG)/bin/npm ci && \
 		$(STAGING_DIR_HOSTPKG)/bin/npm run build)
 	cd $(PKG_BUILD_DIR); \
@@ -63,9 +66,15 @@ define Build/Compile
 		--package mielofon-controller
 endef
 
+# Dashboard install dir (matches the [frontend] root_dir default). The npm
+# build emits a fully self-contained `dist/` (index.html + assets/ including
+# the bundled vis-network library via public/), so this is a plain copy.
 define Package/mielofon-controller/install
 	$(INSTALL_DIR) $(1)/usr/sbin
 	$(INSTALL_BIN) $(PKG_BUILD_DIR)/target/$(RUSTC_TARGET_ARCH)/release/mielofon-controller $(1)/usr/sbin/
+
+	$(INSTALL_DIR) $(1)/usr/share/mielofon/dashboard
+	$(CP) $(PKG_BUILD_DIR)/frontend/dist/. $(1)/usr/share/mielofon/dashboard/
 
 	$(INSTALL_DIR) $(1)/etc/init.d
 	$(INSTALL_BIN) $(CURDIR)/files/mielofon-controller.init $(1)/etc/init.d/mielofon-controller

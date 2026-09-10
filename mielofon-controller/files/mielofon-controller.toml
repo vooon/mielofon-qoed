@@ -80,6 +80,12 @@ path = "/etc/mielofon/tsdb.redb"
 raw_retention_secs = 7200
 agg_retention_secs = 86400
 
+# Frontend dashboard. `root_dir` is where the package installs the built Vue
+# SPA (index.html + assets/, including the bundled vis-network library); the
+# daemon serves these files from disk at runtime.
+[frontend]
+root_dir = "/usr/share/mielofon/dashboard"
+
 # Observability. OTLP/HTTP (no gRPC). A signal exports only when it is enabled
 # AND its resolved endpoint (per-signal override, else the global endpoint) is
 # non-empty. Leave everything unset/empty to disable. Each signal forwards at

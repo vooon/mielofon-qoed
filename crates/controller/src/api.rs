@@ -519,23 +519,15 @@ pub async fn agent_reply(
     }
 }
 
-// ── Frontend (embedded SPA) ───────────────────────────────────────────────
+// ── Frontend (SPA served from disk) ───────────────────────────────────────
 
-/// The emctl embedded dashboard (Vue3 SPA, built into the binary).
-pub async fn frontend_index() -> Response {
-    match crate::assets::get("/") {
-        Some(r) => r,
-        None => (
-            StatusCode::NOT_FOUND,
-            Json(serde_json::json!({"error": "frontend not built"})),
-        )
-            .into_response(),
-    }
-}
-
-/// Serve a built asset from the embedded bundle (vis-network, SPA chunks).
-pub async fn frontend_asset(Path(path): Path<String>) -> Response {
-    match crate::assets::get(&path) {
+/// Serve the dashboard SPA from the configured `[frontend] root_dir`. A single
+/// catch-all handles the shell (`/` → `index.html`), the Vite asset bundle and
+/// the bundled vis-network library (`/assets/*`) from disk.
+pub async fn frontend(State(state): State<AppState>, path: Option<Path<String>>) -> Response {
+    let root = &state.cfg.frontend.root_dir;
+    let rel = path.map(|Path(p)| p).unwrap_or_default();
+    match crate::assets::get(root, &rel) {
         Some(r) => r,
         None => (
             StatusCode::NOT_FOUND,
@@ -778,9 +770,6 @@ pub fn client_router() -> Router<AppState> {
 
 pub fn admin_router() -> Router<AppState> {
     Router::new()
-        .route("/", get(frontend_index))
-        .route("/assets/{*path}", get(frontend_asset))
-        .route("/static/{*path}", get(frontend_asset))
         .route("/v1/graph", get(frontend_graph))
         .route("/v1/trace", get(get_trace))
         .route("/v1/ts", get(get_ts))
@@ -791,6 +780,8 @@ pub fn admin_router() -> Router<AppState> {
         .route("/v1/quality", get(get_quality))
         .route("/v1/policy", get(get_policy))
         .route("/v1/status", get(get_status))
+        .route("/", get(frontend))
+        .route("/{*path}", get(frontend))
         .layer(axum::middleware::from_fn(|req, next| {
             access_log("admin", req, next)
         }))

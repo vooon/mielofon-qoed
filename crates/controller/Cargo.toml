@@ -30,7 +30,6 @@ anyhow = { workspace = true }
 uuid = { workspace = true }
 redb = { workspace = true }
 clap = { workspace = true, features = ["derive"] }
-rust-embed = "8"
 
 [dependencies.rustls]
 workspace = true
