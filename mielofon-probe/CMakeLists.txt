@@ -24,6 +24,18 @@ set(MIELOFON_PROBE_OS "${CMAKE_SYSTEM_NAME}" CACHE STRING "build_info os label")
 set(MIELOFON_PROBE_ARCH "${CMAKE_SYSTEM_PROCESSOR}" CACHE STRING "build_info arch label")
 set(MIELOFON_PROBE_VERSION "${PROJECT_VERSION}" CACHE STRING "build_info version")
 
+# Host unit-test harness (link/counters/metrics/iperf-json). The harness is
+# dependency-light (json-c only) and runs on a plain toolchain, so it is on
+# by default for plain-Linux builds and off for the OpenWrt feed build (which
+# the Makefile marks via -DMIELOFON_PROBE_OS=openwrt and doesn't need it).
+if("${MIELOFON_PROBE_OS}" STREQUAL "openwrt")
+  set(MIELOFON_PROBE_BUILD_TESTS_DEFAULT OFF)
+else()
+  set(MIELOFON_PROBE_BUILD_TESTS_DEFAULT ON)
+endif()
+option(MIELOFON_PROBE_BUILD_TESTS "Build the mielofon-probe unit-test harness"
+       ${MIELOFON_PROBE_BUILD_TESTS_DEFAULT})
+
 set(MIELOFON_PROBE_CXX_FLAGS -Wall -Wextra -Werror
     -fno-exceptions -fno-rtti -fno-threadsafe-statics
     # libubus's ubus_object/type structs are aggregate-initialised by
@@ -64,12 +76,29 @@ if(JSONC_LIBRARY)
 else()
   set(MIELOFON_PROBE_LIBS ${MIELOFON_PROBE_LIBS} json-c)
 endif()
+find_path(JSONC_INCLUDE_DIR NAMES json-c/json.h)
+if(JSONC_INCLUDE_DIR)
+  include_directories(${JSONC_INCLUDE_DIR})
+endif()
+
+find_library(IPERF3_LIBRARY NAMES iperf)
+if(IPERF3_LIBRARY)
+  set(MIELOFON_PROBE_LIBS ${MIELOFON_PROBE_LIBS} ${IPERF3_LIBRARY})
+else()
+  set(MIELOFON_PROBE_LIBS ${MIELOFON_PROBE_LIBS} iperf)
+endif()
+find_path(IPERF3_INCLUDE_DIR NAMES iperf_api.h)
+if(IPERF3_INCLUDE_DIR)
+  include_directories(${IPERF3_INCLUDE_DIR})
+endif()
 
 add_executable(mielofon-probe
   src/main.cpp
   src/icmp.cpp
   src/counters.cpp
-  src/metrics.cpp)
+  src/metrics.cpp
+  src/iperf_json.cpp
+  src/throughput.cpp)
 target_compile_options(mielofon-probe PRIVATE ${MIELOFON_PROBE_CXX_FLAGS})
 target_compile_definitions(mielofon-probe PRIVATE
   MIELOFON_PROBE_VERSION="${MIELOFON_PROBE_VERSION}"
@@ -82,3 +111,21 @@ target_link_libraries(mielofon-probe PRIVATE ${MIELOFON_PROBE_LIBS})
 # same /usr/bin target. OpenWrt installs the procd init/config/capabilities
 # from mielofon-probe/files/ via its own Makefile.
 install(TARGETS mielofon-probe RUNTIME DESTINATION bin)
+
+# Host unit-test harness (pure logic; no libubus/libiperf3 needed).
+if(MIELOFON_PROBE_BUILD_TESTS)
+  enable_testing()
+  add_executable(mielofon-probe-harness tests/harness.cpp)
+  target_compile_options(mielofon-probe-harness PRIVATE ${MIELOFON_PROBE_CXX_FLAGS})
+  target_compile_definitions(mielofon-probe-harness PRIVATE
+    MIELOFON_PROBE_VERSION="${MIELOFON_PROBE_VERSION}")
+  target_include_directories(mielofon-probe-harness PRIVATE src)
+  # Only the pure modules; link just json-c (the rest are header-only or
+  # self-contained, so the harness avoids the OpenWrt-only libs entirely).
+  target_sources(mielofon-probe-harness PRIVATE
+    src/counters.cpp
+    src/metrics.cpp
+    src/iperf_json.cpp)
+  target_link_libraries(mielofon-probe-harness PRIVATE ${JSONC_LIBRARY})
+  add_test(NAME probe-harness COMMAND mielofon-probe-harness)
+endif()

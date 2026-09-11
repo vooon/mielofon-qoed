@@ -10,8 +10,7 @@
 
 #pragma once
 
-#include "counters.hpp"
-#include "icmp.hpp"
+#include "snapshot.hpp"
 
 #include <string>
 #include <vector>

@@ -187,7 +187,7 @@ int open_socket(const Link &l, int &family, sockaddr_storage &dst,
 
 } // namespace
 
-IcmpLoop::IcmpLoop()
+IcmpLoop::IcmpLoop() : throughput_(params_)
 {
 	g_loop = this;
 }
@@ -427,6 +427,35 @@ std::vector<Snapshot> IcmpLoop::snapshot() const
 	          [](const Snapshot &a, const Snapshot &b) {
 		          return a.interface < b.interface;
 	          });
+	return out;
+}
+
+void *IcmpLoop::find_peer(const std::string &interface) const
+{
+	auto it = peers_.find(interface);
+	return it == peers_.end() ? nullptr : it->second;
+}
+
+ThroughputOutcome IcmpLoop::run_throughput(const std::string &interface,
+                                           int duration)
+{
+	ThroughputOutcome out;
+	void *pv = find_peer(interface);
+	if (pv == nullptr)
+		return out; // unknown link: treat as no result
+
+	Peer &p = *static_cast<Peer *>(pv);
+	out.util_mbps = p.link.util_mbps;
+
+	// Quiet gate: do not run a load test while the link is carrying traffic.
+	if (out.util_mbps > params_.quiet_max_mbps) {
+		out.busy = true;
+		return out;
+	}
+
+	// TCP then UDP, in-process (serialised by the caller / fence).
+	out.tcp = throughput_.run_tcp(p.link, duration);
+	out.udp = throughput_.run_udp(p.link, duration);
 	return out;
 }
 

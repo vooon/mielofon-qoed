@@ -45,6 +45,32 @@ jobs:
           name: mielofon-controller-x86_64-musl
           path: target/x86_64-unknown-linux-musl/release/mielofon-controller
 
+  probe:
+    name: Probe (C++23) — build + unit tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends cmake g++ make libjson-c-dev
+
+      # The daemon needs OpenWrt-only libs (libubus/libubox); the harness is
+      # pure logic + json-c and runs on a plain toolchain. Build only the
+      # harness target here; the OpenWrt build compiles the full daemon.
+      - name: Configure
+        working-directory: mielofon-probe
+        run: cmake -B build -DMIELOFON_PROBE_BUILD_TESTS=ON -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build harness
+        working-directory: mielofon-probe
+        run: cmake --build build --target mielofon-probe-harness --parallel
+
+      - name: Run harness
+        working-directory: mielofon-probe
+        run: ctest --test-dir build --output-on-failure
+
   sanitize:
     name: sanitization scan (no real identifiers)
     runs-on: ubuntu-latest
@@ -88,7 +114,7 @@ jobs:
               exit 1
             fi
           done
-          for pkg in mielofon-controller mielofon-agent; do
+          for pkg in mielofon-controller mielofon-agent mielofon-probe; do
             if [ ! -f "$pkg/Makefile" ]; then
               echo "::error::package $pkg missing Makefile"
               exit 1
