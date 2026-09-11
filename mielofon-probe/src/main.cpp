@@ -18,10 +18,14 @@
 #include <string.h>
 #include <syslog.h>
 
+// libubox typically lacks `extern "C"` guards; included from C++ the blobmsg/
+// uloop functions would be C++-mangled and fail to link against the C libs.
+extern "C" {
 #include <libubox/blobmsg.h>
 #include <libubox/uloop.h>
 #include <libubox/utils.h>
 #include <libubus.h>
+}
 
 #include <cstdio>
 #include <map>

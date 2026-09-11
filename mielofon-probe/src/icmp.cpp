@@ -23,7 +23,11 @@
 #include <time.h>
 #include <unistd.h>
 
+// libubox typically lacks `extern "C"` guards; included from C++ the uloop
+// functions would be C++-mangled and fail to link against the C libs.
+extern "C" {
 #include <libubox/uloop.h>
+}
 
 #include <algorithm>
 #include <cstring>
