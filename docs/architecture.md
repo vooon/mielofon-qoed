@@ -107,8 +107,9 @@ Key integration points:
 
 - **Transport**: mTLS HTTPS via `ucode-mod-uclient`; the package's KConfig
   guarantees a `libustream-*` TLS backend (openssl preferred, mbedtls fallback)
-  is always enabled. Probes run the resident `ping` / `iperf3` / `netperf`
-  binaries; BIRD is driven over ubus through `rpcd-mod-bird` (`bird query`), so
+  is always enabled. The always-on tier runs the resident `ping` binary and
+  derives RTT jitter from its RTT distribution; the throughput tier runs
+  `iperf3`; BIRD is driven over ubus through `rpcd-mod-bird` (`bird query`), so
   the agent needs no `ucode-mod-socket`.
 
 ### Probe fence (soft lease)

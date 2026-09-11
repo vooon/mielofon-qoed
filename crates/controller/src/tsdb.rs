@@ -55,7 +55,7 @@ pub struct RawSample {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub loss_pct: Option<f32>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub rr_tps: Option<f32>,
+    pub jitter_ms: Option<f32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tcp_mbps: Option<f32>,
     /// Link utilization at the probe moment (Mbps).
@@ -70,7 +70,7 @@ impl RawSample {
         ts: u64,
         rtt_ms: Option<f64>,
         loss_pct: Option<f64>,
-        rr_tps: Option<f64>,
+        jitter_ms: Option<f64>,
         tcp_mbps: Option<f64>,
         util_mbps: f64,
     ) -> Self {
@@ -80,7 +80,7 @@ impl RawSample {
             ts,
             rtt_ms: opt(rtt_ms),
             loss_pct: opt(loss_pct),
-            rr_tps: opt(rr_tps),
+            jitter_ms: opt(jitter_ms),
             tcp_mbps: opt(tcp_mbps),
             util_mbps: util_mbps as f32,
             state: state_code(state),
@@ -134,7 +134,7 @@ pub struct Bucket {
     pub n: u32,
     pub rtt: DimAgg,
     pub loss: DimAgg,
-    pub rr: DimAgg,
+    pub jitter: DimAgg,
     pub tcp: DimAgg,
     pub util: DimAgg,
 }
@@ -149,8 +149,8 @@ impl Bucket {
         if let Some(v) = s.loss_pct {
             self.loss.merge(v);
         }
-        if let Some(v) = s.rr_tps {
-            self.rr.merge(v);
+        if let Some(v) = s.jitter_ms {
+            self.jitter.merge(v);
         }
         if let Some(v) = s.tcp_mbps {
             self.tcp.merge(v);
@@ -177,7 +177,7 @@ pub struct BucketView {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub loss: Option<DimView>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub rr: Option<DimView>,
+    pub jitter: Option<DimView>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tcp: Option<DimView>,
     pub util: DimView,
@@ -361,7 +361,7 @@ impl Tsdb {
                         n: b.n,
                         rtt: b.rtt.view(),
                         loss: b.loss.view(),
-                        rr: b.rr.view(),
+                        jitter: b.jitter.view(),
                         tcp: b.tcp.view(),
                         util: b.util.view().unwrap_or(DimView {
                             n: 0,
@@ -604,12 +604,13 @@ impl Store for Tsdb {
     /// Collapse recent raw samples into the classifier's per-dimension view.
     ///
     /// Semantics follow the RRD approach the classifier wanted: no "no data"
-    /// gaps are fabricated. The always-tier dims (rtt/loss/rr) are taken from
-    /// the most recent sample within `always_fresh_secs`; the gated throughput
-    /// dim is the most recent value within `tcp_fresh_secs`, else the last-known
-    /// carried within `tcp_carry_secs`. The per-link timestamps are monotonic
-    /// (single producer), so scanning the ring backward from the newest sample
-    /// yields exactly the "latest within each horizon" per dimension.
+    /// gaps are fabricated. The always-tier dims (rtt/loss/jitter) are taken
+    /// from the most recent sample within `always_fresh_secs`; the gated
+    /// throughput dim is the most recent value within `tcp_fresh_secs`, else
+    /// the last-known carried within `tcp_carry_secs`. The per-link timestamps
+    /// are monotonic (single producer), so scanning the ring backward from the
+    /// newest sample yields exactly the "latest within each horizon" per
+    /// dimension.
     fn window(&self, link: &LinkKey, spec: &WindowSpec, now: u64) -> Option<WindowView> {
         let map = self.by_link.read().expect("tsdb by_link read");
         let ring = map.get(link)?;
@@ -638,8 +639,8 @@ impl Store for Tsdb {
             if view.loss_pct.is_none() {
                 view.loss_pct = s.loss_pct.map(|v| v as f64);
             }
-            if view.rr_tps.is_none() {
-                view.rr_tps = s.rr_tps.map(|v| v as f64);
+            if view.jitter_ms.is_none() {
+                view.jitter_ms = s.jitter_ms.map(|v| v as f64);
             }
         }
 

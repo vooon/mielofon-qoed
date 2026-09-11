@@ -12,6 +12,12 @@
 //! `conflict` is never re-classified as degraded. It keeps its last derived
 //! cost for up to `busy_hold_secs`; beyond that the sample is stale and the
 //! classifier stops touching it (the underlay owns hard outages).
+//!
+//! Hysteresis: a link's class only changes once a new class has been observed
+//! for `hysteresis_passes` consecutive classifier passes. This stops a single
+//! noisy sample — or a metric wobbling across a threshold — from flipping the
+//! class and re-routing OSPF cost. The first classification of a link applies
+//! immediately.
 
 use crate::model::{LinkKey, ProbeState, Quality, QualityRecord};
 use crate::quality;
@@ -21,21 +27,31 @@ use std::collections::HashMap;
 use std::sync::RwLock;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-/// Per-link last-derived policy, used to hold a cost while a link is busy.
-#[derive(Clone)]
+/// Per-link last-derived policy, used to hold a cost while a link is busy and
+/// as the reference class for hysteresis.
+#[derive(Clone, PartialEq)]
 struct LastPolicy {
     quality: Quality,
     ospf_cost: u32,
 }
 
+/// A candidate class being confirmed across consecutive passes.
+#[derive(Clone, Copy)]
+struct Pending {
+    quality: Quality,
+    passes: u32,
+}
+
 pub struct ClassifierState {
     last: RwLock<HashMap<LinkKey, LastPolicy>>,
+    pending: RwLock<HashMap<LinkKey, Pending>>,
 }
 
 impl ClassifierState {
     pub fn new() -> Self {
         ClassifierState {
             last: RwLock::new(HashMap::new()),
+            pending: RwLock::new(HashMap::new()),
         }
     }
 }
@@ -86,20 +102,72 @@ pub fn classify_once(state: &AppState) {
             continue;
         }
 
-        // Fresh data: classify from the window and remember it.
-        let quality = quality::classify_window(&cfg.quality, &view);
-        let ospf_cost = quality::cost_for_quality(&cfg.quality, quality);
+        // Fresh data: classify from the window, then apply hysteresis — a new
+        // class only takes effect after `hysteresis_passes` consecutive passes
+        // agree. The first classification of a link applies immediately.
+        let candidate = quality::classify_window(&cfg.quality, &view);
+
+        let held = state.classifier.last.read().expect("classifier lock");
+        let current = held.get(&link);
+
+        let effective = match current {
+            // First observation: apply immediately (no history to be stable).
+            None => candidate,
+            // Class unchanged: reset the confirmation counter.
+            Some(last) if last.quality == candidate => {
+                state
+                    .classifier
+                    .pending
+                    .write()
+                    .expect("classifier lock")
+                    .remove(&link);
+                candidate
+            }
+            // Candidate differs: require hysteresis_passes consecutive passes.
+            Some(_) => {
+                let mut pending = state.classifier.pending.write().expect("classifier lock");
+                let entry = pending.entry(link.clone()).or_insert(Pending {
+                    quality: candidate,
+                    passes: 0,
+                });
+                if entry.quality == candidate {
+                    entry.passes += 1;
+                    if entry.passes >= cfg.classifier.hysteresis_passes.max(1) {
+                        pending.remove(&link);
+                        candidate
+                    } else {
+                        current.unwrap().quality
+                    }
+                } else {
+                    // A different candidate interrupted the confirmation.
+                    *entry = Pending {
+                        quality: candidate,
+                        passes: 1,
+                    };
+                    current.unwrap().quality
+                }
+            }
+        };
+        drop(held);
+
+        let effective_cost = quality::cost_for_quality(&cfg.quality, effective);
         state
             .classifier
             .last
             .write()
             .expect("classifier lock")
-            .insert(link.clone(), LastPolicy { quality, ospf_cost });
-        write_derived(state, &link, &view, Some(quality), Some(ospf_cost));
+            .insert(
+                link.clone(),
+                LastPolicy {
+                    quality: effective,
+                    ospf_cost: effective_cost,
+                },
+            );
+        write_derived(state, &link, &view, Some(effective), Some(effective_cost));
     }
 }
 
-/// Stamp the collapsed window (rtt/loss/rr/tcp/util/state) plus the derived
+/// Stamp the collapsed window (rtt/loss/jitter/tcp/util/state) plus the derived
 /// quality/cost into the KV as the link's live policy record. The KV keeps the
 /// measurement dims so the map/metrics/quality endpoints keep showing them
 /// (now window-collapsed and no longer wiped by every always probe).
@@ -114,7 +182,7 @@ fn write_derived(
         ts: view.ts,
         rtt_ms: view.rtt_ms,
         loss_pct: view.loss_pct,
-        rr_tps: view.rr_tps,
+        jitter_ms: view.jitter_ms,
         tcp_mbps: view.tcp_mbps,
         udp_mbps: None,
         util_mbps: view.util_mbps,
@@ -144,6 +212,10 @@ mod tests {
     use crate::tsdb::RawSample;
 
     fn state_with(fresh: u64, carry: u64) -> AppState {
+        state_with_hyst(fresh, carry, 1)
+    }
+
+    fn state_with_hyst(fresh: u64, carry: u64, hysteresis_passes: u32) -> AppState {
         let cfg = Config {
             classifier: Classifier {
                 interval_secs: 5,
@@ -151,6 +223,7 @@ mod tests {
                 tcp_fresh_secs: fresh,
                 tcp_carry_secs: carry,
                 busy_hold_secs: 120,
+                hysteresis_passes,
             },
             ..Config::default()
         };
@@ -165,7 +238,7 @@ mod tests {
                 ts,
                 Some(rtt),
                 Some(0.0),
-                Some(90.0),
+                Some(2.0),
                 None,
                 0.0,
             ),
@@ -222,7 +295,7 @@ mod tests {
                 base,
                 Some(10.0),
                 Some(0.0),
-                Some(100.0),
+                Some(2.0),
                 Some(90.0),
                 0.0,
             ),
@@ -275,5 +348,64 @@ mod tests {
         assert_eq!(rec.state, ProbeState::Busy);
         assert_eq!(rec.quality, None, "never classified while busy");
         assert_eq!(rec.ospf_cost, None);
+    }
+
+    #[test]
+    fn class_change_requires_consecutive_passes() {
+        // hysteresis_passes = 3: a candidate class must be observed 3
+        // consecutive times before it is applied, so a single degraded sample
+        // cannot flip the cost.
+        let state = state_with_hyst(1200, 3600, 3);
+        let link = LinkKey::new("spoke-1", "hub-a", "awg_hub_a");
+        let mut ts = crate::tsdb::now_secs();
+
+        // Establish a good link (low rtt, low jitter, healthy throughput).
+        state.tsdb.append(
+            &link,
+            RawSample::from_dims(
+                ProbeState::Quiet,
+                ts,
+                Some(10.0),
+                Some(0.0),
+                Some(2.0),
+                Some(90.0),
+                0.0,
+            ),
+        );
+        classify_once(&state);
+        assert_eq!(state.kv.get(&link).unwrap().quality, Some(Quality::Good));
+
+        // Degrade the link (rtt > bad line) and classify several times with
+        // fresh samples each pass. The class must NOT flip on the first one or
+        // two observations — only after 3 consecutive degraded samples.
+        let mut got_bad = false;
+        for pass in 0..5 {
+            ts += 5; // fresh sample within always_fresh_secs (60)
+            state.tsdb.append(
+                &link,
+                RawSample::from_dims(
+                    ProbeState::Quiet,
+                    ts,
+                    Some(600.0),
+                    Some(0.0),
+                    Some(2.0),
+                    Some(90.0),
+                    0.0,
+                ),
+            );
+            classify_once(&state);
+            let q = state.kv.get(&link).unwrap().quality.unwrap();
+            if q == Quality::Bad {
+                got_bad = true;
+                // Bad is applied only on the 3rd consecutive degraded pass.
+                assert!(
+                    pass >= 2,
+                    "class must not flip before hysteresis_passes (got bad on pass {pass})"
+                );
+            } else {
+                assert_eq!(q, Quality::Good, "must hold good until hysteresis");
+            }
+        }
+        assert!(got_bad, "sustained degradation must eventually apply");
     }
 }

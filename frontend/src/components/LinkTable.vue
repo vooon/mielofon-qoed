@@ -22,7 +22,7 @@ function badge(quality) {
       <thead>
         <tr>
           <th>from</th><th>to</th><th>iface</th><th>rtt ms</th><th>loss %</th>
-          <th>rr tps</th><th>tcp Mbps</th><th>state</th><th>quality</th><th>cost</th>
+          <th>jit ms</th><th>tcp Mbps</th><th>state</th><th>quality</th><th>cost</th>
         </tr>
       </thead>
       <tbody>
@@ -36,7 +36,7 @@ function badge(quality) {
           <td>{{ l.interface }}</td>
           <td>{{ cellText(l.rtt_ms) }}</td>
           <td>{{ cellText(l.loss_pct, 2) }}</td>
-          <td>{{ cellText(l.rr_tps) }}</td>
+          <td>{{ cellText(l.jitter_ms) }}</td>
           <td>{{ cellText(l.tcp_mbps, 1) }}</td>
           <td :class="l.state === 'busy' ? 'st-busy' : ''">{{ l.state || 'quiet' }}</td>
           <td v-html="badge(l.quality)"></td>

@@ -16,14 +16,13 @@ let plot = null;
 
 const MS = 'ms';
 const PCT = 'pct';
-const RATE = 'rate';
 const MBPS = 'mbps';
 
 const seriesDefs = [
 	{ key: 'rtt', label: 'rtt', scale: MS, stroke: '#2f80ed', width: 1.5, fmt: v => v.toFixed(1) + ' ms', points: false, gaps: false },
 	{ key: 'loss', label: 'loss', scale: PCT, stroke: '#e7040f', width: 1, fmt: v => v.toFixed(1) + '%', points: false, gaps: false },
 	{ key: 'util', label: 'util', scale: PCT, stroke: '#19a974', width: 1, fmt: v => v.toFixed(1) + '%', points: false, gaps: false },
-	{ key: 'rr', label: 'rr', scale: RATE, stroke: '#d9a400', width: 1, fmt: v => v.toFixed(1) + ' tps', points: false, gaps: false },
+	{ key: 'jitter', label: 'jitter', scale: MS, stroke: '#d9a400', width: 1, fmt: v => v.toFixed(2) + ' ms', points: false, gaps: false },
 	// tcp throughput is probed on a sparse 5-minute cadence, so connect the
 	// samples (spanGaps) and keep small point markers so isolated dots remain
 	// legible without a fabricated dense line.
@@ -64,7 +63,6 @@ function optsFor(tcpMax) {
 		scales: {
 			x: { time: true },
 			[MS]: { time: false },
-			[RATE]: { time: false },
 			[MBPS]: { time: false, min: 0, max: tcpMax },
 			[PCT]: { min: 0, max: 100, time: false },
 		},
@@ -72,7 +70,6 @@ function optsFor(tcpMax) {
 			{ scale: 'x', stroke: '#8a94a6', grid: { stroke: '#eef1f5', width: 1 } },
 			{ scale: 'ms', stroke: '#8a94a6', grid: { stroke: '#eef1f5', width: 1 }, values: fmtAxis, label: 'rtt/ms' },
 			{ scale: PCT, side: 1, stroke: '#8a94a6', grid: { stroke: '#eef1f5', width: 1 } },
-			{ scale: RATE, show: false },
 			{ scale: MBPS, side: 1, stroke: '#9d5cff', grid: { show: false }, values: fmtAxisMbps },
 		],
 		series,

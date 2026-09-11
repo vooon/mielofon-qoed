@@ -38,7 +38,8 @@ pub struct WindowView {
     pub state: ProbeState,
     pub rtt_ms: Option<f64>,
     pub loss_pct: Option<f64>,
-    pub rr_tps: Option<f64>,
+    /// RTT jitter (ms) from the most recent ping within `always_fresh_secs`.
+    pub jitter_ms: Option<f64>,
     /// Most recent throughput within `tcp_fresh_secs`, else the last-known
     /// value carried within `tcp_carry_secs`.
     pub tcp_mbps: Option<f64>,

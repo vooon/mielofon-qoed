@@ -6,11 +6,9 @@ metrics.counters.commands_received += 5;
 metrics.counters.commands_succeeded += 4;
 metrics.counters.commands_errored += 1;
 metrics.counters.probe_ping += 4;
-metrics.counters.probe_netperf += 4;
 metrics.counters.probe_iperf += 1;
 metrics.counters.probe_busy += 2;
 metrics.counters.probe_errors.ping = 1;
-metrics.counters.probe_errors.netperf = 1;
 metrics.counters.probe_errors.iperf = 1;
 metrics.counters.apply_cost += 3;
 metrics.counters.apply_cost_errors += 1;
@@ -22,7 +20,7 @@ metrics.set_links([
 
 metrics.record_always(
 	{ from: 'spoke-1', to: 'hub-a', interface: 'awg_hub_a' },
-	{ rtt_ms: 0.648, loss_pct: 0, rr_tps: 1891.95 }
+	{ rtt_ms: 0.648, loss_pct: 0, jitter_ms: 0.121 }
 );
 
 metrics.record_throughput(
@@ -45,7 +43,8 @@ has('mielofon_agent_link_configured{from="spoke-1",to="hub-a",interface="awg_hub
 has('mielofon_agent_link_configured{from="spoke-1",to="hub-b",interface="awg_hub_b"} 1');
 has('mielofon_agent_link_rtt_ms{');
 has('mielofon_agent_link_rtt_ms{from="spoke-1",to="hub-a",interface="awg_hub_a"} 0.648');
-has('mielofon_agent_link_rr_tps');
+has('mielofon_agent_link_jitter_ms');
+has('mielofon_agent_link_jitter_ms{from="spoke-1",to="hub-a",interface="awg_hub_a"} 0.121');
 has('mielofon_agent_link_tcp_mbps');
 has('mielofon_agent_link_util_mbps');
 has('mielofon_agent_link_busy{from="spoke-1",to="hub-a",interface="awg_hub_a"} 0');
@@ -56,11 +55,9 @@ has('mielofon_agent_commands_total{result="received"} 5');
 has('mielofon_agent_commands_total{result="succeeded"} 4');
 has('mielofon_agent_commands_total{result="errored"} 1');
 has('mielofon_agent_probe_total{kind="ping"} 4');
-has('mielofon_agent_probe_total{kind="netperf"} 4');
 has('mielofon_agent_probe_total{kind="iperf"} 1');
 has('mielofon_agent_probe_total{kind="busy"} 2');
 has('mielofon_agent_probe_errors_total{kind="ping"} 1');
-has('mielofon_agent_probe_errors_total{kind="netperf"} 1');
 has('mielofon_agent_probe_errors_total{kind="iperf"} 1');
 has('mielofon_agent_apply_cost_total{result="ok"} 3');
 has('mielofon_agent_apply_cost_total{result="error"} 1');

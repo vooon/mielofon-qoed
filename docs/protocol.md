@@ -45,7 +45,7 @@ A directed link `{from, to, interface}` maps to a measurement record:
   "ts": 1747000000,
   "rtt_ms": 15.0,
   "loss_pct": 0.0,
-  "rr_tps": 90.0,
+  "jitter_ms": 2.5,
   "tcp_mbps": 1.5,
   "udp_mbps": null,
   "util_mbps": 0.0,
@@ -145,7 +145,7 @@ Every reply echoes the command's job `id`:
 POST /v1/agent/reply              // clients
 { "id": "always/spoke-1/…", "kind": "probe",
   "link": { … },
-  "rtt_ms":15.0, "loss_pct":0.0, "rr_tps":90.0,
+  "rtt_ms":15.0, "loss_pct":0.0, "jitter_ms":2.5,
   "tcp_mbps":null, "util_mbps":0.0, "state":"quiet", "token": null }
 
 { "id": "apply/spoke-1/…", "kind": "applied", "link": { … }, "cost": 50 }
@@ -154,12 +154,11 @@ POST /v1/agent/reply              // clients
 - Always-on replies carry no token. Throughput replies echo the fence token
   from the command; the controller releases the lease on receipt.
 - Always-on probes always send what they measured and report `rtt_ms`/`loss_pct`/
-  `rr_tps` as `null` when they could not measure (a failed ping must not turn
-  into a fake loss, a failed netperf TCP_RR must not turn into a `0` — an
-  unmeasured dimension never constrains classification). Throughput replies
-  echo the agent's **last always-on measurement** for those fields so they stay
-  populated across fence-gated runs. The controller stores reports verbatim —
-  no history carry-forward.
+  `jitter_ms` as `null` when they could not measure (a failed ping must not turn
+  into a fake loss or a fake jitter — an unmeasured dimension never constrains
+  classification). Throughput replies echo the agent's **last always-on
+  measurement** for those fields so they stay populated across fence-gated runs.
+  The controller stores reports verbatim — no history carry-forward.
 - A busy link is reported `state: "busy"` (with `util_mbps`) and is never
   classified as degraded.
 - `/v1/quality` and `/v1/apply/ack` remain supported as the equivalent
@@ -201,7 +200,7 @@ GET /v1/ts?from=spoke-1&to=hub-a&interface=awg_hub_a&since=1746996000&until=1746
 // raw (within retention) + 60s buckets:
 { "link": { "from": "spoke-1", "to": "hub-a", "interface": "awg_hub_a" },
   "since": 1746996000, "until": 1746999600,
-  "samples": [ { "ts": 1746996000, "rtt_ms": 11.5, "loss_pct": 0.0, "rr_tps": 188.0, "util_mbps": 0.0, "state": 0 } ],
+  "samples": [ { "ts": 1746996000, "rtt_ms": 11.5, "loss_pct": 0.0, "jitter_ms": 1.8, "util_mbps": 0.0, "state": 0 } ],
   "buckets": [ { "ts": 1746996000, "n": 4,
                  "rtt": { "n": 4, "min": 9.8, "avg": 11.2, "max": 13.4 }, "util": { "n": 4, "min": 0, "avg": 0, "max": 0 } } ] }
 ```

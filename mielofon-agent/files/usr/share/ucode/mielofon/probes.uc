@@ -22,6 +22,7 @@ export function parse_ping(stdout)
 {
 	let loss = -1.0;
 	let rtt = null;
+	let jitter = null;
 	let lines = split(stdout, '\n');
 	let li = 0;
 
@@ -30,37 +31,25 @@ export function parse_ping(stdout)
 		if (m)
 			loss = +m[1];
 
-		/* iputils: "rtt min/avg/max/mdev = a/b/c/d ms";
-		 * busybox: "round-trip min/avg/max = a/b/c ms". Take the average. */
-		let r = match(lines[li], /(rtt|round-trip) min\/avg\/max(\/mdev)? = ([0-9.]+)\/([0-9.]+)\//);
-		if (r)
+		/* iputils: "rtt min/avg/max/mdev = a/b/c/d ms" — `mdev` is the mean
+		 * deviation, the standard jitter metric.
+		 * busybox:  "round-trip min/avg/max = a/b/c ms" — no mdev, fall back to
+		 * the max-min spread as a jitter proxy. */
+		let r = match(lines[li], /(rtt|round-trip) min\/avg\/max\/(mdev )?= ([0-9.]+)\/([0-9.]+)\/([0-9.]+)\/([0-9.]+)/);
+		if (r) {
 			rtt = +r[4];
-	}
-
-	return { loss: loss, rtt: rtt };
-};
-
-/* netperf TCP_RR runs print a numeric table; the trans/sec rate is the last
- * column of the data rows. Return the largest positive value seen. */
-export function parse_transaction_rate(stdout)
-{
-	let best = 0.0;
-	let lines = split(stdout, '\n');
-	let li = 0;
-
-	for (li = 0; li < length(lines); li++) {
-		let toks = filter(split(trim(lines[li]), ' '), length);
-
-		if (length(toks) < 5)
+			jitter = +r[6];
 			continue;
+		}
 
-		let v = +toks[length(toks) - 1];
-
-		if (v > best && v < 1e9)
-			best = v;
+		let b = match(lines[li], /(rtt|round-trip) min\/avg\/max = ([0-9.]+)\/([0-9.]+)\/([0-9.]+)/);
+		if (b) {
+			rtt = +b[3];
+			jitter = +b[4] - +b[2];
+		}
 	}
 
-	return best;
+	return { loss: loss, rtt: rtt, jitter: jitter };
 };
 
 /* iperf3 -J JSON: pick the report's bits_per_second (Mbps, largest value). */
@@ -201,15 +190,6 @@ function ping_command(link, cfg)
 	return `ping -q -c ${cfg.ping_count} -W 1${ival}${src} ${link.target}`;
 };
 
-function netperf_command(link, cfg)
-{
-	let src = (link.source != null) ? ` -L ${link.source}` : '';
-
-	/* `-l 4` caps the data phase but NOT the TCP connect to netserver; the
-	 * bound in `run()` cuts a black-holed/refused control connection. */
-	return `netperf -l ${cfg.rr_duration} -t TCP_RR -H ${link.target}${src}`;
-};
-
 function iperf_command(link, cfg)
 {
 	let src = (link.source != null) ? ` -B ${link.source}` : '';
@@ -231,46 +211,35 @@ export function run_always(link, cfg, cb)
 		 * into a fake `-1 loss` figure: an unmeasured dimension never
 		 * constrains quality on the controller. A 100%-loss ping keeps its
 		 * real `loss` but has no round-trip time — iputils still prints a
-		 * stale `0.000` summary line, so null the rtt explicitly. */
+		 * stale `0.000` summary line, so null the rtt/jitter explicitly. */
 		if (ping_err || p.loss < 0)
-			p = { loss: null, rtt: null };
+			p = { loss: null, rtt: null, jitter: null };
 		else if (p.loss >= 100)
-			p.rtt = null;
+			p = { loss: p.loss, rtt: null, jitter: null };
 
 		if (ping_err || p.rtt == null)
 			metrics.counters.probe_errors.ping = (metrics.counters.probe_errors.ping || 0) + 1;
 
-		metrics.counters.probe_netperf++;
-		run(12, netperf_command(link, cfg), function(rr_err, rr_out) {
-			let tps = parse_transaction_rate(rr_out);
+		/* Jitter is the non-intrusive congestion signal: it is congestion-
+		 * immune (valid under real load) and needs no server on the far end,
+		 * so the always tier is pure ping (rtt/loss/jitter) — no netperf, no
+		 * /tmp netserver.debug_* files, and no synthetic load. Real-load
+		 * detection (border DPI shaping that only shows under tunnel usage) is
+		 * left to the gated iperf3 tier + interface counters (util_mbps). */
+		ulog(LOG_DEBUG, 'always %s -> %s: rtt=%s loss=%s jitter=%s\n',
+			link.interface, link.target, p.rtt, p.loss, p.jitter);
 
-			/* A failed TCP_RR run (control connect refused, test aborted) is a
-			 * measurement failure, never a real "0 trans/s": report it as
-			 * unmeasured so it cannot escalate the link to bad. Zero was the
-			 * old behaviour and it silently re-routed whole links to cost 100. */
-			if (rr_err || tps <= 0)
-				metrics.counters.probe_errors.netperf = (metrics.counters.probe_errors.netperf || 0) + 1;
-
-			let rr = (rr_err || tps <= 0) ? null : tps;
-
-			/* Debug: the resolved numbers, alongside the raw `cmd`/`cmd out`
-			 * lines above — this is the "is it really a netperf failure?"
-			 * answer (output absent/aborted vs a low-but-real rate). */
-			ulog(LOG_DEBUG, 'always %s -> %s: rtt=%s loss=%s rr=%s\n',
-				link.interface, link.target, p.rtt, p.loss, rr);
-
-			cb(null, {
-				rtt_ms: p.rtt,
-				loss_pct: p.loss,
-				rr_tps: rr,
-			});
+		cb(null, {
+			rtt_ms: p.rtt,
+			loss_pct: p.loss,
+			jitter_ms: p.jitter,
 		});
 	});
 };
 
 /* Gated throughput tier: quiet gate first, then iperf3. Echoes the last
  * always-tier measurement (metrics.last_always) so the controller keeps the
- * rtt/loss/rr dims without any server-side history carry-forward. */
+ * rtt/loss/jitter dims without any server-side history carry-forward. */
 export function run_throughput(link, cfg, cb)
 {
 	let a = metrics.last_always(link);
@@ -287,7 +256,7 @@ export function run_throughput(link, cfg, cb)
 			tcp_mbps: null,
 			rtt_ms: a.rtt_ms,
 			loss_pct: a.loss_pct,
-			rr_tps: a.rr_tps,
+			jitter_ms: a.jitter_ms,
 		});
 		return;
 	}
@@ -310,7 +279,7 @@ export function run_throughput(link, cfg, cb)
 			tcp_mbps: tcp,
 			rtt_ms: a.rtt_ms,
 			loss_pct: a.loss_pct,
-			rr_tps: a.rr_tps,
+			jitter_ms: a.jitter_ms,
 		});
 	});
 };

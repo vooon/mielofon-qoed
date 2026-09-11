@@ -60,17 +60,17 @@ pub enum Quality {
 /// A per-link quality/policy record, keyed by LinkKey (LWW by `ts`).
 ///
 /// The KV holds the *derived* record written by the classifier: the collapsed
-/// measurement window (rtt/loss/rr/tcp/util/state) plus the controller-assigned
-/// `quality` and `ospf_cost`. Each dimension is optional — unset dimensions
-/// never constrain classification, and the window collapse (see `store.rs`)
-/// carries a sparse dimension (e.g. the gated throughput probe) so it is not
-/// blanked by a more frequent probe of the others.
+/// measurement window (rtt/loss/jitter/tcp/util/state) plus the
+/// controller-assigned `quality` and `ospf_cost`. Each dimension is optional —
+/// unset dimensions never constrain classification, and the window collapse
+/// (see `store.rs`) carries a sparse dimension (e.g. the gated throughput
+/// probe) so it is not blanked by a more frequent probe of the others.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct QualityRecord {
     pub ts: u64,
     pub rtt_ms: Option<f64>,
     pub loss_pct: Option<f64>,
-    pub rr_tps: Option<f64>,
+    pub jitter_ms: Option<f64>,
     #[serde(default)]
     pub tcp_mbps: Option<f64>,
     #[serde(default)]
@@ -87,7 +87,7 @@ impl QualityRecord {
     pub fn new(
         rtt_ms: Option<f64>,
         loss_pct: Option<f64>,
-        rr_tps: Option<f64>,
+        jitter_ms: Option<f64>,
         tcp_mbps: Option<f64>,
         udp_mbps: Option<f64>,
         util_mbps: f64,
@@ -97,7 +97,7 @@ impl QualityRecord {
             ts: now_secs(),
             rtt_ms,
             loss_pct,
-            rr_tps,
+            jitter_ms,
             tcp_mbps,
             udp_mbps,
             util_mbps,

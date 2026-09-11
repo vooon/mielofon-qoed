@@ -57,7 +57,7 @@ pub struct QualityReq {
     #[serde(default)]
     pub loss_pct: Option<f64>,
     #[serde(default)]
-    pub rr_tps: Option<f64>,
+    pub jitter_ms: Option<f64>,
     #[serde(default)]
     pub tcp_mbps: Option<f64>,
     pub util_mbps: f64,
@@ -173,7 +173,7 @@ pub async fn post_quality(
             ts: req.ts,
             rtt_ms: req.rtt_ms,
             loss_pct: req.loss_pct,
-            rr_tps: req.rr_tps,
+            jitter_ms: req.jitter_ms,
             tcp_mbps: req.tcp_mbps,
             util_mbps: req.util_mbps,
             probe_state: req.state,
@@ -189,7 +189,7 @@ struct Measure {
     ts: Option<u64>,
     rtt_ms: Option<f64>,
     loss_pct: Option<f64>,
-    rr_tps: Option<f64>,
+    jitter_ms: Option<f64>,
     tcp_mbps: Option<f64>,
     util_mbps: f64,
     probe_state: ProbeState,
@@ -205,10 +205,6 @@ struct Measure {
 /// stale dimension in the *sample* instead of resurrecting it (e.g. a 100%-loss
 /// ping must not keep an old rtt); the derived live record reflects the window.
 fn ingest_quality(state: &AppState, m: Measure) {
-    // Legacy agents on an always probe report a failed TCP_RR run as rr_tps 0.0
-    // — a measurement failure, never a real sustained rate. Treat it as
-    // unmeasured so it cannot silently re-classify the link to bad.
-    let rr = normalize_rr(m.rr_tps);
     let ts = m.ts.unwrap_or_else(crate::tsdb::now_secs);
 
     state.tsdb.append(
@@ -218,7 +214,7 @@ fn ingest_quality(state: &AppState, m: Measure) {
             ts,
             m.rtt_ms,
             m.loss_pct,
-            rr,
+            m.jitter_ms,
             m.tcp_mbps,
             m.util_mbps,
         ),
@@ -345,7 +341,7 @@ pub enum AgentReply {
         #[serde(default)]
         loss_pct: Option<f64>,
         #[serde(default)]
-        rr_tps: Option<f64>,
+        jitter_ms: Option<f64>,
         #[serde(default)]
         tcp_mbps: Option<f64>,
         util_mbps: f64,
@@ -383,12 +379,6 @@ pub enum AgentReply {
     },
 }
 
-/// A real sustained TCP_RR rate is never 0 — a `0.0` from a (legacy) agent
-/// always means the netperf run failed, so treat it as unmeasured.
-fn normalize_rr(v: Option<f64>) -> Option<f64> {
-    v.filter(|v| *v > 0.0)
-}
-
 /// Run `f` inside a span whose W3C parent is `traceparent`, when present.
 /// Returns the span's return value.
 fn with_traceparent<T>(traceparent: Option<&str>, f: impl FnOnce() -> T) -> T {
@@ -413,7 +403,7 @@ pub async fn agent_reply(
             ts,
             rtt_ms,
             loss_pct,
-            rr_tps,
+            jitter_ms,
             tcp_mbps,
             util_mbps,
             state: probe_state,
@@ -428,7 +418,7 @@ pub async fn agent_reply(
                         ts,
                         rtt_ms,
                         loss_pct,
-                        rr_tps,
+                        jitter_ms,
                         tcp_mbps,
                         util_mbps,
                         probe_state,
@@ -756,18 +746,4 @@ fn reports_total() -> u64 {
     use std::sync::atomic::{AtomicU64, Ordering};
     static C: AtomicU64 = AtomicU64::new(0);
     C.load(Ordering::Relaxed)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn failed_rr_is_unmeasured_not_zero() {
-        // A legacy agent's failed TCP_RR run reports 0.0 — must not constrain.
-        assert_eq!(normalize_rr(Some(0.0)), None);
-        assert_eq!(normalize_rr(Some(-1.0)), None);
-        assert_eq!(normalize_rr(None), None);
-        assert_eq!(normalize_rr(Some(3.7)), Some(3.7));
-    }
 }

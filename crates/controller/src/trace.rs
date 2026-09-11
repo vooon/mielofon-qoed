@@ -580,7 +580,7 @@ mod tests {
             ts: 1_700_000_000,
             rtt_ms: Some(9.0),
             loss_pct: Some(0.0),
-            rr_tps: Some(99.0),
+            jitter_ms: Some(1.0),
             udp_mbps: None,
             util_mbps: 0.0,
             state: ProbeState::Quiet,

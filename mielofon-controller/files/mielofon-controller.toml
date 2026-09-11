@@ -30,55 +30,60 @@ cert = "/etc/mielofon/node.pem"
 key = "/etc/mielofon/node.key"
 
 # Quality classes. Each class pins only the dimensions it wants to enforce
-# (unset = not constraining): rtt_ms/loss_pct are upper bounds (≤ is ok),
-# rr_tps/tcp_mbps are lower bounds (≥ is ok). A link gets the worst class
+# (unset = not constraining): rtt_ms/loss_pct/jitter_ms are upper bounds
+# (≤ is ok), tcp_mbps is a lower bound (≥ is ok). A link gets the worst class
 # whose threshold it crosses; ospf_cost is advertised for links in that class.
 #
-# rr_tps is calibrated 1:1 to the rtt cutoffs (25/11/4/2 ≈ 1000/rtt at
-# 40/90/250/500 ms): netperf TCP_RR is lockstep, so the rate is capped at
-# ~1000/rtt and rr is a latency cross-check, not a multi-stream throughput.
+# jitter_ms is the always-tier congestion signal, derived from the ping RTT
+# distribution (iputils mdev). It is non-intrusive and congestion-immune: it
+# rises under bufferbloat/queueing before the average RTT crosses a class, and
+# is upper-bounded below the rtt cutoffs. Strictness is tempered by the
+# classifier's hysteresis.
 [quality.good]
 rtt_ms = 40
 loss_pct = 1.0
-rr_tps = 25.0
+jitter_ms = 5.0
 tcp_mbps = 10.0
 ospf_cost = 10
 
 [quality.acceptable]
 rtt_ms = 90
 loss_pct = 2.5
-rr_tps = 11.0
+jitter_ms = 15.0
 tcp_mbps = 5.0
 ospf_cost = 20
 
 [quality.poor]
 rtt_ms = 250
 loss_pct = 5.0
-rr_tps = 4.0
+jitter_ms = 40.0
 tcp_mbps = 2.0
 ospf_cost = 50
 
 [quality.bad]
 rtt_ms = 500
 loss_pct = 10.0
-rr_tps = 2.0
+jitter_ms = 100.0
 tcp_mbps = 1.0
 ospf_cost = 100
 
 # Policy classifier. Classification is decoupled from measurement: probe
 # replies are appended to the replicated time-series store, and this loop
 # re-derives each link's quality/cost from a window of recent samples.
-# `always_fresh_secs` bounds how fresh the rtt/loss/rr must be; the gated
+# `always_fresh_secs` bounds how fresh the rtt/loss/jitter must be; the gated
 # throughput dim is used fresh within `tcp_fresh_secs` and carried (last-known)
 # within `tcp_carry_secs`, so a busy/skipped throughput probe does not blank
 # mbps from classification. `busy_hold_secs` keeps a busy link's last cost
-# instead of reclassifying it as degraded.
+# instead of reclassifying it as degraded. `hysteresis_passes` requires a new
+# class to be observed that many consecutive passes before it is applied, so a
+# single noisy sample cannot flip the cost.
 [classifier]
 interval_secs = 5
 always_fresh_secs = 60
 tcp_fresh_secs = 1200
 tcp_carry_secs = 3600
 busy_hold_secs = 120
+hysteresis_passes = 3
 
 # Console logging. `level` sets the minimum tracing level emitted to the
 # console; `format` selects the console output (logfmt or JSON). Both are

@@ -18,7 +18,7 @@ define Package/mielofon-agent
   PKGARCH:=all
   DEPENDS:=+ucode +ucode-mod-uclient +ucode-mod-ubus +ucode-mod-uci +ucode-mod-fs \
 	+ucode-mod-uloop +ucode-mod-log +ucode-mod-digest +rpcd +rpcd-mod-bird \
-	+iperf3 +netperf +iputils-ping +iperf3-server \
+	+iperf3 +iputils-ping +iperf3-server \
 	+@BUSYBOX_DEFAULT_TIMEOUT +@BUSYBOX_CONFIG_TIMEOUT \
 	+MIELOFON_AGENT_TLS_OPENSSL:libustream-openssl \
 	+MIELOFON_AGENT_TLS_MBEDTLS:libustream-mbedtls

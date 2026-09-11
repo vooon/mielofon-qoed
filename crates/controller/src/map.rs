@@ -27,7 +27,9 @@ pub struct GraphLink {
     pub interface: String,
     pub rtt_ms: Option<f64>,
     pub loss_pct: Option<f64>,
-    pub rr_tps: Option<f64>,
+    /// RTT jitter (ms), derived from the ping RTT distribution — the
+    /// congestion/latency-stability signal.
+    pub jitter_ms: Option<f64>,
     /// Best-effort TCP throughput (Mbps), only present for throughput probes.
     pub tcp_mbps: Option<f64>,
     pub udp_mbps: Option<f64>,
@@ -74,7 +76,7 @@ pub fn graph_part(state: &AppState) -> (Vec<GraphNode>, Vec<GraphLink>) {
             interface: key.interface,
             rtt_ms: rec.rtt_ms,
             loss_pct: rec.loss_pct,
-            rr_tps: rec.rr_tps,
+            jitter_ms: rec.jitter_ms,
             tcp_mbps: rec.tcp_mbps,
             udp_mbps: rec.udp_mbps,
             util_mbps: rec.util_mbps,

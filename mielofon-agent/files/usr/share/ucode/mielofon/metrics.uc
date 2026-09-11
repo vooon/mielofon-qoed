@@ -31,12 +31,11 @@ export let counters = {
 	commands_succeeded: 0,  /* commands that completed without error */
 	commands_errored: 0,    /* commands that hit an error/unknown path */
 	probe_ping: 0,          /* ping(1) invocations */
-	probe_netperf: 0,       /* netperf TCP_RR invocations */
 	probe_iperf: 0,         /* iperf3 throughput runs */
 	probe_busy: 0,          /* throughput probes skipped because link busy */
 	apply_cost: 0,          /* OSPF cost applies that succeeded */
 	apply_cost_errors: 0,   /* OSPF cost applies that failed */
-	/* per-tool probe failures, keyed by kind (ping/netperf/iperf) */
+	/* per-tool probe failures, keyed by kind (ping/iperf) */
 	probe_errors: {},
 };
 
@@ -182,7 +181,7 @@ export function record_always(link, r)
 
 	e.rtt_ms = r.rtt_ms;
 	e.loss_pct = r.loss_pct;
-	e.rr_tps = r.rr_tps;
+	e.jitter_ms = r.jitter_ms;
 	e.last_unixtime = time();
 };
 
@@ -196,7 +195,7 @@ export function record_throughput(link, r)
 	e.last_unixtime = time();
 };
 
-/* Latest always-tier measurement for a link ({rtt_ms, loss_pct, rr_tps}, an
+/* Latest always-tier measurement for a link ({rtt_ms, loss_pct, jitter_ms}, an
  * entry per field or null). Throughput replies echo these so the controller
  * keeps the always dims intact without any server-side history carry-forward:
  * an always probe that could not measure a dimension reports null here and the
@@ -208,7 +207,7 @@ export function last_always(link)
 	return {
 		rtt_ms: (exists(e, 'rtt_ms') && e.rtt_ms != null) ? e.rtt_ms : null,
 		loss_pct: (exists(e, 'loss_pct') && e.loss_pct != null) ? e.loss_pct : null,
-		rr_tps: (exists(e, 'rr_tps') && e.rr_tps != null) ? e.rr_tps : null,
+		jitter_ms: (exists(e, 'jitter_ms') && e.jitter_ms != null) ? e.jitter_ms : null,
 	};
 };
 
@@ -254,7 +253,6 @@ export function render()
 	cmds({ result: 'errored' }, counters.commands_errored);
 
 	probes({ kind: 'ping' }, counters.probe_ping);
-	probes({ kind: 'netperf' }, counters.probe_netperf);
 	probes({ kind: 'iperf' }, counters.probe_iperf);
 	probes({ kind: 'busy' }, counters.probe_busy);
 
@@ -270,7 +268,7 @@ export function render()
 	let when = gauge('mielofon_agent_last_probe_unixtime', 'Latest probe timestamp (unix seconds).');
 	let rtt = gauge('mielofon_agent_link_rtt_ms', 'Latest RTT (ms).');
 	let loss = gauge('mielofon_agent_link_loss_pct', 'Latest packet loss (%).');
-	let tps = gauge('mielofon_agent_link_rr_tps', 'Latest TCP_RR transaction rate.');
+	let jitter = gauge('mielofon_agent_link_jitter_ms', 'Latest RTT jitter (ms).');
 	let tcp = gauge('mielofon_agent_link_tcp_mbps', 'Latest TCP throughput (Mbps).');
 	let util = gauge('mielofon_agent_link_util_mbps', 'Latest link utilization (Mbps).');
 	let busy = gauge('mielofon_agent_link_busy', 'Link busy at last throughput probe (1 if busy).');
@@ -292,8 +290,8 @@ export function render()
 			rtt(labels, e.rtt_ms);
 		if (exists(e, 'loss_pct') && e.loss_pct != null)
 			loss(labels, e.loss_pct);
-		if (exists(e, 'rr_tps') && e.rr_tps != null)
-			tps(labels, e.rr_tps);
+		if (exists(e, 'jitter_ms') && e.jitter_ms != null)
+			jitter(labels, e.jitter_ms);
 		if (exists(e, 'tcp_mbps') && e.tcp_mbps != null)
 			tcp(labels, e.tcp_mbps);
 		if (exists(e, 'util_mbps') && e.util_mbps != null)

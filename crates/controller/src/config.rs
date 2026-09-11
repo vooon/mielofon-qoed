@@ -93,25 +93,27 @@ impl Default for Tls {
 pub type Members = BTreeMap<String, IpAddr>;
 
 /// One quality class. Each dimension is optional: an unset threshold does not
-/// constrain that dimension. `rtt_ms`/`loss_pct` are upper bounds (lower is
-/// better); `rr_tps`/`tcp_mbps` are lower bounds (higher is better). `ospf_cost`
-/// is the metric advertised for links classified into this class.
+/// constrain that dimension. `rtt_ms`/`loss_pct`/`jitter_ms` are upper bounds
+/// (lower is better); `tcp_mbps` is a lower bound (higher is better).
+/// `ospf_cost` is the metric advertised for links classified into this class.
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(default)]
 pub struct QualityClass {
     pub rtt_ms: Option<f64>,
     pub loss_pct: Option<f64>,
-    pub rr_tps: Option<f64>,
+    /// RTT jitter (ms), derived by the agent from the ping RTT distribution
+    /// (iputils `mdev`, or the max-min spread on busybox). Upper bound.
+    pub jitter_ms: Option<f64>,
     pub tcp_mbps: Option<f64>,
     pub ospf_cost: u32,
 }
 
 impl QualityClass {
-    fn with(rtt_ms: f64, loss_pct: f64, rr_tps: f64, tcp_mbps: f64, ospf_cost: u32) -> Self {
+    fn with(rtt_ms: f64, loss_pct: f64, jitter_ms: f64, tcp_mbps: f64, ospf_cost: u32) -> Self {
         QualityClass {
             rtt_ms: Some(rtt_ms),
             loss_pct: Some(loss_pct),
-            rr_tps: Some(rr_tps),
+            jitter_ms: Some(jitter_ms),
             tcp_mbps: Some(tcp_mbps),
             ospf_cost,
         }
@@ -122,12 +124,11 @@ impl QualityClass {
 /// threshold it crosses; only dims listed per class take part. Conservative
 /// defaults (per handoff): good/acceptable/poor/bad with increasing costs.
 ///
-/// `rr_tps` is calibrated to the SAME rtt boundaries because netperf TCP_RR is
-/// lockstep (1 request in flight): the rate is physically capped at ~1000/rtt,
-/// so `rr` is a latency proxy, not a multi-stream throughput. Thresholds below
-/// map 1:1 to the rtt cutoffs (40/90/250/500 ms → 25/11/4/2 trans/s), making
-/// `rr` a congestion cross-check (a link far worse than its rtt still drops a
-/// class) rather than a harsher duplicate of `rtt_ms`.
+/// Jitter is the always-tier congestion signal: it is upper-bounded like rtt,
+/// conservatively scaled below the rtt cutoffs (a healthy path has far lower
+/// variation than delay). Bufferbloat/queueing inflate jitter before the
+/// average RTT crosses a class, so jitter is a sensitive-but-stable latency
+/// cross-check; strictness is tempered by the classifier's hysteresis.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
 pub struct Quality {
@@ -140,10 +141,10 @@ pub struct Quality {
 impl Default for Quality {
     fn default() -> Self {
         Quality {
-            good: QualityClass::with(40.0, 1.0, 25.0, 10.0, 10),
-            acceptable: QualityClass::with(90.0, 2.5, 11.0, 5.0, 20),
-            poor: QualityClass::with(250.0, 5.0, 4.0, 2.0, 50),
-            bad: QualityClass::with(500.0, 10.0, 2.0, 1.0, 100),
+            good: QualityClass::with(40.0, 1.0, 5.0, 10.0, 10),
+            acceptable: QualityClass::with(90.0, 2.5, 15.0, 5.0, 20),
+            poor: QualityClass::with(250.0, 5.0, 40.0, 2.0, 50),
+            bad: QualityClass::with(500.0, 10.0, 100.0, 1.0, 100),
         }
     }
 }
@@ -235,6 +236,12 @@ pub struct Classifier {
     /// keeps its last derived cost instead of being re-classified. A busy link
     /// is never reported degraded while in use.
     pub busy_hold_secs: u64,
+    /// Class-change hysteresis: a new quality class must be observed for this
+    /// many consecutive classifier passes (`interval_secs` each) before it is
+    /// applied. Prevents a single noisy sample — or a metric wobbling across a
+    /// threshold — from flipping a link's class and re-routing OSPF cost. The
+    /// first classification of a link applies immediately.
+    pub hysteresis_passes: u32,
 }
 
 impl Default for Classifier {
@@ -245,6 +252,7 @@ impl Default for Classifier {
             tcp_fresh_secs: 1200,
             tcp_carry_secs: 3600,
             busy_hold_secs: 120,
+            hysteresis_passes: 3,
         }
     }
 }

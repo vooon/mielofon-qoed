@@ -40,7 +40,6 @@ config agent 'main'
 	option quiet_max_mbps '15'
 	option ping_count '3'
 	option ping_interval '0.2'
-	option rr_duration '4'
 	option tcp_duration '4'
 	# Port for iperf3 throughput probes; keep in sync with
 	# mielofon-iperf3-server (which runs iperf3 -s -p <port>).
