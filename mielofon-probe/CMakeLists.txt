@@ -29,7 +29,10 @@ set(MIELOFON_PROBE_CXX_FLAGS -Wall -Wextra -Werror
     # libubus's ubus_object/type structs are aggregate-initialised by
     # designators and leave the per-connection fields (avl/id/path/...) unset;
     # -Wmissing-field-initializers would fire on every OpenWrt ubus object.
-    -Wno-missing-field-initializers)
+    -Wno-missing-field-initializers
+    # libubox's blobmsg_for_each_attr compares an `int` counter against
+    # sizeof() (size_t); OpenWrt C builds tolerate it, C++ -Werror does not.
+    -Wno-sign-compare)
 
 # libubus (base) + libubox + libjson-c (packages). OpenWrt staging provides
 # these via cmake.mk's CPPFLAGS/LDFLAGS; on plain Linux resolve them.
@@ -68,7 +71,9 @@ endif()
 # from mielofon-probe/files/ via its own Makefile.
 install(TARGETS mielofon-probe RUNTIME DESTINATION bin)
 
-add_executable(mielofon-probe src/main.cpp)
+add_executable(mielofon-probe
+  src/main.cpp
+  src/icmp.cpp)
 target_compile_options(mielofon-probe PRIVATE ${MIELOFON_PROBE_CXX_FLAGS})
 target_compile_definitions(mielofon-probe PRIVATE
   MIELOFON_PROBE_VERSION="${MIELOFON_PROBE_VERSION}"

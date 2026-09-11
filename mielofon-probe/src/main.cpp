@@ -6,9 +6,10 @@
  * triggers gated throughput tests (`throughput`). Only the Prometheus textfile
  * path and the log level come from the command line (procd).
  *
- * Skeleton: getopt CLI + ubus object registration + uloop. Later stages add
- * the ICMP latency/jitter/loss loop, the interface-counter sampler, the
- * Prometheus textfile writer and the libiperf3 TCP+UDP throughput path.
+ * Measurement engine: `icmp.cpp` runs the continuous ICMP latency/jitter/loss
+ * loop over the configured links; `status` returns its per-link snapshot.
+ * Later stages add the interface-counter util sampler, the Prometheus textfile
+ * writer and the libiperf3 TCP+UDP throughput path.
  */
 
 #include <getopt.h>
@@ -23,27 +24,28 @@
 #include <libubus.h>
 
 #include <cstdio>
+#include <map>
+#include <memory>
 #include <string>
+#include <vector>
+
+#include "icmp.hpp"
 
 static const char *g_textfile = nullptr;
 static int g_log_level = LOG_INFO;
+static std::unique_ptr<probe::IcmpLoop> g_loop;
 
 /* Map a syslog level name (emerg..debug) to its priority; default info. */
 static int syslog_level_from_str(const char *name)
 {
-	struct {
-		const char *name;
-		int level;
-	} levels[] = {
-		{ "emerg", LOG_EMERG }, { "alert", LOG_ALERT },
-		{ "crit", LOG_CRIT },   { "err", LOG_ERR },
+	static const std::map<std::string, int, std::less<>> levels = {
+		{ "emerg", LOG_EMERG },   { "alert", LOG_ALERT },
+		{ "crit", LOG_CRIT },     { "err", LOG_ERR },
 		{ "warning", LOG_WARNING }, { "notice", LOG_NOTICE },
-		{ "info", LOG_INFO },   { "debug", LOG_DEBUG },
+		{ "info", LOG_INFO },     { "debug", LOG_DEBUG },
 	};
-	for (const auto &l : levels)
-		if (strcmp(name, l.name) == 0)
-			return l.level;
-	return LOG_INFO;
+	auto it = levels.find(name);
+	return it != levels.end() ? it->second : LOG_INFO;
 }
 
 /* ---- build info (injected at configure time) --------------------------- */
@@ -63,9 +65,30 @@ static int syslog_level_from_str(const char *name)
 static int method_status(struct ubus_context *ctx, struct ubus_object *obj,
                          struct ubus_request_data *req, const char *method,
                          struct blob_attr *msg);
+static int method_configure(struct ubus_context *ctx, struct ubus_object *obj,
+                            struct ubus_request_data *req, const char *method,
+                            struct blob_attr *msg);
+
+enum {
+	CONF_LINKS,
+	CONF_QUIET_MAX,
+	CONF_IPERF_PORT,
+	CONF_UDP_RATE,
+	CONF_PING_INTERVAL,
+	__CONF_MAX,
+};
+
+static const struct blobmsg_policy conf_policy[__CONF_MAX] = {
+	[CONF_LINKS] = { "links", BLOBMSG_TYPE_TABLE },
+	[CONF_QUIET_MAX] = { "quiet_max_mbps", BLOBMSG_TYPE_DOUBLE },
+	[CONF_IPERF_PORT] = { "iperf_port", BLOBMSG_TYPE_INT32 },
+	[CONF_UDP_RATE] = { "udp_rate_mbps", BLOBMSG_TYPE_DOUBLE },
+	[CONF_PING_INTERVAL] = { "ping_interval", BLOBMSG_TYPE_DOUBLE },
+};
 
 static struct ubus_method probe_methods[] = {
 	UBUS_METHOD_NOARG("status", method_status),
+	UBUS_METHOD("configure", method_configure, conf_policy),
 };
 
 static struct ubus_object_type probe_object_type =
@@ -78,9 +101,25 @@ static struct ubus_object probe_object = {
 	.n_methods = ARRAY_SIZE(probe_methods),
 };
 
-/* Stub: later stages return the per-link measurement window. For now a plain
- * `{}` reply so the agent->daemon ubus round-trip can be smoke-tested under
- * the jail during the scaffold stage. */
+/* Emit one Snapshot as a blobmsg object. */
+static void blobmsg_add_snapshot(struct blob_buf *b, const probe::Snapshot &s)
+{
+	void *tab = blobmsg_open_table(b, s.interface.c_str());
+	if (s.have_rtt)
+		blobmsg_add_double(b, "rtt_ms", s.rtt_ms);
+	if (s.have_jitter)
+		blobmsg_add_double(b, "jitter_ms", s.jitter_ms);
+	if (s.loss_pct >= 0.0)
+		blobmsg_add_double(b, "loss_pct", s.loss_pct);
+	blobmsg_add_double(b, "util_mbps", s.util_mbps);
+	blobmsg_add_u64(b, "ts", s.ts);
+	blobmsg_add_u64(b, "sent", s.sent);
+	blobmsg_add_u64(b, "received", s.received);
+	blobmsg_add_u64(b, "errors", s.errors);
+	blobmsg_close_table(b, tab);
+}
+
+/* `status` — return the current per-link measurement snapshot. */
 static int method_status(struct ubus_context *ctx, struct ubus_object *obj,
                          struct ubus_request_data *req, const char *method,
                          struct blob_attr *msg)
@@ -89,8 +128,76 @@ static int method_status(struct ubus_context *ctx, struct ubus_object *obj,
 	(void)method;
 	(void)msg;
 
+	if (g_loop == nullptr)
+		return UBUS_STATUS_NOT_FOUND;
+
 	struct blob_buf b = {};
 	blob_buf_init(&b, 0);
+	for (const auto &s : g_loop->snapshot())
+		blobmsg_add_snapshot(&b, s);
+	ubus_send_reply(ctx, req, b.head);
+	blob_buf_free(&b);
+	return 0;
+}
+
+/* `configure` — replace the managed links + probe params (pushed by agent). */
+static int method_configure(struct ubus_context *ctx, struct ubus_object *obj,
+                            struct ubus_request_data *req, const char *method,
+                            struct blob_attr *msg)
+{
+	(void)obj;
+	(void)method;
+
+	// Parse params (all optional, default kept).
+	probe::Params params;
+	if (g_loop)
+		params = g_loop->params();
+	struct blob_attr *tb[__CONF_MAX] = {};
+	blobmsg_parse(conf_policy, ARRAY_SIZE(conf_policy), tb, blob_data(msg),
+	              blob_len(msg));
+	if (tb[CONF_QUIET_MAX])
+		params.quiet_max_mbps = blobmsg_get_double(tb[CONF_QUIET_MAX]);
+	if (tb[CONF_IPERF_PORT])
+		params.iperf_port = blobmsg_get_u32(tb[CONF_IPERF_PORT]);
+	if (tb[CONF_UDP_RATE])
+		params.udp_rate_mbps = blobmsg_get_double(tb[CONF_UDP_RATE]);
+	if (tb[CONF_PING_INTERVAL])
+		params.ping_interval = blobmsg_get_double(tb[CONF_PING_INTERVAL]);
+
+	// Parse the links array.
+	std::vector<probe::Link> links;
+	static const struct blobmsg_policy link_policy[4] = {
+		{ "interface", BLOBMSG_TYPE_STRING },
+		{ "target", BLOBMSG_TYPE_STRING },
+		{ "source", BLOBMSG_TYPE_STRING },
+		{ "window", BLOBMSG_TYPE_INT32 },
+	};
+	if (tb[CONF_LINKS]) {
+		struct blob_attr *link;
+		int rem;
+		blobmsg_for_each_attr(link, tb[CONF_LINKS], rem) {
+			probe::Link l;
+			struct blob_attr *tb2[4] = {};
+			blobmsg_parse(link_policy, 4, tb2, blobmsg_data(link),
+			              blobmsg_len(link));
+			if (tb2[0])
+				l.interface = blobmsg_get_string(tb2[0]);
+			if (tb2[1])
+				l.target = blobmsg_get_string(tb2[1]);
+			if (tb2[2])
+				l.source = blobmsg_get_string(tb2[2]);
+			if (tb2[3])
+				l.window = static_cast<size_t>(blobmsg_get_u32(tb2[3]));
+			links.push_back(std::move(l));
+		}
+	}
+
+	if (g_loop)
+		g_loop->configure(std::move(links), params);
+
+	struct blob_buf b = {};
+	blob_buf_init(&b, 0);
+	blobmsg_add_u32(&b, "ok", 1);
 	ubus_send_reply(ctx, req, b.head);
 	blob_buf_free(&b);
 	return 0;
@@ -157,6 +264,11 @@ int main(int argc, char **argv)
 	}
 	ubus_add_uloop(ctx);
 
+	// The measurement engine. Its tick timer is armed on the first
+	// `configure` (a link set), which only happens during uloop_run() when
+	// uloop is initialised.
+	g_loop = std::make_unique<probe::IcmpLoop>();
+
 	int rc = ubus_add_object(ctx, &probe_object);
 	if (rc != 0) {
 		syslog(LOG_ERR, "failed to add ubus object: %s", ubus_strerror(rc));
@@ -172,6 +284,7 @@ int main(int argc, char **argv)
 	ubus_remove_object(ctx, &probe_object);
 	ubus_free(ctx);
 	uloop_done();
+	g_loop.reset();
 	closelog();
 	return 0;
 }

@@ -28,12 +28,12 @@ start_service()
 
 	if [ "$jail" -ne 0 ]; then
 		# ujail (always on unless disabled for debugging). No netns: the probe
-		# must reach mesh peers over the fabric. We mount the ubus socket for
-		# the agent->daemon IPC and the textfile PARENT DIRECTORY read-write
+		# must reach mesh peers over the fabric. `ubus` grants the jail the
+		# ubus namespace so the agent->daemon IPC works without mounting the
+		# socket read-write. We mount the textfile PARENT DIRECTORY read-write
 		# (the daemon rewrites it atomically via temp+rename, so the exact
 		# inode must stay writable).
-		procd_add_jail mielofon-probe log procfs
-		procd_add_jail_mount_rw /var/run/ubus
+		procd_add_jail mielofon-probe ubus log procfs
 		procd_add_jail_mount_rw "$(dirname "$textfile")"
 		[ -x /sbin/ujail -a -e /etc/capabilities/mielofon-probe.json ] && \
 			procd_set_param capabilities /etc/capabilities/mielofon-probe.json
