@@ -18,6 +18,7 @@
 
 #pragma once
 
+#include "counters.hpp"
 #include "link.hpp"
 
 #include <memory>
@@ -80,6 +81,7 @@ private:
 
 	Params params_;
 	std::unordered_map<std::string, void *> peers_;
+	CounterSampler counters_;
 };
 
 } // namespace probe

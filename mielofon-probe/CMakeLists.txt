@@ -65,18 +65,20 @@ else()
   set(MIELOFON_PROBE_LIBS ${MIELOFON_PROBE_LIBS} json-c)
 endif()
 
-# Install unconditionally: on OpenWrt the feed Makefile reads the binary from
-# $(PKG_INSTALL_DIR)/usr/bin/ (cmake.mk sets the prefix); plain-Linux uses the
-# same /usr/bin target. OpenWrt installs the procd init/config/capabilities
-# from mielofon-probe/files/ via its own Makefile.
-install(TARGETS mielofon-probe RUNTIME DESTINATION bin)
-
 add_executable(mielofon-probe
   src/main.cpp
-  src/icmp.cpp)
+  src/icmp.cpp
+  src/counters.cpp
+  src/metrics.cpp)
 target_compile_options(mielofon-probe PRIVATE ${MIELOFON_PROBE_CXX_FLAGS})
 target_compile_definitions(mielofon-probe PRIVATE
   MIELOFON_PROBE_VERSION="${MIELOFON_PROBE_VERSION}"
   MIELOFON_PROBE_OS="${MIELOFON_PROBE_OS}"
   MIELOFON_PROBE_ARCH="${MIELOFON_PROBE_ARCH}")
 target_link_libraries(mielofon-probe PRIVATE ${MIELOFON_PROBE_LIBS})
+
+# Install unconditionally: on OpenWrt the feed Makefile reads the binary from
+# $(PKG_INSTALL_DIR)/usr/bin/ (cmake.mk sets the prefix); plain-Linux uses the
+# same /usr/bin target. OpenWrt installs the procd init/config/capabilities
+# from mielofon-probe/files/ via its own Makefile.
+install(TARGETS mielofon-probe RUNTIME DESTINATION bin)

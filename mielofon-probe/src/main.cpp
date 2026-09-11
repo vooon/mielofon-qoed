@@ -30,10 +30,26 @@
 #include <vector>
 
 #include "icmp.hpp"
+#include "metrics.hpp"
 
 static const char *g_textfile = nullptr;
 static int g_log_level = LOG_INFO;
 static std::unique_ptr<probe::IcmpLoop> g_loop;
+
+static const int kMetricsIntervalMs = 20000; // textfile rewrite cadence
+
+/* Periodically rewrite the Prometheus textfile (atomic temp+rename). */
+static struct uloop_timeout g_metrics_timer;
+
+static void metrics_timer_cb(struct uloop_timeout *t)
+{
+	if (g_textfile != nullptr && g_loop != nullptr) {
+		if (!probe::write_textfile(g_textfile,
+		                           probe::render_textfile(g_loop->snapshot())))
+			syslog(LOG_WARNING, "textfile write failed: %s", g_textfile);
+	}
+	uloop_timeout_set(t, kMetricsIntervalMs);
+}
 
 /* Map a syslog level name (emerg..debug) to its priority; default info. */
 static int syslog_level_from_str(const char *name)
@@ -276,6 +292,12 @@ int main(int argc, char **argv)
 		return 1;
 	}
 	syslog(LOG_INFO, "registered ubus object 'mielofon-probe'");
+
+	// Periodically rewrite the Prometheus textfile when one is configured.
+	if (g_textfile != nullptr) {
+		g_metrics_timer.cb = metrics_timer_cb;
+		uloop_timeout_set(&g_metrics_timer, kMetricsIntervalMs);
+	}
 
 	signal(SIGPIPE, SIG_IGN);
 

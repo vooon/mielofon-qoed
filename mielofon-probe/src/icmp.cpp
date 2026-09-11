@@ -206,6 +206,9 @@ IcmpLoop::~IcmpLoop()
 size_t IcmpLoop::configure(std::vector<Link> links, Params params)
 {
 	params_ = params;
+	// Drop cached counter deltas so a reconfigured link set doesn't carry a
+	// stale utilisation across the change.
+	counters_.reset();
 
 	std::set<std::string> wanted;
 	for (const Link &l : links)
@@ -267,15 +270,30 @@ size_t IcmpLoop::configure(std::vector<Link> links, Params params)
 		}
 	}
 
-	if (!peers_.empty())
+	if (!peers_.empty()) {
+		g_tick.cb = tick_cb;
 		uloop_timeout_add(&g_tick);
+	}
 	return failed;
 }
 
 void IcmpLoop::tick()
 {
-	for (auto &it : peers_)
-		send_probe(it.second);
+	// Sample interface utilisation once per tick, before probing, and sync it
+	// into each link's snapshot/util field.
+	std::vector<std::string> ifaces;
+	ifaces.reserve(peers_.size());
+	for (const auto &it : peers_)
+		ifaces.push_back(it.first);
+	auto util = counters_.sample(ifaces, params_.ping_interval);
+
+	for (const auto &it : peers_) {
+		Peer *p = static_cast<Peer *>(it.second);
+		auto u = util.find(it.first);
+		if (u != util.end())
+			p->link.util_mbps = u->second;
+		send_probe(p);
+	}
 }
 
 void IcmpLoop::send_probe(void *pvoid)
