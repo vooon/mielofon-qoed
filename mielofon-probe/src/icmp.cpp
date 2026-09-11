@@ -15,11 +15,13 @@
 #include "icmp.hpp"
 
 #include <arpa/inet.h>
+#include <errno.h>
 #include <netinet/in.h>
 #include <netinet/icmp6.h>
 #include <netinet/ip_icmp.h>
 #include <netinet/ip.h>
 #include <sys/socket.h>
+#include <syslog.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -164,24 +166,38 @@ bool bind_source(int fd, int family, const std::string &source)
 int open_socket(const Link &l, int &family, sockaddr_storage &dst,
                 socklen_t &dst_len)
 {
-	if (!resolve_target(l, family, dst, dst_len))
+	if (!resolve_target(l, family, dst, dst_len)) {
+		syslog(LOG_WARNING, "open %s: cannot resolve target %s",
+		       l.interface.c_str(), l.target.c_str());
 		return -1;
+	}
 	int proto = (family == AF_INET6) ? static_cast<int>(IPPROTO_ICMPV6)
                                  : static_cast<int>(IPPROTO_ICMP);
 	int fd = socket(family, SOCK_RAW | SOCK_NONBLOCK | SOCK_CLOEXEC, proto);
-	if (fd < 0)
+	if (fd < 0) {
+		syslog(LOG_WARNING, "open %s: socket(%s, RAW) failed: %s",
+		       l.interface.c_str(),
+		       family == AF_INET6 ? "INET6" : "INET",
+		       std::strerror(errno));
 		return -1;
+	}
 	if (family == AF_INET6) {
 		int off = 2; // checksum field offset in icmp6_hdr
 		if (setsockopt(fd, IPPROTO_IPV6, IPV6_CHECKSUM, &off, sizeof(off)) < 0) {
+			syslog(LOG_WARNING, "open %s: IPV6_CHECKSUM failed: %s",
+			       l.interface.c_str(), std::strerror(errno));
 			close(fd);
 			return -1;
 		}
 	}
 	if (!bind_source(fd, family, l.source)) {
+		syslog(LOG_WARNING, "open %s: bind %s failed: %s",
+		       l.interface.c_str(), l.source.c_str(), std::strerror(errno));
 		close(fd);
 		return -1;
 	}
+	syslog(LOG_NOTICE, "probe %s -> %s up (fd %d)",
+	       l.interface.c_str(), l.target.c_str(), fd);
 	return fd;
 }
 

@@ -102,11 +102,14 @@ enum {
 };
 
 static const struct blobmsg_policy conf_policy[__CONF_MAX] = {
-	[CONF_LINKS] = { "links", BLOBMSG_TYPE_TABLE },
-	[CONF_QUIET_MAX] = { "quiet_max_mbps", BLOBMSG_TYPE_DOUBLE },
-	[CONF_IPERF_PORT] = { "iperf_port", BLOBMSG_TYPE_INT32 },
-	[CONF_UDP_RATE] = { "udp_rate_mbps", BLOBMSG_TYPE_DOUBLE },
-	[CONF_PING_INTERVAL] = { "ping_interval", BLOBMSG_TYPE_DOUBLE },
+	[CONF_LINKS] = { "links", BLOBMSG_TYPE_ARRAY },
+	// Numeric params use BLOBMSG_TYPE_UNSPEC: a JSON integer literal arrives
+	// as INT32 and a float as DOUBLE, and blobmsg_parse would skip a policy
+	// type mismatch. Read them with the type-agnostic helpers below.
+	[CONF_QUIET_MAX] = { "quiet_max_mbps", BLOBMSG_TYPE_UNSPEC },
+	[CONF_IPERF_PORT] = { "iperf_port", BLOBMSG_TYPE_UNSPEC },
+	[CONF_UDP_RATE] = { "udp_rate_mbps", BLOBMSG_TYPE_UNSPEC },
+	[CONF_PING_INTERVAL] = { "ping_interval", BLOBMSG_TYPE_UNSPEC },
 };
 
 enum {
@@ -154,6 +157,29 @@ static void blobmsg_add_snapshot(struct blob_buf *b, const probe::Snapshot &s)
 	blobmsg_close_table(b, tab);
 }
 
+/* Read a numeric attr as a double regardless of wire type: JSON integer
+ * literals arrive as INT32/INT64, floats as DOUBLE. */
+static double blobmsg_get_num(struct blob_attr *attr)
+{
+	switch (blobmsg_type(attr)) {
+	case BLOBMSG_TYPE_DOUBLE:
+		return blobmsg_get_double(attr);
+	case BLOBMSG_TYPE_INT64:
+	case BLOBMSG_TYPE_INT32:
+	case BLOBMSG_TYPE_INT16:
+	case BLOBMSG_TYPE_INT8:
+		return static_cast<double>(blobmsg_cast_s64(attr));
+	default:
+		return 0.0;
+	}
+}
+
+/* Read a numeric attr as an integer regardless of wire type. */
+static int blobmsg_get_num_int(struct blob_attr *attr)
+{
+	return static_cast<int>(blobmsg_get_num(attr));
+}
+
 /* `status` — return the current per-link measurement snapshot. */
 static int method_status(struct ubus_context *ctx, struct ubus_object *obj,
                          struct ubus_request_data *req, const char *method,
@@ -191,13 +217,13 @@ static int method_configure(struct ubus_context *ctx, struct ubus_object *obj,
 	blobmsg_parse(conf_policy, ARRAY_SIZE(conf_policy), tb, blob_data(msg),
 	              blob_len(msg));
 	if (tb[CONF_QUIET_MAX])
-		params.quiet_max_mbps = blobmsg_get_double(tb[CONF_QUIET_MAX]);
+		params.quiet_max_mbps = blobmsg_get_num(tb[CONF_QUIET_MAX]);
 	if (tb[CONF_IPERF_PORT])
-		params.iperf_port = blobmsg_get_u32(tb[CONF_IPERF_PORT]);
+		params.iperf_port = blobmsg_get_num_int(tb[CONF_IPERF_PORT]);
 	if (tb[CONF_UDP_RATE])
-		params.udp_rate_mbps = blobmsg_get_double(tb[CONF_UDP_RATE]);
+		params.udp_rate_mbps = blobmsg_get_num(tb[CONF_UDP_RATE]);
 	if (tb[CONF_PING_INTERVAL])
-		params.ping_interval = blobmsg_get_double(tb[CONF_PING_INTERVAL]);
+		params.ping_interval = blobmsg_get_num(tb[CONF_PING_INTERVAL]);
 
 	// Parse the links array.
 	std::vector<probe::Link> links;
@@ -229,6 +255,9 @@ static int method_configure(struct ubus_context *ctx, struct ubus_object *obj,
 
 	if (g_loop)
 		g_loop->configure(std::move(links), params);
+
+	syslog(LOG_NOTICE, "configure: %d links, quiet=%.1f iperf_port=%d",
+	       (int)links.size(), params.quiet_max_mbps, params.iperf_port);
 
 	struct blob_buf b = {};
 	blob_buf_init(&b, 0);
