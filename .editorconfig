@@ -1,0 +1,29 @@
+# obserwrt project style (mirrors .clang-format and the repo conventions)
+root = true
+
+[*]
+charset = utf-8
+end_of_line = lf
+insert_final_newline = true
+trim_trailing_whitespace = true
+
+# C/C++ (matches .clang-format: LLVM base, tab indentation), ucode, shell.
+[*.{c,h,cpp,cc,hpp,uc,sh}]
+indent_style = tab
+indent_size = 8
+tab_width = 8
+
+# Makefiles (OpenWrt rules.mk convention uses tabs).
+[{Makefile,*.mk}]
+indent_style = tab
+indent_size = 8
+
+# CMakeLists.txt and CPack use 2-space indentation.
+[CMakeLists.txt]
+indent_style = space
+indent_size = 2
+
+# Workflows / docs.
+[{*.yml,*.yaml,*.json,*.md}]
+indent_style = space
+indent_size = 2
