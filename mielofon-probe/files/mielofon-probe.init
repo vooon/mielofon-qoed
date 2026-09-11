@@ -1,0 +1,58 @@
+#!/bin/sh /etc/rc.common
+
+# shellcheck disable=SC2034          # consumed by /etc/rc.common
+USE_PROCD=1
+
+START=95
+STOP=10
+
+PROG=/usr/bin/mielofon-probe
+CONF=mielofon-probe
+
+start_service()
+{
+	local enabled textfile log_level jail
+
+	config_load "$CONF"
+	config_get_bool enabled daemon enabled 1
+	[ "$enabled" -ne 0 ] || return 0
+
+	# The Prometheus textfile path is the daemon's only operational config and
+	# is passed on the CLI (the daemon parses no config file of its own; the
+	# mesh link set + probe params are pushed over ubus by the agent).
+	config_get textfile daemon textfile "/run/prometheus/textfile/mielofon-probe.prom"
+	config_get log_level daemon log_level "info"
+	config_get_bool jail daemon jail 1
+
+	procd_open_instance
+
+	if [ "$jail" -ne 0 ]; then
+		# ujail (always on unless disabled for debugging). No netns: the probe
+		# must reach mesh peers over the fabric. We mount the ubus socket for
+		# the agent->daemon IPC and the textfile PARENT DIRECTORY read-write
+		# (the daemon rewrites it atomically via temp+rename, so the exact
+		# inode must stay writable).
+		procd_add_jail mielofon-probe log procfs
+		procd_add_jail_mount_rw /var/run/ubus
+		procd_add_jail_mount_rw "$(dirname "$textfile")"
+		[ -x /sbin/ujail -a -e /etc/capabilities/mielofon-probe.json ] && \
+			procd_set_param capabilities /etc/capabilities/mielofon-probe.json
+	fi
+
+	procd_set_param command "$PROG" --textfile "$textfile" --log-level "$log_level"
+	procd_set_param respawn 3600 5 5
+	procd_set_param stdout 1
+	procd_set_param stderr 1
+	procd_close_instance
+}
+
+reload_service()
+{
+	stop
+	start
+}
+
+service_triggers()
+{
+	procd_add_reload_trigger "mielofon-probe"
+}
