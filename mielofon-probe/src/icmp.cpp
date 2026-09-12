@@ -181,15 +181,10 @@ int open_socket(const Link &l, int &family, sockaddr_storage &dst,
 		       std::strerror(errno));
 		return -1;
 	}
-	if (family == AF_INET6) {
-		int off = 2; // checksum field offset in icmp6_hdr
-		if (setsockopt(fd, IPPROTO_IPV6, IPV6_CHECKSUM, &off, sizeof(off)) < 0) {
-			syslog(LOG_WARNING, "open %s: IPV6_CHECKSUM failed: %s",
-			       l.interface.c_str(), std::strerror(errno));
-			close(fd);
-			return -1;
-		}
-	}
+	// NOTE: for raw ICMPv6 the kernel computes the checksum itself; setting
+	// IPV6_CHECKSUM here is invalid (EINVAL) — it is only meaningful for raw
+	// sockets carrying non-ICMP protocols. ICMPv4 checksums are computed by
+	// hand in send_probe().
 	if (!bind_source(fd, family, l.source)) {
 		syslog(LOG_WARNING, "open %s: bind %s failed: %s",
 		       l.interface.c_str(), l.source.c_str(), std::strerror(errno));
