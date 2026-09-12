@@ -114,7 +114,7 @@ jobs:
               exit 1
             fi
           done
-          for pkg in mielofon-controller mielofon-agent mielofon-probe; do
+          for pkg in mielofon-controller mielofon-agent mielofon-probe iperf3-server; do
             if [ ! -f "$pkg/Makefile" ]; then
               echo "::error::package $pkg missing Makefile"
               exit 1
@@ -140,6 +140,7 @@ jobs:
           set -euo pipefail
           shellcheck mielofon-agent/files/etc/init.d/mielofon-agent
           shellcheck mielofon-controller/files/mielofon-controller.init
+          shellcheck iperf3-server/files/iperf3-server.init
 
       - name: Lint ucode modules (node ESM parse + ucode rules)
         if: hashFiles('package.json') != ''

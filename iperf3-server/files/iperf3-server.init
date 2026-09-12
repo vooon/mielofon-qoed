@@ -6,26 +6,57 @@ USE_PROCD=1
 START=95
 STOP=10
 
-start_service()
+# One procd instance per UCI `server` section, so a node can run several
+# iperf3 servers — e.g. a TCP one on 5201 and a UDP one on a second port —
+# each jailed under ujail by default. The mesh throughput tier needs both
+# protocol legs; see mielofon-agent's `iperf_port` (TCP) + `udp_port` (UDP).
+#
+# Per-section options:
+#   enabled       1 to run this instance (default 1)
+#   protocol      "tcp" (default) or "udp" — adds `-u` for UDP
+#   port          listening port (default 5201)
+#   bind          optional bind address (default: all)
+#   extra         extra iperf3 flags (e.g. "5" for 5 streams)
+#   jail          1 to run under ujail (default 1)
+start_instance()
 {
-	local port bind extra
+	local section="$1"
+	local enabled protocol port bind extra jail
 
-	config_load iperf3-server
-	config_get_bool enabled main enabled 1
-	[ "$enabled" = "0" ] && return 0
+	config_get_bool enabled "$section" enabled 1
+	[ "$enabled" -ne 0 ] || return 0
 
-	config_get port main port 5201
-	config_get bind main bind ""
-	config_get extra main extra ""
+	config_get protocol "$section" protocol "tcp"
+	config_get port "$section" port 5201
+	config_get bind "$section" bind ""
+	config_get extra "$section" extra ""
+	config_get_bool jail "$section" jail 1
 
-	procd_open_instance
+	# Instance name: <section>-<protocol> (dedup across reloads).
+	procd_open_instance "${section}-${protocol}"
 	procd_set_param command /usr/bin/iperf3 -s -p "$port"
+	[ "$protocol" = "udp" ] && procd_append_param command -u
 	[ -n "$bind" ] && procd_append_param command -B "$bind"
+	# shellcheck disable=SC2086 # $extra is deliberately word-split (multiple flags)
 	[ -n "$extra" ] && procd_append_param command $extra
 	procd_set_param respawn 3600 5 5
 	procd_set_param stdout 1
 	procd_set_param stderr 1
+
+	# ujail by default: the server only listens on its configured port, so a
+	# jail with the log + namespace and a writable /dev/log keeps it away from
+	# the rest of the box while still accepting probes.
+	if [ "$jail" -ne 0 ]; then
+		procd_add_jail "iperf3-${section}-${protocol}" log
+	fi
+
 	procd_close_instance
+}
+
+start_service()
+{
+	config_load iperf3-server
+	config_foreach start_instance server
 }
 
 reload_service()
