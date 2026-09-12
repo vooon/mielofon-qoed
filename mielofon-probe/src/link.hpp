@@ -25,6 +25,9 @@ namespace probe
 struct Params {
 	double quiet_max_mbps = 15.0;
 	int iperf_port = 5201;
+	/// Separate UDP listener port for the UDP throughput leg (the TCP and UDP
+	/// iperf3 servers may run on different ports). Defaults to iperf_port.
+	int udp_port = 0;
 	double udp_rate_mbps = 20.0;
 	/// Ping interval in seconds (fractional allowed).
 	double ping_interval = 1.0;

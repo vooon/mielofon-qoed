@@ -32,10 +32,10 @@ ThroughputRunner::ThroughputRunner(Params &params) : params_(params) {}
 namespace
 {
 
-/// Run one iperf3 client test with the given protocol; parse its JSON.
+/// Run one iperf3 client test with the given protocol to `port`; parse JSON.
 std::optional<ThroughputResult> run_client(const Link &link, int duration,
-                                           int protocol, uint64_t rate_bps,
-                                           Params &params)
+                                           int protocol, int port,
+                                           uint64_t rate_bps)
 {
 	struct iperf_test *test = iperf_new_test();
 	if (test == nullptr)
@@ -49,7 +49,7 @@ std::optional<ThroughputResult> run_client(const Link &link, int duration,
 
 	iperf_set_test_role(test, 'c');
 	iperf_set_test_server_hostname(test, link.target.c_str());
-	iperf_set_test_server_port(test, params.iperf_port);
+	iperf_set_test_server_port(test, port);
 	iperf_set_test_duration(test, duration);
 	iperf_set_test_json_output(test, 1);
 	if (set_protocol(test, protocol) != 0) {
@@ -87,15 +87,18 @@ std::optional<ThroughputResult> run_client(const Link &link, int duration,
 std::optional<ThroughputResult> ThroughputRunner::run_tcp(const Link &link,
                                                           int duration)
 {
-	return run_client(link, duration, static_cast<int>(Ptcp), 0, params_);
+	return run_client(link, duration, static_cast<int>(Ptcp),
+	                  params_.iperf_port, 0);
 }
 
 std::optional<ThroughputResult> ThroughputRunner::run_udp(const Link &link,
                                                           int duration)
 {
-	// rate in bits/sec = Mbps * 1e6.
+	// rate in bits/sec = Mbps * 1e6. The UDP leg targets its own listener
+	// port when configured (udp_port), else the shared iperf_port.
 	uint64_t rate = static_cast<uint64_t>(params_.udp_rate_mbps * 1e6);
-	return run_client(link, duration, static_cast<int>(Pudp), rate, params_);
+	int port = params_.udp_port > 0 ? params_.udp_port : params_.iperf_port;
+	return run_client(link, duration, static_cast<int>(Pudp), port, rate);
 }
 
 } // namespace probe

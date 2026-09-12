@@ -96,6 +96,7 @@ enum {
 	CONF_LINKS,
 	CONF_QUIET_MAX,
 	CONF_IPERF_PORT,
+	CONF_UDP_PORT,
 	CONF_UDP_RATE,
 	CONF_PING_INTERVAL,
 	__CONF_MAX,
@@ -108,6 +109,7 @@ static const struct blobmsg_policy conf_policy[__CONF_MAX] = {
 	// type mismatch. Read them with the type-agnostic helpers below.
 	[CONF_QUIET_MAX] = { "quiet_max_mbps", BLOBMSG_TYPE_UNSPEC },
 	[CONF_IPERF_PORT] = { "iperf_port", BLOBMSG_TYPE_UNSPEC },
+	[CONF_UDP_PORT] = { "udp_port", BLOBMSG_TYPE_UNSPEC },
 	[CONF_UDP_RATE] = { "udp_rate_mbps", BLOBMSG_TYPE_UNSPEC },
 	[CONF_PING_INTERVAL] = { "ping_interval", BLOBMSG_TYPE_UNSPEC },
 };
@@ -220,6 +222,8 @@ static int method_configure(struct ubus_context *ctx, struct ubus_object *obj,
 		params.quiet_max_mbps = blobmsg_get_num(tb[CONF_QUIET_MAX]);
 	if (tb[CONF_IPERF_PORT])
 		params.iperf_port = blobmsg_get_num_int(tb[CONF_IPERF_PORT]);
+	if (tb[CONF_UDP_PORT])
+		params.udp_port = blobmsg_get_num_int(tb[CONF_UDP_PORT]);
 	if (tb[CONF_UDP_RATE])
 		params.udp_rate_mbps = blobmsg_get_num(tb[CONF_UDP_RATE]);
 	if (tb[CONF_PING_INTERVAL])
