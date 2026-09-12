@@ -41,6 +41,12 @@ std::optional<ThroughputResult> run_client(const Link &link, int duration,
 	if (test == nullptr)
 		return std::nullopt;
 
+	// iperf_new_test() zeroes the struct but does NOT initialise the protocol
+	// list; set_protocol() walks it. iperf_defaults() must be called first
+	// (the CLI reaches it via iperf_parse_arguments), otherwise set_protocol
+	// dereferences an empty SLIST and segfaults.
+	iperf_defaults(test);
+
 	iperf_set_test_role(test, 'c');
 	iperf_set_test_server_hostname(test, link.target.c_str());
 	iperf_set_test_server_port(test, params.iperf_port);
