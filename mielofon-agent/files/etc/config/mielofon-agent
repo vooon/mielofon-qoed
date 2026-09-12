@@ -41,9 +41,13 @@ config agent 'main'
 	option ping_count '3'
 	option ping_interval '0.2'
 	option tcp_duration '4'
-	# Port for iperf3 throughput probes; keep in sync with
-	# mielofon-iperf3-server (which runs iperf3 -s -p <port>).
+	# TCP port for the iperf3 throughput probe; keep in sync with the
+	# iperf3-server TCP listener (iperf3-server UCI `server` section).
 	option iperf_port '5201'
+	# Separate UDP listener port for the throughput UDP leg. Leave empty to
+	# reuse iperf_port (iperf3 -s serves both protocols on one port). Set it
+	# when running a dedicated UDP iperf3-server on a second port.
+	# option udp_port '5202'
 	# Optional Prometheus textfile (node-exporter collector), rewritten
 	# atomically every prometheus_interval seconds. Empty disables.
 	# option prometheus_textfile '/run/prometheus/textfile/mielofon-agent.prom'
