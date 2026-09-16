@@ -18,6 +18,11 @@ import * as metrics from './metrics.uc';
 
 /* ── parsers ────────────────────────────────────────────────────────────── */
 
+/**
+ * Parse `ping` output into loss/rtt/jitter.
+ * @param {string} stdout combined ping stdout
+ * @returns {object} { loss, rtt, jitter } — loss always numeric, rtt/jitter null when unmeasured
+ */
 export function parse_ping(stdout)
 {
 	let loss = -1.0;
@@ -52,7 +57,11 @@ export function parse_ping(stdout)
 	return { loss: loss, rtt: rtt, jitter: jitter };
 };
 
-/* iperf3 -J JSON: pick the report's bits_per_second (Mbps, largest value). */
+/**
+ * Parse iperf3 -J JSON: pick the report's bits_per_second (Mbps, largest value).
+ * @param {string} raw iperf3 JSON output
+ * @returns {double|null} the best Mbps, or null when none usable
+ */
 export function parse_iperf3(raw)
 {
 	let best = null;

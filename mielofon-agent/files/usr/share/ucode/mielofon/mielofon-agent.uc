@@ -17,7 +17,7 @@
  */
 
 import * as log from 'log';
-import { ulog_open, ulog_threshold, ulog, ULOG_SYSLOG, LOG_DAEMON, LOG_CRIT } from 'log';
+import { ulog_open, ulog_threshold, ULOG_SYSLOG, LOG_DAEMON, LOG_CRIT } from 'log';
 
 ulog_open(ULOG_SYSLOG, LOG_DAEMON, 'mielofon-agent');
 import { cursor } from 'uci';
@@ -56,6 +56,10 @@ let need_register = false;
 function load_config()
 {
 	let ctx = cursor();
+
+	if (ctx == null)
+		die('uci unavailable');
+
 	ctx.load('mielofon-agent');
 
 	let agent = ctx.get('mielofon-agent', 'main', 'agent_name');
@@ -93,6 +97,7 @@ function load_config()
 	/* ulog threshold from `log_level` (debug < info < notice < warning < err);
 	 * 'notice' keeps the registration summary, 'warning' silences routine
 	 * spam without hiding connectivity errors. */
+	// ucode-lsp disable-next-line nullable-argument   # `cfg.log_level` is a uci string ("debug".."err")
 	ulog_threshold(cfg.log_level);
 
 	/* Interfaces never to manage (probe/cost), autodiscovered or re-registered

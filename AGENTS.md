@@ -84,9 +84,9 @@ https://ucode.mein.io (Usage, Syntax, module-{core,log,uci,ubus,uloop,uclient}).
 - Build controller: `cargo build --package mielofon-controller` (native)
 - Static CI artifact: `cargo build --release --package mielofon-controller --target x86_64-unknown-linux-musl`
 - Verify (Rust): `cargo fmt --all -- --check`, `cargo clippy --all-targets -- -D warnings`, `cargo test --workspace`
-- Agent lint: `node scripts/uc-lint.mjs` (ucode ESM parse + ucode rules); unit
-  tests: `mielofon-agent/tests/run_tests.sh` (ucode + mocked modules);
-  `shellcheck mielofon-agent/files/etc/init.d/mielofon-agent`
+- Agent lint: `node scripts/uc-lint.mjs` (ucode-lsp type/flow/null-safety checks,
+  gated to target 25.12); unit tests: `mielofon-agent/tests/run_tests.sh` (ucode
+  + mocked modules); `shellcheck mielofon-agent/files/etc/init.d/mielofon-agent`
 - Feed Makefiles: `mielofon-controller/Makefile`
   (`rust/host` + `include ../../packages/lang/rust/rust-package.mk`),
   `mielofon-agent/Makefile` (pure ucode, `PKGARCH:=all`, no build).

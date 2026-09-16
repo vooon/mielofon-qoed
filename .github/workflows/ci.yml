@@ -142,7 +142,7 @@ jobs:
           shellcheck mielofon-controller/files/mielofon-controller.init
           shellcheck iperf3-server/files/iperf3-server.init
 
-      - name: Lint ucode modules (node ESM parse + ucode rules)
+      - name: Lint ucode modules (ucode-lsp, target 25.12)
         if: hashFiles('package.json') != ''
         run: |
           node scripts/uc-lint.mjs

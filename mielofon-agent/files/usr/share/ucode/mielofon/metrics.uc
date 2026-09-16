@@ -123,13 +123,19 @@ function link_key(link)
 	return link.from + '/' + link.to + '/' + link.interface;
 }
 
-function by_link(link)
+/**
+ * Look up (or lazily create) the probe state entry for a link.
+ * @param {object} map state map
+ * @param {object} link link record with from/to/interface
+ * @returns {object} the state entry (created non-null when missing)
+ */
+function by_link(map, link)
 {
 	let k = link_key(link);
-	let e = state[k];
+	let e = map[k];
 
 	if (e == null) {
-		e = state[k] = {
+		e = map[k] = {
 			from: link.from,
 			to: link.to,
 			interface: link.interface,
@@ -139,13 +145,20 @@ function by_link(link)
 	return e;
 }
 
-export function by_configured(link)
+/**
+ * Record a link discovered by autodiscover.uc so the textfile reports it even
+ * before its first probe lands.
+ * @param {object} map configured-links map
+ * @param {object} link link record with from/to/interface
+ * @returns {object} the configured entry (created non-null when missing)
+ */
+export function by_configured(map, link)
 {
 	let k = link_key(link);
-	let e = configured[k];
+	let e = map[k];
 
 	if (e == null) {
-		e = configured[k] = {
+		e = map[k] = {
 			from: link.from,
 			to: link.to,
 			interface: link.interface,
@@ -165,7 +178,7 @@ export function set_links(links)
 		if (!l.interface)
 			continue;
 
-		by_configured(l);
+		by_configured(configured, l);
 		seen[link_key(l)] = true;
 	}
 
@@ -177,7 +190,7 @@ export function set_links(links)
 
 export function record_always(link, r)
 {
-	let e = by_link(link);
+	let e = by_link(state, link);
 
 	e.rtt_ms = r.rtt_ms;
 	e.loss_pct = r.loss_pct;
@@ -187,7 +200,7 @@ export function record_always(link, r)
 
 export function record_throughput(link, r)
 {
-	let e = by_link(link);
+	let e = by_link(state, link);
 
 	e.util_mbps = r.util_mbps;
 	e.tcp_mbps = r.tcp_mbps;
@@ -202,7 +215,7 @@ export function record_throughput(link, r)
  * controller stores exactly that (never a stale echo). */
 export function last_always(link)
 {
-	let e = by_link(link);
+	let e = by_link(state, link);
 
 	return {
 		rtt_ms: (exists(e, 'rtt_ms') && e.rtt_ms != null) ? e.rtt_ms : null,
@@ -218,9 +231,12 @@ export function last_always(link)
 export function init()
 {
 	let ctx = cursor();
+	// ucode-lsp disable-next-line UC5006   # ucode cursor() always returns a valid cursor
 	ctx.load('mielofon-agent');
 
+	// ucode-lsp disable-next-line UC5006   # ucode cursor() always returns a valid cursor
 	file = ctx.get('mielofon-agent', 'main', 'prometheus_textfile') || '';
+	// ucode-lsp disable-next-line UC5006   # ucode cursor() always returns a valid cursor
 	interval_s = int(ctx.get('mielofon-agent', 'main', 'prometheus_interval') || '20');
 
 	active = (file != '');
@@ -275,6 +291,10 @@ export function render()
 
 	for (let k in configured) {
 		let e = configured[k];
+
+		if (type(e) != 'object')
+			continue;
+
 		let labels = { from: e.from, to: e.to, interface: e.interface };
 
 		cfg(labels, 1);
@@ -282,6 +302,10 @@ export function render()
 
 	for (let k in state) {
 		let e = state[k];
+
+		if (type(e) != 'object')
+			continue;
+
 		let labels = { from: e.from, to: e.to, interface: e.interface };
 
 		if (exists(e, 'last_unixtime'))
@@ -318,6 +342,7 @@ export function write()
 		return;
 	}
 
+	// ucode-lsp disable-next-line nullable-argument   # `file` is always the output path string
 	if (rename(tmp, file) === null) {
 		WARN('mielofon-agent: cannot rename %s: %s', file, fs_error());
 		return;

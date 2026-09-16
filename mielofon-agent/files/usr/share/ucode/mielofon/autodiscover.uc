@@ -19,6 +19,11 @@
 
 /* ---- address helpers --------------------------------------------------- */
 
+/**
+ * Numeric value of a single hex character ('0'-'9','a'-'f','A'-'F').
+ * @param {string} ch a single character
+ * @returns {int} 0-15, or -1 when the char is not a hex digit
+ */
 function hexval(ch)
 {
 	let o = ord(ch);
@@ -33,6 +38,11 @@ function hexval(ch)
 	return -1;
 }
 
+/**
+ * Parse a hex string into an integer.
+ * @param {string} s hex string
+ * @returns {int|null} value, or null when the string is not valid hex
+ */
 function hextoi(s)
 {
 	let v = 0;
@@ -49,15 +59,24 @@ function hextoi(s)
 	return v;
 }
 
+/**
+ * Whether an IPv6 address is link-local (fe80::/10).
+ * @param {string|null} addr IPv6 address
+ * @returns {boolean}
+ */
 function is_linklocal(addr)
 {
 	/* global scope: fe80::/10 (top 10 bits 1111111010). */
 	return addr != null && substr(addr, 0, 2) == 'fe';
 }
 
-/* Far side of a /127: flip the last address bit. `addr` is like
+/**
+ * Far side of a /127: flip the last address bit. `addr` is like
  * "fd01:0:0:1::10:1" -> "fd01:0:0:1::10:0". Returns null if the tail is not
- * a plain hex hextet (malformed / unusual compression). */
+ * a plain hex hextet (malformed / unusual compression).
+ * @param {string|null} addr IPv6 address
+ * @returns {string|null} the peer address, or null when undecodable
+ */
 function flip_last_bit(addr)
 {
 	if (addr == null)
@@ -100,7 +119,8 @@ export function loopback_address(iface_status)
 
 /* ---- BGP peer / node naming -------------------------------------------- */
 
-/* The peer's FULL hostname straight from its BGP protocol name. The peer
+/**
+ * The peer's FULL hostname straight from its BGP protocol name. The peer
  * protocol is "peer_<hostname>" with the hostname's dots as underscores, so
  * this is a pure decode, never a shortening:
  *   "peer_hub1.example.com" -> "hub1.example.com"   (dots already ASCII-safe)
@@ -108,7 +128,10 @@ export function loopback_address(iface_status)
  * The result is THE node identifier: it is resolvable from BIRD (it is the
  * peer protocol name) and it names the same node as the peer's own agent
  * name (`from`), so a link's two endpoints are symmetric and a hub is not
- * split into a shortened name plus a full-hostname one. */
+ * split into a shortened name plus a full-hostname one.
+ * @param {string|null} name BGP peer protocol name
+ * @returns {string|null} the peer's full hostname, or null
+ */
 export function peer_hostname(name)
 {
 	let n = name;
@@ -124,9 +147,13 @@ export function peer_hostname(name)
 	return replace(n, '_', '.');
 };
 
-/* The short label used to match an interface token to a peer: the first
+/**
+ * The short label used to match an interface token to a peer: the first
  * dot-label of the peer's hostname. "hub1.example.com" -> "hub1"; a dotless
- * hostname is its own label. Tunnel interfaces are named awg_<label>. */
+ * hostname is its own label. Tunnel interfaces are named awg_<label>.
+ * @param {string|null} host peer hostname
+ * @returns {string|null} the short label, or null
+ */
 export function peer_short_label(host)
 {
 	if (host == null)
@@ -137,7 +164,12 @@ export function peer_short_label(host)
 	return i >= 0 ? substr(host, 0, i) : host;
 };
 
-/* Interface token by a prefix convention ("awg_hub1" -> "hub1"). */
+/**
+ * Interface token by a prefix convention ("awg_hub1" -> "hub1").
+ * @param {string|null} iface interface name
+ * @param {string|null} prefix interface name prefix
+ * @returns {string|null} the token, or null
+ */
 export function iface_token(iface, prefix)
 {
 	if (iface == null)
@@ -195,6 +227,7 @@ export function select_links(status, cfg)
 		if (i.type != null && i.type != 'ptp')
 			continue;
 
+		// ucode-lsp disable-next-line nullable-argument   # `iface` is always a string (interface name)
 		if (index(excludes, iface) >= 0)
 			continue;
 

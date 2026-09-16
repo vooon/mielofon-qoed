@@ -26,10 +26,11 @@ let req_state = null;
 
 function finish(err, status)
 {
-	if (req_state == null)
+	let st = req_state;
+
+	if (st == null)
 		return;
 
-	let st = req_state;
 	req_state = null;
 
 	st.cl.active = false;
@@ -92,7 +93,8 @@ export function post_json(cl, path, body, cb)
 			error: handle_error,
 		};
 
-	req_state = { cl: cl, ucl: null, buf: '', cb: cb };
+	let st = { cl: cl, ucl: null, buf: '', cb: cb };
+	req_state = st;
 
 	let url = cl.base_url + path;
 	let ucl = cl.new_client(url, null, handler);
@@ -104,7 +106,7 @@ export function post_json(cl, path, body, cb)
 		return;
 	}
 
-	req_state.ucl = ucl;
+	st.ucl = ucl;
 
 	let payload = (body == null) ? '' : sprintf('%J', body);
 
