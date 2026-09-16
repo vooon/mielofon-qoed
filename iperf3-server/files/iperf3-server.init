@@ -1,7 +1,7 @@
 #!/bin/sh /etc/rc.common
 
 # shellcheck disable=SC2034          # consumed by /etc/rc.common
-# shellcheck shell=busybox           # busybox ash (OpenWrt); `local` is fine
+# shellcheck shell=sh                # busybox ash (OpenWrt); `local` is fine
 # shellcheck disable=SC3043          # `local` is supported by the target ash
 USE_PROCD=1
 
