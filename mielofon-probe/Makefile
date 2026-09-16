@@ -1,7 +1,7 @@
 include $(TOPDIR)/rules.mk
 
 PKG_NAME:=mielofon-probe
-PKG_VERSION:=0.10.3
+PKG_VERSION:=0.10.4
 PKG_RELEASE:=1
 
 PKG_BUILD_DIR:=$(BUILD_DIR)/mielofon-probe-$(PKG_VERSION)
