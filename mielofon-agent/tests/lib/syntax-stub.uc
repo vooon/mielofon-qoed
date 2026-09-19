@@ -30,6 +30,8 @@ function post_json() {}
 function apply_cost() {}
 function run_always() {}
 function run_throughput() {}
+function configure_links() {}
+function has_links() {}
 function float() {}
 function parse_json() {}
 function default_agent_name() {}

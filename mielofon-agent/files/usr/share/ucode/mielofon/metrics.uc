@@ -260,8 +260,8 @@ export function render()
 	/* Command / probe / cost counters — single series with a label, typed
 	 * counter (they are monotonically increasing since agent start). */
 	let cmds = counter('mielofon_agent_commands_total', 'Commands drained from the controller, by outcome.');
-	let probes = counter('mielofon_agent_probe_total', 'Individual probe tool runs.');
-	let perr = counter('mielofon_agent_probe_errors_total', 'Probe tool runs that produced no usable result, by kind.');
+	let probes = counter('mielofon_agent_probe_total', 'Probe runs (always-tier harvests / gated throughput).');
+	let perr = counter('mielofon_agent_probe_errors_total', 'Probe runs that produced no usable result, by kind.');
 	let cost = counter('mielofon_agent_apply_cost_total', 'OSPF cost applies by outcome.');
 
 	cmds({ result: 'received' }, counters.commands_received);

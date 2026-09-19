@@ -107,10 +107,17 @@ Key integration points:
 
 - **Transport**: mTLS HTTPS via `ucode-mod-uclient`; the package's KConfig
   guarantees a `libustream-*` TLS backend (openssl preferred, mbedtls fallback)
-  is always enabled. The always-on tier runs the resident `ping` binary and
-  derives RTT jitter from its RTT distribution; the throughput tier runs
-  `iperf3`; BIRD is driven over ubus through `rpcd-mod-bird` (`bird query`), so
-  the agent needs no `ucode-mod-socket`.
+  is always enabled. **Measurement** is owned by the resident `mielofon-probe`
+  daemon (C++23): the agent pushes the discovered link set + probe parameters
+  over ubus (`configure`) and harvests results (`status` for the continuous
+  ICMP rtt/jitter/loss window, `throughput` for the gated libiperf3 TCP+UDP
+  run). The agent therefore spawns no `ping`/`iperf3` subprocesses. It
+  reconciles the daemon on a short cadence: a `configure` that fails because
+  the daemon has not registered yet is retried every few seconds, and a daemon
+  that crashed and respawned comes up config-free (empty `status`), which the
+  agent treats as the signal to re-push the link set. BIRD is driven over ubus
+  through `rpcd-mod-bird` (`bird query`/`set_ospf_cost`), so the agent needs no
+  `ucode-mod-socket`.
 
 ### Probe fence (soft lease)
 

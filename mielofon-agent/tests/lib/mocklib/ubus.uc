@@ -20,11 +20,13 @@ function connect() {
 			if (resp == null)
 				return null;
 
-			if (typeof resp == 'function')
+			if (type(resp) == 'function')
 				return resp(args);
 
 			return resp;
 		},
+
+		error: () => null,
 	};
 }
 

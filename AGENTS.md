@@ -19,11 +19,14 @@ This is a **PUBLIC** repository describing software for a **private** production
 - The **controller is the responsible party** for the whole mesh: scheduler,
   probe fence, quality classification, cost policy, and work dispatch to agents.
 - The **agent is a thin executor** (`mielofon-agent/`, ucode): it registers, then
-  **long-polls** `POST /v1/agent/command` for commands, runs the probe it is told
-  to run (or applies the OSPF cost it is told to apply), and replies on
-  `POST /v1/agent/reply`, **echoing the job id** of every command. It has no
-  scheduling/policy logic and never acquires the fence. Spokes sit behind NAT →
-  agent-pull (long-poll) only; the controller never connects out.
+  **long-polls** `POST /v1/agent/command` for commands, harvests the probe the
+  resident `mielofon-probe` daemon measured (or applies the OSPF cost it is told
+  to apply), and replies on `POST /v1/agent/reply`, **echoing the job id** of
+  every command. It has no scheduling/policy logic and never acquires the fence.
+  It reconciles the resident probe on a short cadence (retrying until a late
+  probe registers, and re-pushing configuration after a probe restart).
+  Spokes sit behind NAT → agent-pull (long-poll) only; the controller never
+  connects out.
 - Wire flow: `register` → long-poll `command` (`probe{always|throughput}` +
   `apply_cost`, each with an `id`) → `reply` (`kind: probe` echoes the fence
   token for throughput; `kind: applied` acks a cost).
@@ -32,11 +35,13 @@ This is a **PUBLIC** repository describing software for a **private** production
 - **Controller** is Rust (tokio + axum + rustls). Hubs run **glibc**; build/test
   natively. CI additionally builds a static `x86_64-unknown-linux-musl` artifact.
 - **Agent** is **ucode** (OpenWrt scripting) — no Python, no Rust. Feed
-  `mielofon-agent` is `PKGARCH:=all` and installs `.uc` modules only. Probes run
-  the resident `ping`/`iperf3`/`netperf` binaries via `fs.popen()`
-  (`uloop.process` stdout capture is unreliable in the target snapshot); BIRD is
-  driven over ubus through `rpcd-mod-bird` (no `ucode-mod-socket` needed by the
-  agent). mTLS to the controller uses `ucode-mod-uclient` **built with SSL** —
+  `mielofon-agent` is `PKGARCH:=all` and installs `.uc` modules only. The agent
+  does **not** spawn probe subprocesses: the resident **`mielofon-probe`**
+  (C++23) daemon does the ICMP latency/jitter/loss and gated libiperf3 TCP+UDP
+  measurement, and the agent pushes the discovered link set + params over ubus
+  (`configure`) and harvests results (`status`/`throughput`). BIRD is driven
+  over ubus through `rpcd-mod-bird` (no `ucode-mod-socket` needed by the agent).
+  mTLS to the controller uses `ucode-mod-uclient` **built with SSL** —
   the package's KConfig guarantees a `libustream-*` backend is always enabled
   (openssl preferred, mbedtls fallback). The uclient transport constructor is
   injected into `client.uc` (`mielofon-agent/files/.../transport.uc`) so the
@@ -47,7 +52,8 @@ This is a **PUBLIC** repository describing software for a **private** production
   `Package/`, so `crates/`/`docs/` are ignored by the feed. Mirror conventions
   from `vooon/my-openwrt-feed`.
 - Source layout: `crates/controller/`, `crates/mielofon-otel/`, `mielofon-agent/`
-  (ucode package), `docs/`, `.github/workflows/`.
+  (ucode package), `mielofon-probe/` (C++23 measurement daemon), `docs/`,
+  `.github/workflows/`.
 - Runtime toolchain (OpenWrt, OSPF/BIRD mesh config) and the Ansible integration
   live in a separate private repo — out of scope here.
 
@@ -76,9 +82,10 @@ https://ucode.mein.io (Usage, Syntax, module-{core,log,uci,ubus,uloop,uclient}).
 - Object/method bodies closing over a variable used in their own initializer are
   rejected at parse ("use before initialization") — declare `let x = null;`
   first, assign later.
-- Run probes via `fs.popen()` + pipe reads (the deployment snapshot's
-  `uloop.process` stream API is unreliable); keep the event loop responsive
-  (single-threaded).
+- Measurement is **not** done by the agent: it configures the resident
+  `mielofon-probe` daemon over ubus (`configure`) on a link-set change and
+  harvests `status`/`throughput`. Do not reintroduce `fs.popen()` probe
+  subprocesses; keep the event loop responsive (single-threaded).
 
 ## Commands
 - Build controller: `cargo build --package mielofon-controller` (native)

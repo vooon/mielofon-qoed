@@ -11,10 +11,11 @@ The **controller is the decision-maker** for the whole mesh: it schedules probe
 work, holds the probe fence, classifies quality, derives the OSPF cost policy,
 and dispatches commands to agents.
 
-The **agent is a thin executor**: it runs whatever probe it is told to run and
-reports raw measurements, and it applies the OSPF cost it is told to apply.
-It holds **no** scheduling, policy, or classification logic and never acquires
-the fence itself.
+The **agent is a thin executor**: it harvests, over ubus, the measurement the
+resident **`mielofon-probe`** daemon produced for the probe it is told to run
+(and asks it for a gated throughput run), reports raw measurements, and applies
+the OSPF cost it is told to apply. It holds **no** scheduling, policy, or
+classification logic and never acquires the fence itself.
 
 Because spokes sit behind NAT, the controller→agent channel is **agent-pull via
 a long-poll**: the agent registers, then holds an mTLS long-poll on the command

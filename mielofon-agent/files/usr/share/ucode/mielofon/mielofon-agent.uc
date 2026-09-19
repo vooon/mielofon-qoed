@@ -27,7 +27,7 @@ import * as digest from 'digest';
 import { create as create_client, post_json } from './client.uc';
 import { new_client } from './transport.uc';
 import { discover as discover_links, loopback_address } from './autodiscover.uc';
-import { run_always, run_throughput } from './probes.uc';
+import { run_always, run_throughput, configure_links, needs_configure } from './probes.uc';
 import { apply_cost, query_route } from './cost.uc';
 import * as metrics from './metrics.uc';
 import { float, parse_json, default_agent_name } from './utils.uc';
@@ -52,6 +52,16 @@ let queue = [];
  * re-register (serialized through the pump, one request in flight at a time). */
 let reg_sig = '';
 let need_register = false;
+
+/* Signature of the link set + probe params last pushed to the resident
+ * `mielofon-probe` daemon; `configure` is re-issued only on a real change
+ * (each call resets the daemon's counter baseline, so configuring every cycle
+ * would reset the utilisation-gate baseline). */
+let probe_configured_sig = '';
+/* Whether the daemon is currently configured for our link set (false while it
+ * is absent/restarting) and whether a retry is already scheduled. */
+let probe_configured = false;
+let probe_retry = false;
 
 function load_config()
 {
@@ -88,10 +98,11 @@ function load_config()
 		log_level: ctx.get('mielofon-agent', 'main', 'log_level') || 'notice',
 		timeout_ms: int(ctx.get('mielofon-agent', 'main', 'command_timeout_ms') || '30000'),
 		quiet_max_mbps: float(ctx.get('mielofon-agent', 'main', 'quiet_max_mbps'), 15.0),
-		ping_count: int(ctx.get('mielofon-agent', 'main', 'ping_count') || '3'),
-		ping_interval: ctx.get('mielofon-agent', 'main', 'ping_interval') || '0.2',
+		ping_interval: ctx.get('mielofon-agent', 'main', 'ping_interval') || '1',
 		tcp_duration: ctx.get('mielofon-agent', 'main', 'tcp_duration') || '4',
 		iperf_port: int(ctx.get('mielofon-agent', 'main', 'iperf_port') || '5201'),
+		udp_port: int(ctx.get('mielofon-agent', 'main', 'udp_port') || '0'),
+		udp_rate_mbps: float(ctx.get('mielofon-agent', 'main', 'udp_rate_mbps'), 20.0),
 	};
 
 	/* ulog threshold from `log_level` (debug < info < notice < warning < err);
@@ -109,6 +120,74 @@ function load_config()
 		push(cfg.excludes, s.interface);
 		return true;
 	});
+};
+
+/* Signature of the managed link set + probe params last pushed to the resident
+ * probe daemon, so `configure` is re-issued only when something actually
+ * changed. */
+function probe_sig()
+{
+	sort(links, function(a, b) {
+		if (a.interface < b.interface) return -1;
+		if (a.interface > b.interface) return 1;
+		return 0;
+	});
+
+	let s = sprintf('%s/%s/%s/%s/%s/%s',
+		cfg.quiet_max_mbps, cfg.iperf_port, cfg.udp_port,
+		cfg.udp_rate_mbps, cfg.ping_interval, cfg.tcp_duration);
+
+	for (let l in links)
+		s += l.interface + (l.target || '') + (l.source || '');
+
+	return digest.sha1(s);
+};
+
+/* Reconcile the resident probe daemon with the discovered link set + params.
+ * `configure` is pushed when the signature changed, or when the daemon
+ * (re)appears with an empty configuration — a respawned daemon comes up
+ * config-free, so its empty status is the restart signal. On failure (daemon
+ * not registered yet) a short retry is scheduled, so the agent waits for a
+ * late probe instead of giving up. Returns true when the daemon is configured. */
+function sync_probe(bus)
+{
+	if (bus == null)
+		bus = ubus_connect();
+
+	let configured = false;
+
+	if (bus != null) {
+		let psig = probe_sig();
+
+		if (needs_configure(bus, links, psig, probe_configured_sig)) {
+			configured = configure_links(bus, links, cfg);
+
+			if (configured)
+				probe_configured_sig = psig;
+		} else {
+			configured = true;
+		}
+	}
+
+	if (configured && !probe_configured)
+		log.NOTE('mielofon-probe configured (%d links)\n', length(links));
+	else if (!configured && probe_configured)
+		log.WARN('mielofon-probe went away; will reconfigure\n');
+
+	probe_configured = configured;
+
+	/* Daemon absent/restarting: retry soon so a probe that starts after the
+	 * agent (or after a respawn) is configured as soon as it registers. Keep
+	 * a single timer in flight. No retry loop when there is nothing to manage. */
+	if (!configured && length(links) && !probe_retry) {
+		probe_retry = true;
+		uloop.timer(3000, function() {
+			probe_retry = false;
+			sync_probe(null);
+		});
+	}
+
+	return configured;
 };
 
 /* Discover links from BIRD/OSPF on `bird status` + per-interface netifd
@@ -149,6 +228,10 @@ function refresh_links()
 
 	if (ls != null)
 		loopback = loopback_address(ls);
+
+	/* Keep the resident probe daemon in sync with the discovered link set +
+	 * params (and recover if it restarted or starts late). */
+	sync_probe(bus);
 };
 
 function find_link(iface)
@@ -247,8 +330,13 @@ function run_command(cmd, cb)
 		return;
 	}
 
+	/* The resident `mielofon-probe` daemon owns the measurement; connect once
+	 * and pass the bus to the harvest/trigger helpers. A missing daemon is
+	 * handled inside `probes.uc` (report an unmeasured/busy result). */
+	let bus = ubus_connect();
+
 	if (cmd.tier == 'throughput') {
-		run_throughput(link, cfg, function(e, r) {
+		run_throughput(bus, link, cfg, function(e, r) {
 			metrics.record_throughput(link, r);
 			metrics.counters.commands_succeeded++;
 
@@ -268,7 +356,7 @@ function run_command(cmd, cb)
 		return;
 	}
 
-	run_always(link, cfg, function(e, r) {
+	run_always(bus, link, function(e, r) {
 		metrics.record_always(link, r);
 		metrics.counters.commands_succeeded++;
 
@@ -414,6 +502,12 @@ uloop.interval(900000, gc);
  * pump re-registers when the discovered set differs from what was last
  * registered. */
 uloop.interval(30000, resync);
+
+/* Reconcile the resident probe daemon on a shorter cadence as well: a
+ * crash/respawn comes up config-free and must be reconfigured well before the
+ * next 30s re-discovery. A first configure that failed (probe still starting)
+ * is retried by sync_probe() itself every 3s. */
+uloop.interval(15000, function() { sync_probe(null); });
 
 /* Initial registration. */
 refresh_links();

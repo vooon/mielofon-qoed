@@ -1,294 +1,195 @@
 'use strict';
 
-/* Probe executors. The agent only runs the probe it is told to run and returns
- * raw numbers; it makes no scheduling or policy decisions.
+/* Probe harvest over ubus from the resident `mielofon-probe` daemon.
  *
- * Each high-level export owns its command construction *and* parsing, so the
- * caller never builds raw command strings. Output is captured via fs.popen()
- * (a pipe to the process stdout), which stays on the event loop-friendly fs
- * module rather than shell redirects to a temp file.
+ * The daemon owns the actual measurement: it ICMP-pings every managed link on
+ * a continuous cadence and runs gated libiperf3 TCP+UDP throughput tests
+ * in-process (no exec, no /tmp). The agent only pushes the discovered link set
+ * + probe parameters (`configure`) and reads results back (`status`), or asks
+ * for a gated throughput test (`throughput`). It therefore never spawns
+ * `ping`/`iperf3`/`netperf` subprocesses and holds no measurement policy.
  *
- * NOTE: ucode has no function hoisting — everything is declared before use,
- * hence the parsers/helpers sit above the executors below.
+ * NOTE: ucode has no function hoisting — helpers are declared before use.
  */
 
-import { readfile, popen, error } from 'fs';
 import { ulog, LOG_DEBUG } from 'log';
+import { float } from './utils.uc';
 import * as metrics from './metrics.uc';
 
-/* ── parsers ────────────────────────────────────────────────────────────── */
+const PROBE_OBJ = 'mielofon-probe';
 
-/**
- * Parse `ping` output into loss/rtt/jitter.
- * @param {string} stdout combined ping stdout
- * @returns {object} { loss, rtt, jitter } — loss always numeric, rtt/jitter null when unmeasured
- */
-export function parse_ping(stdout)
+/* Count a probe failure of `kind` (ping/iperf) in the metrics counters. */
+function count_error(kind)
 {
-	let loss = -1.0;
-	let rtt = null;
-	let jitter = null;
-	let lines = split(stdout, '\n');
-	let li = 0;
-
-	for (li = 0; li < length(lines); li++) {
-		let m = match(lines[li], /([0-9.]+)% packet loss/);
-		if (m)
-			loss = +m[1];
-
-		/* iputils: "rtt min/avg/max/mdev = a/b/c/d ms" — `mdev` is the mean
-		 * deviation, the standard jitter metric.
-		 * busybox:  "round-trip min/avg/max = a/b/c ms" — no mdev, fall back to
-		 * the max-min spread as a jitter proxy. */
-		let r = match(lines[li], /(rtt|round-trip) min\/avg\/max\/(mdev )?= ([0-9.]+)\/([0-9.]+)\/([0-9.]+)\/([0-9.]+)/);
-		if (r) {
-			rtt = +r[4];
-			jitter = +r[6];
-			continue;
-		}
-
-		let b = match(lines[li], /(rtt|round-trip) min\/avg\/max = ([0-9.]+)\/([0-9.]+)\/([0-9.]+)/);
-		if (b) {
-			rtt = +b[3];
-			jitter = +b[4] - +b[2];
-		}
-	}
-
-	return { loss: loss, rtt: rtt, jitter: jitter };
-};
-
-/**
- * Parse iperf3 -J JSON: pick the report's bits_per_second (Mbps, largest value).
- * @param {string} raw iperf3 JSON output
- * @returns {double|null} the best Mbps, or null when none usable
- */
-export function parse_iperf3(raw)
-{
-	let best = null;
-	let all = match(raw, /"bits_per_second"\s*:\s*([0-9.eE+-]+)/g);
-
-	if (all != null) {
-		for (let m in all) {
-			let bits = +m[1];
-
-			if (bits > 1)
-				best = bits / 1000000.0;
-		}
-	}
-
-	return best;
-};
-
-/* ── link utilization ────────────────────────────────────────────────────── */
-
-export function bytes_sum(iface)
-{
-	let rx = readfile('/sys/class/net/' + iface + '/statistics/rx_bytes');
-	let tx = readfile('/sys/class/net/' + iface + '/statistics/tx_bytes');
-
-	let a = (rx != null) ? int(rx) : 0;
-	let b = (tx != null) ? int(tx) : 0;
-
-	return a + b;
-};
-
-/* Sample instantaneous utilization (Mbps) over a 1s window. */
-export function util_mbps(iface)
-{
-	let a = bytes_sum(iface);
-	sleep(1000);
-	let b = bytes_sum(iface);
-
-	return ((b - a) * 8) / 1000000.0;
-};
-
-/* ── command execution ───────────────────────────────────────────────────── */
-
-/* Whether a `timeout` applet is available to bound probe runs. Busybox does
- * not always include it (the live routers' busybox lacks the timeout applet),
- * so we probe once at load and degrade gracefully: with no timeout we bound
- * the probe from inside the shell (background+kill) rather than failing every
- * invocation with "timeout: not found". The package DEPENDS guarantees the
- * applet for new images. */
-let timeout_ok = null;
-
-function detect_timeout()
-{
-	if (timeout_ok != null)
-		return timeout_ok;
-
-	let pipe = popen('command -v timeout >/dev/null 2>&1 && echo yes || echo no', 'r');
-	let out = '';
-
-	if (pipe != null) {
-		while (true) {
-			let chunk = pipe.read(128);
-
-			if (chunk == null || !length(chunk))
-				break;
-
-			out += chunk;
-		}
-		pipe.close();
-	}
-
-	timeout_ok = (match(out, /yes/) != null);
-	ulog(LOG_DEBUG, 'busybox timeout applet: %s\n', timeout_ok ? 'present' : 'absent');
-	return timeout_ok;
+	metrics.counters.probe_errors[kind] = (metrics.counters.probe_errors[kind] || 0) + 1;
 }
 
-/* Bound a probe run to `secs` and merge its stderr (2>&1) so the captured
- * output carries both streams. Preferred: the `timeout` applet. On legacy
- * firmware without it, bound from inside the shell: the tool runs as a direct
- * background child (single command, so `$!` is a killable pid — no compound
- * subshell), a killer subshell SIGKILLs it after `secs`, and the parent waits.
- * The killer's own fds are redirected so it does NOT hold the pipe write-end
- * (otherwise popen can't see EOF and fast probes would be held to the full
- * bound). This keeps a black-holed TCP connect (netperf can hang ~2 min) from
- * stalling the single-threaded agent pump on routers that lack the applet. */
-function bounded(secs, cmd)
+/* Normalize a ubus numeric field to a number, or null when absent/invalid. */
+function num_or_null(v)
 {
-	if (detect_timeout())
-		return `timeout ${secs} ${cmd} 2>&1`;
+	if (v == null)
+		return null;
 
-	return `${cmd} 2>&1 & p=$!; ( sleep ${secs}; kill -9 $p 2>/dev/null ) >/dev/null 2>&1 & w=$!; wait $p 2>/dev/null; kill -9 $w 2>/dev/null`;
+	let n = +v;
+
+	return (n == n) ? n : null;
 }
 
-/* Run a probe command bounded to `secs` seconds; cb(err, stdout). At debug
- * level (`log_level = debug`) both the exact command string and its combined
- * output are logged — so a probe failure (netperf control error, iperf3
- * error, ping timeout) is observable without extra tooling. */
-export function run(secs, tool_cmd, cb)
+/* Push the managed link set + probe params to the daemon (`configure`).
+ * Returns true when the daemon accepted them. A missing/unreachable daemon is
+ * not fatal: the agent retries on the next discovery refresh. */
+export function configure_links(bus, links, cfg)
 {
-	let shell_cmd = bounded(secs, tool_cmd);
-
-	ulog(LOG_DEBUG, 'cmd: %s\n', tool_cmd);
-
-	let pipe = popen(shell_cmd, 'r');
-
-	if (pipe == null) {
-		cb('popen failed: ' + (error() || 'unknown'));
-		return;
+	if (bus == null) {
+		ulog(LOG_DEBUG, 'mielofon-probe configure: no ubus\n');
+		return false;
 	}
 
-	let out = '';
+	let req = {
+		links: [],
+		quiet_max_mbps: cfg.quiet_max_mbps,
+		iperf_port: cfg.iperf_port,
+		ping_interval: float(cfg.ping_interval, 1.0),
+		udp_rate_mbps: cfg.udp_rate_mbps,
+	};
 
-	while (true) {
-		let chunk = pipe.read(4096);
+	if (cfg.udp_port != null && int(cfg.udp_port) > 0)
+		req.udp_port = int(cfg.udp_port);
 
-		if (chunk == null || !length(chunk))
-			break;
+	for (let l in links)
+		push(req.links, { interface: l.interface, target: l.target, source: l.source });
 
-		out += chunk;
+	let res = bus.call(PROBE_OBJ, 'configure', req);
+
+	if (res == null) {
+		ulog(LOG_DEBUG, 'mielofon-probe configure failed: %s\n', bus.error() || 'unknown');
+		return false;
 	}
 
-	pipe.close();
-	ulog(LOG_DEBUG, 'cmd out: %s\n%s\n', shell_cmd, out);
-	cb(null, out);
+	ulog(LOG_DEBUG, 'mielofon-probe configure: %d links\n', length(req.links));
+	return true;
 };
 
-/* ── per-tool command builders ───────────────────────────────────────────── */
-
-function ping_command(link, cfg)
+/* Whether the daemon currently manages any links. A daemon that crashed and
+ * respawned comes up config-free, so the agent re-pushes on empty status. */
+export function has_links(bus)
 {
-	/* Busybox ping rejects fractional `-i`; only pass it for integer values.
-	 * The bound is applied by `run()` (see `bounded`). */
-	let ival = (cfg.ping_interval >= 1) ? ` -i ${cfg.ping_interval}` : '';
-	let src = (link.source != null) ? ` -I ${link.source}` : '';
+	if (bus == null)
+		return false;
 
-	return `ping -q -c ${cfg.ping_count} -W 1${ival}${src} ${link.target}`;
+	let status = bus.call(PROBE_OBJ, 'status', {});
+
+	if (status == null || type(status) != 'object')
+		return false;
+
+	return length(keys(status)) > 0;
 };
 
-function iperf_command(link, cfg)
+/* Whether the daemon needs its configuration (re)pushed. `sig` is the caller's
+ * signature of the current link set + params and `last_sig` the one last
+ * pushed; a signature change is a normal reconfigure. When the signature is
+ * unchanged, an empty link set on the daemon is the signal that it restarted
+ * (it comes up config-free) — only meaningful when we manage links. */
+export function needs_configure(bus, links, sig, last_sig)
 {
-	let src = (link.source != null) ? ` -B ${link.source}` : '';
-	let port = (cfg.iperf_port != null && cfg.iperf_port != 5201) ? ` -p ${cfg.iperf_port}` : '';
+	if (bus == null)
+		return true;
 
-	return `iperf3 -c ${link.target} -t ${cfg.tcp_duration} -f m -J${port}${src}`;
+	if (sig != last_sig)
+		return true;
+
+	if (type(links) != 'array')
+		return false;
+
+	return length(links) > 0 && !has_links(bus);
 };
 
-/* ── executors (order: everthing above is already declared) ─────────────── */
-
-/* Always-on tier: RTT + loss, then transaction rate. */
-export function run_always(link, cfg, cb)
+/* Always-on tier: harvest the daemon's latest ICMP snapshot for `link`. */
+export function run_always(bus, link, cb)
 {
 	metrics.counters.probe_ping++;
-	run(8, ping_command(link, cfg), function(ping_err, ping_out) {
-		let p = parse_ping(ping_out);
 
-		/* A ping that produced no statistics line (tool error) must not turn
-		 * into a fake `-1 loss` figure: an unmeasured dimension never
-		 * constrains quality on the controller. A 100%-loss ping keeps its
-		 * real `loss` but has no round-trip time — iputils still prints a
-		 * stale `0.000` summary line, so null the rtt/jitter explicitly. */
-		if (ping_err || p.loss < 0)
-			p = { loss: null, rtt: null, jitter: null };
-		else if (p.loss >= 100)
-			p = { loss: p.loss, rtt: null, jitter: null };
-
-		if (ping_err || p.rtt == null)
-			metrics.counters.probe_errors.ping = (metrics.counters.probe_errors.ping || 0) + 1;
-
-		/* Jitter is the non-intrusive congestion signal: it is congestion-
-		 * immune (valid under real load) and needs no server on the far end,
-		 * so the always tier is pure ping (rtt/loss/jitter) — no netperf, no
-		 * /tmp netserver.debug_* files, and no synthetic load. Real-load
-		 * detection (border DPI shaping that only shows under tunnel usage) is
-		 * left to the gated iperf3 tier + interface counters (util_mbps). */
-		ulog(LOG_DEBUG, 'always %s -> %s: rtt=%s loss=%s jitter=%s\n',
-			link.interface, link.target, p.rtt, p.loss, p.jitter);
-
-		cb(null, {
-			rtt_ms: p.rtt,
-			loss_pct: p.loss,
-			jitter_ms: p.jitter,
-		});
-	});
-};
-
-/* Gated throughput tier: quiet gate first, then iperf3. Echoes the last
- * always-tier measurement (metrics.last_always) so the controller keeps the
- * rtt/loss/jitter dims without any server-side history carry-forward. */
-export function run_throughput(link, cfg, cb)
-{
-	let a = metrics.last_always(link);
-	let util = util_mbps(link.interface);
-
-	ulog(LOG_DEBUG, 'throughput %s -> %s: util=%s Mbps (gate %s)\n',
-		link.interface, link.target, util, cfg.quiet_max_mbps);
-
-	if (util > cfg.quiet_max_mbps) {
-		metrics.counters.probe_busy++;
-		cb(null, {
-			busy: true,
-			util_mbps: util,
-			tcp_mbps: null,
-			rtt_ms: a.rtt_ms,
-			loss_pct: a.loss_pct,
-			jitter_ms: a.jitter_ms,
-		});
+	if (bus == null) {
+		count_error('ping');
+		cb(null, { rtt_ms: null, loss_pct: null, jitter_ms: null });
 		return;
 	}
 
-	metrics.counters.probe_iperf++;
-	run(15, iperf_command(link, cfg), function(e, out) {
-		let tcp = parse_iperf3(out);
+	let status = bus.call(PROBE_OBJ, 'status', {});
+	let s = (type(status) == 'object') ? status[link.interface] : null;
 
-		if (e || tcp == null)
-			metrics.counters.probe_errors.iperf = (metrics.counters.probe_errors.iperf || 0) + 1;
+	/* Absent fields mean "not measured yet"; a loss of -1 means the window is
+	 * empty. Never synthesize a 0: an unmeasured dimension must not constrain
+	 * the controller's classification. */
+	let rtt = num_or_null((s != null) ? s.rtt_ms : null);
+	let jitter = num_or_null((s != null) ? s.jitter_ms : null);
+	let loss = num_or_null((s != null) ? s.loss_pct : null);
 
-		/* Debug: gate + iperf outcome; the raw `cmd`/`cmd out` lines carry the
-		 * iperf3 -J output (or its error) that sets `tcp`. */
-		ulog(LOG_DEBUG, 'iperf3 %s -> %s: tcp_mbps=%s busy=%s\n',
-			link.interface, link.target, tcp, (tcp == null) ? 'true' : 'false');
+	if (loss != null && loss < 0)
+		loss = null;
 
-		cb(null, {
-			busy: (tcp == null),
-			util_mbps: util,
-			tcp_mbps: tcp,
-			rtt_ms: a.rtt_ms,
-			loss_pct: a.loss_pct,
-			jitter_ms: a.jitter_ms,
-		});
+	if (rtt == null)
+		count_error('ping');
+
+	ulog(LOG_DEBUG, 'always %s -> %s: rtt=%s loss=%s jitter=%s\n',
+		link.interface, link.target, rtt, loss, jitter);
+
+	cb(null, {
+		rtt_ms: rtt,
+		loss_pct: loss,
+		jitter_ms: jitter,
 	});
+};
+
+/* Gated throughput tier: ask the daemon to run (and quiet-gate) the test.
+ * Echoes the last always-tier measurement so the controller keeps those dims
+ * without any server-side history carry-forward. */
+export function run_throughput(bus, link, cfg, cb)
+{
+	let a = metrics.last_always(link);
+
+	metrics.counters.probe_iperf++;
+
+	let gate_busy = false;
+	let util = 0;
+	let tcp = null;
+
+	if (bus != null) {
+		let res = bus.call(PROBE_OBJ, 'throughput', {
+			interface: link.interface,
+			duration: int(cfg.tcp_duration) || 4,
+		});
+
+		if (res != null) {
+			gate_busy = (res.busy == 1 || res.busy == true);
+
+			let u = num_or_null(res.util_mbps);
+			if (u != null)
+				util = u;
+
+			tcp = num_or_null(res.tcp_mbps);
+		}
+	}
+
+	if (gate_busy)
+		metrics.counters.probe_busy++;
+
+	/* A throughput run that produced no number (daemon down, test failure) is
+	 * reported `busy` so the controller never classifies it as degraded. */
+	if (tcp == null)
+		count_error('iperf');
+
+	let out = {
+		busy: gate_busy || (tcp == null),
+		util_mbps: util,
+		tcp_mbps: tcp,
+		rtt_ms: a.rtt_ms,
+		loss_pct: a.loss_pct,
+		jitter_ms: a.jitter_ms,
+	};
+
+	ulog(LOG_DEBUG, 'throughput %s -> %s: tcp_mbps=%s busy=%s\n',
+		link.interface, link.target, tcp, out.busy);
+
+	cb(null, out);
 };

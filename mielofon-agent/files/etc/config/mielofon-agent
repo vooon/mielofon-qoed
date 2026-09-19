@@ -38,15 +38,20 @@ config agent 'main'
 	option iface_prefix 'awg_'
 	# Quiet threshold in Mbps: above this the throughput tier is skipped.
 	option quiet_max_mbps '15'
-	option ping_count '3'
-	option ping_interval '0.2'
+	# Continuous ICMP cadence of the resident mielofon-probe daemon (seconds).
+	# Each managed link is pinged this often; rtt/jitter/loss are rolling
+	# window statistics, harvested over ubus (never a per-command subprocess).
+	option ping_interval '1'
+	# TCP duration of a gated throughput run, applied to both the TCP and UDP
+	# leg of the resident mielofon-probe daemon.
 	option tcp_duration '4'
 	# TCP port for the iperf3 throughput probe; keep in sync with the
 	# iperf3-server TCP listener (iperf3-server UCI `server` section).
 	option iperf_port '5201'
-	# Separate UDP listener port for the throughput UDP leg. Leave empty to
-	# reuse iperf_port (iperf3 -s serves both protocols on one port). Set it
-	# when running a dedicated UDP iperf3-server on a second port.
+	# Optional UDP leg: rate (Mbps) and a separate UDP listener port. Leave
+	# udp_port empty to reuse iperf_port (iperf3 -s serves both protocols on
+	# one port); set it when running a dedicated UDP iperf3-server.
+	option udp_rate_mbps '20'
 	# option udp_port '5202'
 	# Optional Prometheus textfile (node-exporter collector), rewritten
 	# atomically every prometheus_interval seconds. Empty disables.

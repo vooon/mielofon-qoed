@@ -13,27 +13,27 @@ define Package/mielofon-agent
   SECTION:=net
   CATEGORY:=Network
   SUBMENU:=Routing and Redirection
-  TITLE:=Mielofon router agent (ucode probe runner + OSPF cost applifier)
+  TITLE:=Mielofon router agent (ucode probe harvest + OSPF cost applifier)
   URL:=https://github.com/vooon/mielofon-qoed
   PKGARCH:=all
   DEPENDS:=+ucode +ucode-mod-uclient +ucode-mod-ubus +ucode-mod-uci +ucode-mod-fs \
 	+ucode-mod-uloop +ucode-mod-log +ucode-mod-digest +rpcd +rpcd-mod-bird \
 	+iperf3-server +mielofon-probe \
-	+@BUSYBOX_DEFAULT_TIMEOUT +@BUSYBOX_CONFIG_TIMEOUT \
 	+MIELOFON_AGENT_TLS_OPENSSL:libustream-openssl \
 	+MIELOFON_AGENT_TLS_MBEDTLS:libustream-mbedtls
 endef
 
 define Package/mielofon-agent/description
   Mielofon agent: runs on each mesh router, pulls commands from the
-  mielofon-controller over an mTLS long-poll, executes the probe it is told to
-  run (or applies the OSPF cost it is told to apply), and reports back
-  correlating each reply with the job id. Thin executor — no scheduling or
-  policy logic of its own.
+  mielofon-controller over an mTLS long-poll, harvests the probe result the
+  resident mielofon-probe daemon produced over ubus (or applies the OSPF cost
+  it is told to apply), and reports back correlating each reply with the job
+  id. Thin executor — no scheduling or policy logic of its own.
 
   Requires ucode-mod-uclient to be built WITH SSL support (the mielofon-agent
   config block guarantees a libustream-* backend is always enabled). BIRD is
-  driven over ubus via rpcd-mod-bird.
+  driven over ubus via rpcd-mod-bird; measurement runs in mielofon-probe, so
+  the agent never spawns ping/iperf3/netperf subprocesses.
 endef
 
 define Package/mielofon-agent/config

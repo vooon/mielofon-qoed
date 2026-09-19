@@ -1,0 +1,147 @@
+-- Testcase --
+import { connect } from 'ubus';
+import { configure_links, run_always, run_throughput, has_links, needs_configure } from 'probes';
+
+/* configure: the request carries the link set + probe params. */
+let seen = null;
+
+global.MOCK_UBUS = {
+	'mielofon-probe.configure': function(args) {
+		seen = args;
+		return { ok: 1 };
+	},
+};
+
+let links = [
+	{ interface: 'awg_hub_a', target: 'fd00:0:0:1::1', source: 'fd00:0:0:1::0' },
+];
+
+let cfg = {
+	quiet_max_mbps: 15.0,
+	iperf_port: 5201,
+	udp_port: 5202,
+	udp_rate_mbps: 20.0,
+	ping_interval: '1',
+	tcp_duration: '4',
+};
+
+if (!configure_links(connect(), links, cfg))
+	die('configure_links returned false');
+
+if (seen == null || length(seen.links) != 1)
+	die('configure did not carry the link set');
+
+if (seen.links[0].interface != 'awg_hub_a' || seen.links[0].target != 'fd00:0:0:1::1' || seen.links[0].source != 'fd00:0:0:1::0')
+	die('configure link fields mismatch');
+
+if (seen.udp_port != 5202 || seen.udp_rate_mbps != 20 || seen.iperf_port != 5201 || seen.ping_interval != 1)
+	die('configure param mismatch: ' + sprintf('%J', seen));
+
+/* No daemon: configure fails without throwing. */
+global.MOCK_UBUS = {};
+
+if (configure_links(connect(), links, cfg))
+	die('configure should fail when the probe object is absent');
+
+/* always: harvest the daemon snapshot; -1 loss and absent fields are null. */
+global.MOCK_UBUS = {
+	'mielofon-probe.status': {
+		awg_hub_a: { rtt_ms: 12.5, jitter_ms: 0.4, loss_pct: 0, util_mbps: 2.0, ts: 1, sent: 60, received: 60, errors: 0 },
+		awg_hub_b: { util_mbps: 0, ts: 0, sent: 0, received: 0, errors: 0, loss_pct: -1 },
+	},
+};
+
+let a = null;
+run_always(connect(), { interface: 'awg_hub_a', target: 'fd00:0:0:1::1' }, function(e, r) { a = r; });
+
+if (a == null || a.rtt_ms != 12.5 || a.jitter_ms != 0.4 || a.loss_pct != 0)
+	die('always mapping mismatch: ' + sprintf('%J', a));
+
+let b = null;
+run_always(connect(), { interface: 'awg_hub_b', target: 'fd00:0:0:1::1' }, function(e, r) { b = r; });
+
+if (b == null || b.rtt_ms != null || b.jitter_ms != null || b.loss_pct != null)
+	die('always empty-window mapping mismatch: ' + sprintf('%J', b));
+
+let c = null;
+run_always(connect(), { interface: 'awg_hub_z', target: 'fd00:0:0:1::1' }, function(e, r) { c = r; });
+
+if (c == null || c.rtt_ms != null || c.loss_pct != null)
+	die('always unknown-link mapping mismatch');
+
+/* always with no bus: unmeasured, not a crash. */
+let d = null;
+run_always(null, { interface: 'awg_hub_a' }, function(e, r) { d = r; });
+
+if (d == null || d.rtt_ms != null)
+	die('always without bus should report unmeasured');
+
+/* has_links: true only while the daemon reports at least one managed link. */
+if (!has_links(connect()))
+	die('has_links should see the configured link');
+
+if (has_links(null))
+	die('has_links without a bus should be false');
+
+global.MOCK_UBUS = { 'mielofon-probe.status': {} };
+
+if (has_links(connect()))
+	die('has_links should be false on an empty snapshot');
+
+/* needs_configure: a signature change or a restarted (empty-status) daemon
+ * forces a push; a daemon that is still configured does not. */
+global.MOCK_UBUS = { 'mielofon-probe.status': { awg_hub_a: { loss_pct: -1 } } };
+
+if (!needs_configure(connect(), links, 'new', 'old'))
+	die('signature change should need configure');
+
+if (needs_configure(connect(), links, 'same', 'same'))
+	die('configured daemon with unchanged signature should not need configure');
+
+if (needs_configure(connect(), [], 'same', 'same'))
+	die('empty link set should not need configure');
+
+global.MOCK_UBUS = { 'mielofon-probe.status': {} };
+
+if (!needs_configure(connect(), links, 'same', 'same'))
+	die('restarted (empty) daemon should need configure');
+
+if (!needs_configure(null, links, 'same', 'same'))
+	die('missing bus should need configure');
+
+/* throughput: gate busy and a successful TCP run. */
+global.MOCK_UBUS = {
+	'mielofon-probe.throughput': function(args) {
+		if (args.interface == 'awg_hub_busy')
+			return { interface: args.interface, busy: 1, util_mbps: 30.0 };
+		return { interface: args.interface, busy: 0, util_mbps: 1.5, tcp_mbps: 88.0 };
+	},
+};
+
+let t = null;
+run_throughput(connect(), { from: 'spoke-1', to: 'hub-a', interface: 'awg_hub_a' }, cfg, function(e, r) { t = r; });
+
+if (t == null || t.busy || t.tcp_mbps != 88 || t.util_mbps != 1.5)
+	die('throughput mapping mismatch: ' + sprintf('%J', t));
+
+let tb = null;
+run_throughput(connect(), { from: 'spoke-1', to: 'hub-b', interface: 'awg_hub_busy' }, cfg, function(e, r) { tb = r; });
+
+if (tb == null || !tb.busy || tb.tcp_mbps != null || tb.util_mbps != 30)
+	die('throughput busy mapping mismatch: ' + sprintf('%J', tb));
+
+/* throughput with no daemon: busy, no crash. */
+global.MOCK_UBUS = {};
+
+let tn = null;
+run_throughput(connect(), { from: 'spoke-1', to: 'hub-a', interface: 'awg_hub_a' }, cfg, function(e, r) { tn = r; });
+
+if (tn == null || !tn.busy || tn.tcp_mbps != null)
+	die('throughput no-daemon mapping mismatch');
+
+print('OK\n');
+-- Expect stdout --
+OK
+-- Expect exitcode --
+0
+-- End --
