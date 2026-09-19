@@ -814,7 +814,7 @@ checksum = "cf8baf1c55e62ffcace7a9f06f4bd9cd3f0c4beb022d3b367256b91b87513d98"
 
 [[package]]
 name = "mielofon-controller"
-version = "0.9.0"
+version = "0.10.1"
 dependencies = [
  "anyhow",
  "axum",
@@ -843,7 +843,7 @@ dependencies = [
 
 [[package]]
 name = "mielofon-otel"
-version = "0.9.0"
+version = "0.10.1"
 dependencies = [
  "anyhow",
  "opentelemetry",
@@ -1578,9 +1578,9 @@ dependencies = [
 
 [[package]]
 name = "tokio-rustls"
-version = "0.26.4"
+version = "0.26.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1729aa945f29d91ba541258c8df89027d5792d85a8841fb65e8bf0f4ede4ef61"
+checksum = "b0c85f2c3ef0b1cd58b36682f4b17aaa995f0e5db534d85692b4903abce21f67"
 dependencies = [
  "rustls",
  "tokio",
