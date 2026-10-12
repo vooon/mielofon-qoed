@@ -1,0 +1,31 @@
+[package]
+name = "mielofon-agent"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Mielofon node agent: link discovery, probing and OSPF cost execution"
+
+[[bin]]
+name = "mielofon-agent"
+path = "src/main.rs"
+
+[dependencies]
+mielofon-proto = { workspace = true }
+tokio = { workspace = true, features = ["process", "io-util", "fs"] }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+anyhow = { workspace = true }
+rustls-pemfile = { workspace = true }
+hyper = { version = "1", features = ["client", "http1"] }
+hyper-util = { version = "0.1", features = ["client-legacy", "http1", "tokio"] }
+hyper-rustls = { version = "0.27", default-features = false, features = ["http1", "ring", "tls12"] }
+http-body-util = "0.1"
+socket2 = { version = "0.6", features = ["all"] }
+libc = "0.2"
+
+[dependencies.rustls]
+workspace = true
+features = ["ring"]

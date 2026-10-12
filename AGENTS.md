@@ -2,7 +2,8 @@
 
 Engineering notes for this repo: the mielofon source **and** an OpenWrt feed.
 The authoritative build spec is `mielofon-handoff.md`; read it before writing
-code. Stage 1 (controller) and Stage 2 (ucode agent) are implemented.
+code (its agent section is superseded: the agent is Rust now). Stage 1
+(controller) and Stage 2 (agent) are implemented.
 
 ## Source of truth
 - `mielofon-handoff.md` is the authoritative spec. `README.md` is a stub summary.
@@ -18,15 +19,15 @@ This is a **PUBLIC** repository describing software for a **private** production
 ## Architecture (controller = decision-maker)
 - The **controller is the responsible party** for the whole mesh: scheduler,
   probe fence, quality classification, cost policy, and work dispatch to agents.
-- The **agent is a thin executor** (`mielofon-agent/`, ucode): it registers, then
-  **long-polls** `POST /v1/agent/command` for commands, harvests the probe the
-  resident `mielofon-probe` daemon measured (or applies the OSPF cost it is told
-  to apply), and replies on `POST /v1/agent/reply`, **echoing the job id** of
-  every command. It has no scheduling/policy logic and never acquires the fence.
-  It reconciles the resident probe on a short cadence (retrying until a late
-  probe registers, and re-pushing configuration after a probe restart).
-  Spokes sit behind NAT → agent-pull (long-poll) only; the controller never
-  connects out.
+- The **agent is a thin executor** (`crates/agent`, Rust): it registers, then
+  **long-polls** `POST /v1/agent/command` for commands, answers probes from its
+  own continuous per-link ping window (or runs the gated throughput test),
+  applies the OSPF cost it is told to apply, and replies on
+  `POST /v1/agent/reply`, **echoing the job id** of every command. It has no
+  scheduling/policy logic and never acquires the fence. Spokes sit behind NAT →
+  agent-pull (long-poll) only; the controller never connects out.
+- Wire types live in `crates/mielofon-proto`, shared by controller and agent:
+  change the contract there, never in one side only.
 - Wire flow: `register` → long-poll `command` (`probe{always|throughput}` +
   `apply_cost`, each with an `id`) → `reply` (`kind: probe` echoes the fence
   token for throughput; `kind: applied` acks a cost).
@@ -34,69 +35,36 @@ This is a **PUBLIC** repository describing software for a **private** production
 ## Stack & conventions
 - **Controller** is Rust (tokio + axum + rustls). Hubs run **glibc**; build/test
   natively. CI additionally builds a static `x86_64-unknown-linux-musl` artifact.
-- **Agent** is **ucode** (OpenWrt scripting) — no Python, no Rust. Feed
-  `mielofon-agent` is `PKGARCH:=all` and installs `.uc` modules only. The agent
-  does **not** spawn probe subprocesses: the resident **`mielofon-probe`**
-  (C++23) daemon does the ICMP latency/jitter/loss and gated libiperf3 TCP+UDP
-  measurement, and the agent pushes the discovered link set + params over ubus
-  (`configure`) and harvests results (`status`/`throughput`). BIRD is driven
-  over ubus through `rpcd-mod-bird` (no `ucode-mod-socket` needed by the agent).
-  mTLS to the controller uses `ucode-mod-uclient` **built with SSL** —
-  the package's KConfig guarantees a `libustream-*` backend is always enabled
-  (openssl preferred, mbedtls fallback). The uclient transport constructor is
-  injected into `client.uc` (`mielofon-agent/files/.../transport.uc`) so the
-  reserved `new` name stays contained and requests are unit-testable.
+- **Agent** is Rust (tokio), built per target by the feed (`rust-package.mk`);
+  agent nodes are x86_64, aarch64 and armv7 (musl). It pings in-process on raw
+  ICMPv6 sockets (kernel RX timestamps) and runs two kinds of subprocess on
+  purpose: `iperf3 -J` for the gated throughput test and the `ubus` CLI for
+  UCI/netifd/rpcd-mod-bird calls (low-rate; no libubus binding). Never block
+  the runtime: anything slow is a child process or its own task.
+  BIRD is driven through
+  [rpcd-mod-bird](https://github.com/vooon/my-openwrt-feed/tree/master/rpcd-mod-bird)
+  — its source is the contract, not `docs/rpcd-mod-bird-handoff.md`.
 - **This repo is both the source AND an OpenWrt feed.** The top-level
   `mielofon-controller/` and `mielofon-agent/` dirs are `Package/` feed
   definitions. OpenWrt's feed scanner walks the whole repo for Makefiles defining
   `Package/`, so `crates/`/`docs/` are ignored by the feed. Mirror conventions
   from `vooon/my-openwrt-feed`.
-- Source layout: `crates/controller/`, `crates/mielofon-otel/`, `mielofon-agent/`
-  (ucode package), `mielofon-probe/` (C++23 measurement daemon), `docs/`,
-  `.github/workflows/`.
+- Source layout: `crates/controller/`, `crates/agent/`, `crates/mielofon-proto/`,
+  `crates/mielofon-otel/`, `mielofon-probe/` (legacy C++ daemon, no longer used
+  by the agent; to be removed), `docs/`, `.github/workflows/`.
 - Runtime toolchain (OpenWrt, OSPF/BIRD mesh config) and the Ansible integration
   live in a separate private repo — out of scope here.
-
-## ucode (the agent is written in ucode; NOT JavaScript)
-The agent (`mielofon-agent/`) is ucode. These rules were hard-learned in
-`obserwrt` — do not reinvent them. ucode is ECMAScript-inspired but a distinct
-language with a smaller stdlib; the official docs are authoritative:
-https://ucode.mein.io (Usage, Syntax, module-{core,log,uci,ubus,uloop,uclient}).
-
-- `"use strict";` at the top of every module.
-- `export function f(){…}` must end with `;`; import relative modules with
-  `import { f } from './f.uc'` and native modules with `import { x } from 'uci'`
-  or `import * as m from 'socket'`.
-- No function hoisting — declare before use. Do **not** use `function f;`
-  forward-declarations (the export form is unsupported and plain ones shadow).
-- No `throw` (use `die()`), no `const` in loop heads, no adjacent-string concat.
-- Arrays use global functions: `push(arr,…)`, `filter`, `map`, `pop` — no
-  `arr.push()` methods.
-- Strings are not `[]`-indexable — use `substr(s,i,1)` / `ord(s,i)`.
-- `for (x in arr)` yields elements; over objects it yields keys. Guard before
-  iterating objects that may be null.
-- `uci` option values are strings — `int(...)`/explicit truthy (`v == '1'`).
-- JSON: decode with `json(str)`, encode with `sprintf("%J", obj)`.
-- Loop variables must be declared: `for (let x in arr)` (bare `for (x in …)` is a
-  runtime error; `for..in` yields elements).
-- Object/method bodies closing over a variable used in their own initializer are
-  rejected at parse ("use before initialization") — declare `let x = null;`
-  first, assign later.
-- Measurement is **not** done by the agent: it configures the resident
-  `mielofon-probe` daemon over ubus (`configure`) on a link-set change and
-  harvests `status`/`throughput`. Do not reintroduce `fs.popen()` probe
-  subprocesses; keep the event loop responsive (single-threaded).
 
 ## Commands
 - Build controller: `cargo build --package mielofon-controller` (native)
 - Static CI artifact: `cargo build --release --package mielofon-controller --target x86_64-unknown-linux-musl`
 - Verify (Rust): `cargo fmt --all -- --check`, `cargo clippy --all-targets -- -D warnings`, `cargo test --workspace`
-- Agent lint: `node scripts/uc-lint.mjs` (ucode-lsp type/flow/null-safety checks,
-  gated to target 25.12); unit tests: `mielofon-agent/tests/run_tests.sh` (ucode
-  + mocked modules); `shellcheck mielofon-agent/files/etc/init.d/mielofon-agent`
-- Feed Makefiles: `mielofon-controller/Makefile`
-  (`rust/host` + `include ../../packages/lang/rust/rust-package.mk`),
-  `mielofon-agent/Makefile` (pure ucode, `PKGARCH:=all`, no build).
+- Agent raw-socket tests (need CAP_NET_RAW; ignored by default): build with
+  `cargo test -p mielofon-agent --no-run`, then
+  `unshare -rn sh -c 'ip link set lo up && <test-binary> --ignored icmp::'`
+- `shellcheck mielofon-agent/files/etc/init.d/mielofon-agent`
+- Feed Makefiles: `mielofon-controller/Makefile` and `mielofon-agent/Makefile`
+  (`rust/host` + `include ../../packages/lang/rust/rust-package.mk`).
 
 ## Critical rules
 - User directives are absolute: if the user says `DO NOT <action>`, do not perform that action without explicit permission.

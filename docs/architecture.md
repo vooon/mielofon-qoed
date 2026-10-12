@@ -6,7 +6,8 @@ links and away from degraded ones, and gives an operator a per-link and path
 view of why traffic goes where it goes.
 
 This document describes the controller (`crates/controller`) and the agent
-(`mielofon-agent/`, ucode).
+(`crates/agent`, packaged as `mielofon-agent/`). Both are Rust and share the
+wire types in `crates/mielofon-proto`.
 
 > **Sanitization**: this is a public repo describing software for a private
 > mesh. Only placeholder node names (`hub-a`..`hub-e`) and RFC-private
@@ -84,7 +85,7 @@ flowchart LR
     end
     T --> C
     S -->|issue probe / acquire lease| F
-    S -->|commands| A[ucode agent]
+    S -->|commands| A[agent]
     A -->|replies / job id| T
     C -->|derived quality/cost| Q
     Q -->|apply_cost| S
@@ -92,32 +93,35 @@ flowchart LR
     A -->|ubus / rpcd-mod-bird| B[BIRD]
 ```
 
-The agent is a **thin executor** written in **ucode**: it long-polls the
-controller's command endpoint, runs the probe it is told to run, replies with
-raw measurements (echoing the job id), and applies the OSPF cost it is told to
-apply. It holds no scheduling, policy, or classification logic, and never
-acquires the fence itself. Spokes sit behind NAT, so agents pull work from the
-controller rather than the controller connecting out to them.
+The agent is a **thin executor** (Rust, tokio): it long-polls the controller's
+command endpoint, answers each command with raw measurements (echoing the job
+id), and applies the OSPF cost it is told to apply. It holds no scheduling,
+policy, or classification logic, and never acquires the fence itself. Spokes
+sit behind NAT, so agents pull work from the controller rather than the
+controller connecting out to them.
 
-The agent package (`mielofon-agent/`) is `PKGARCH:=all` and installs `.uc`
-modules under `/usr/share/ucode/mielofon/` plus a procd init and a UCI config
-(`/etc/config/mielofon-agent`) that carries the mTLS identity
-(`/etc/mielofon/agent.{key,cert}` + `ca.pem`) and a single `controller_url`.
-Key integration points:
+The agent package (`mielofon-agent/`) installs `/usr/sbin/mielofon-agent`, a
+procd init and a UCI config (`/etc/config/mielofon-agent`) that carries the
+mTLS identity (`/etc/mielofon/agent.{key,cer}` + `ca.pem`) and a single
+`controller_url`. Key integration points:
 
-- **Transport**: mTLS HTTPS via `ucode-mod-uclient`; the package's KConfig
-  guarantees a `libustream-*` TLS backend (openssl preferred, mbedtls fallback)
-  is always enabled. **Measurement** is owned by the resident `mielofon-probe`
-  daemon (C++23): the agent pushes the discovered link set + probe parameters
-  over ubus (`configure`) and harvests results (`status` for the continuous
-  ICMP rtt/jitter/loss window, `throughput` for the gated libiperf3 TCP+UDP
-  run). The agent therefore spawns no `ping`/`iperf3` subprocesses. It
-  reconciles the daemon on a short cadence: a `configure` that fails because
-  the daemon has not registered yet is retried every few seconds, and a daemon
-  that crashed and respawned comes up config-free (empty `status`), which the
-  agent treats as the signal to re-push the link set. BIRD is driven over ubus
-  through `rpcd-mod-bird` (`bird query`/`set_ospf_cost`), so the agent needs no
-  `ucode-mod-socket`.
+- **Transport**: mTLS HTTPS (hyper + rustls with the ring provider), pinned to
+  the mesh CA, same certificate files as the controller's clients listener.
+- **Discovery** (`docs/link-autodiscovery.md`): `bird status` and
+  `network.interface.<iface> status` over ubus, re-run every 30 s; a changed
+  link set triggers a re-register.
+- **Measurement** is in-process. Each managed link has a ping task on a raw
+  ICMPv6 socket bound to the tunnel /127; rtt (mean), jitter (stddev) and loss
+  come from a rolling window, with RTT taken from the kernel receive timestamp
+  (`SO_TIMESTAMPNS`). The gated throughput test runs `iperf3 -J` (the node's
+  upload to the peer's `iperf3-server`) as a child process, one at a time,
+  skipped while the link carries more than `quiet_max_mbps`; pings pause
+  during the test and a short grace after it, so its self-inflicted queueing
+  is never recorded.
+- **BIRD** is driven through
+  [rpcd-mod-bird](https://github.com/vooon/my-openwrt-feed/tree/master/rpcd-mod-bird)
+  (`set_ospf_cost`, `route`). All ubus calls run the `ubus` CLI: they are
+  infrequent, and it keeps the agent free of a libubus binding.
 
 ### Probe fence (soft lease)
 
@@ -198,4 +202,20 @@ crates/controller/src/
   api.rs         axum handlers and routers for the three listeners
   gossip.rs      anti-entropy exchange + periodic push loop
   remote.rs      minimal mTLS HTTPS client for gossip pushes
+```
+
+```
+crates/agent/src/
+  main.rs        entrypoint: register, command long-poll, reply dispatch
+  agent.rs       link state + command execution (probe/apply_cost/trace)
+  config.rs      UCI config via `ubus call uci get`
+  bus.rs         `ubus` CLI wrapper (trait, faked in tests)
+  discover.rs    BIRD/OSPF link auto-discovery
+  icmp.rs        per-link ICMPv6 ping tasks, kernel RX timestamps
+  window.rs      rolling rtt/jitter/loss statistics
+  throughput.rs  gated `iperf3 -J` upload test + utilisation sample
+  bird.rs        rpcd-mod-bird `set_ospf_cost` / `route`
+  client.rs      mTLS JSON client to the controller
+  metrics.rs     Prometheus textfile
+crates/mielofon-proto/src/lib.rs   wire types shared with the controller
 ```

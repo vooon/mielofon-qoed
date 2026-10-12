@@ -23,9 +23,18 @@ jobs:
         run: cargo clippy --all-targets -- -D warnings
       - name: test
         run: cargo test --workspace
+      - name: agent raw-socket tests (ICMPv6 + kernel timestamps)
+        # Ignored by default: they need CAP_NET_RAW. A private network
+        # namespace gives it without touching the runner's network.
+        run: |
+          set -euo pipefail
+          bin="$(cargo test -q -p mielofon-agent --no-run --message-format=json |
+            jq -r 'select(.reason == "compiler-artifact" and .executable != null
+                          and .target.name == "mielofon-agent") | .executable' | tail -1)"
+          sudo unshare -n sh -c "ip link set lo up && '$bin' --ignored icmp::"
 
   build-static:
-    name: build controller (static musl)
+    name: build controller + agent (static musl)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -38,12 +47,17 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends musl-tools make pkg-config
       - name: build release
-        run: cargo build --release --package mielofon-controller --target x86_64-unknown-linux-musl
-      - name: upload artifact
+        run: cargo build --release --package mielofon-controller --package mielofon-agent --target x86_64-unknown-linux-musl
+      - name: upload controller artifact
         uses: actions/upload-artifact@v7
         with:
           name: mielofon-controller-x86_64-musl
           path: target/x86_64-unknown-linux-musl/release/mielofon-controller
+      - name: upload agent artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: mielofon-agent-x86_64-musl
+          path: target/x86_64-unknown-linux-musl/release/mielofon-agent
 
   probe:
     name: Probe (C++23) — build + unit tests
@@ -123,52 +137,19 @@ jobs:
           done
           echo "feed layout OK"
 
-  agent:
-    name: Agent (ucode) checks
+  shellcheck:
+    name: Shellcheck init scripts
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-
-      - name: Install toolchain
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            cmake gcc make pkg-config libjson-c-dev shellcheck
-
       - name: Shellcheck init scripts
         run: |
           set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends shellcheck
           shellcheck mielofon-agent/files/etc/init.d/mielofon-agent
           shellcheck mielofon-controller/files/mielofon-controller.init
           shellcheck iperf3-server/files/iperf3-server.init
-
-      - name: Lint ucode modules (ucode-lsp, target 25.12)
-        if: hashFiles('package.json') != ''
-        run: |
-          node scripts/uc-lint.mjs
-
-      - uses: ./.github/actions/build-ucode
-        id: ucode
-
-      - name: Syntax-check ucode modules (ucode -c)
-        run: |
-          set -euo pipefail
-          work="$(mktemp -d)"
-          for f in mielofon-agent/files/usr/share/ucode/mielofon/*.uc; do
-            { cat mielofon-agent/tests/lib/syntax-stub.uc
-              sed -e '/^import /d' -e 's/^export //' "$f"; } \
-              > "$work/$(basename "$f")"
-          done
-          for f in "$work"/*.uc; do
-            "${{ steps.ucode.outputs.bin }}" -c "$f"
-          done
-
-      - name: Run ucode unit tests (mocked modules)
-        run: |
-          set -euo pipefail
-          UCODE_BIN="${{ steps.ucode.outputs.bin }}" \
-          UCODE_MODULES="${{ steps.ucode.outputs.mods }}" \
-            mielofon-agent/tests/run_tests.sh
 
   frontend:
     name: Frontend (Vue dashboard) — test + build
