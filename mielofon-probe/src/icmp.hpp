@@ -23,6 +23,9 @@
 #include "snapshot.hpp"
 #include "throughput.hpp"
 
+#include <sys/types.h>
+
+#include <functional>
 #include <memory>
 #include <optional>
 #include <string>
@@ -60,12 +63,27 @@ public:
 	/// Immutable per-link measurement snapshot.
 	std::vector<Snapshot> snapshot() const;
 
-	/// Run a gated TCP+UDP throughput test on `interface` via libiperf3.
-	/// Respects the quiet gate (link's sampled util vs quiet_max_mbps) and
-	/// serialises with the caller-provided run (one at a time). Returns
-	/// busy=true (no test) when the link is in use or unknown.
-	ThroughputOutcome run_throughput(const std::string &interface,
-	                                 int duration);
+	/// Completion callback of an asynchronous throughput test.
+	using ThroughputDone = std::function<void(const ThroughputOutcome &)>;
+
+	/// Start a gated TCP+UDP throughput test on `interface` via libiperf3.
+	///
+	/// The test runs in a forked child so the ICMP loop keeps running; ping
+	/// sending is paused for the test plus a short grace period, because the
+	/// test loads the node's uplink and would otherwise poison every link's
+	/// RTT window with self-inflicted queueing.
+	///
+	/// Returns the outcome directly when no test is started — unknown link,
+	/// quiet gate (util above quiet_max_mbps: busy), a test already running
+	/// (busy), or fork failure — and `done` is never called. Otherwise returns
+	/// nullopt and calls `done` exactly once from the event loop when the
+	/// child exits or is killed by the watchdog.
+	std::optional<ThroughputOutcome> begin_throughput(const std::string &interface,
+	                                                  int duration, ThroughputDone done);
+
+	/// Internals reached by the throughput child's uloop callbacks.
+	void finish_throughput();
+	void kill_throughput();
 
 	/// Current params (for config echo / debug).
 	const Params &params() const { return params_; }
@@ -79,8 +97,17 @@ public:
 private:
 	void send_probe(void *peer);
 	void *find_peer(const std::string &interface) const;
+	bool pings_paused() const;
 
 	Params params_;
+	/// In-flight throughput test (one at a time): child pid, result pipe,
+	/// gate-time utilisation and the completion callback.
+	pid_t test_pid_ = -1;
+	int test_fd_ = -1;
+	double test_util_mbps_ = 0.0;
+	ThroughputDone test_done_;
+	/// Monotonic µs until which pings stay paused after a test.
+	uint64_t pause_until_us_ = 0;
 	std::unordered_map<std::string, void *> peers_;
 	CounterSampler counters_;
 	ThroughputRunner throughput_;

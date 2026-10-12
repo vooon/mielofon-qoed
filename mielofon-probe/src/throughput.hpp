@@ -17,8 +17,12 @@
 #include "link.hpp"
 
 #include <cstdint>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
 #include <optional>
 #include <string>
+#include <utility>
 
 namespace probe
 {
@@ -32,6 +36,103 @@ struct ThroughputResult {
 	/// UDP loss % (lost/total packets); only meaningful for the UDP leg.
 	std::optional<double> udp_loss_pct;
 };
+
+/*
+ * Wire format between the forked test child and the daemon: one line per leg,
+ * `<tag> <mbps> <jitter_ms> <loss_pct>\n`, an unset value written as `-`. A
+ * leg that produced no result is written as a bare `<tag> -\n`.
+ */
+
+namespace detail
+{
+
+inline void encode_opt(std::string &out, const std::optional<double> &v)
+{
+	char buf[40];
+	if (v)
+		std::snprintf(buf, sizeof(buf), " %.17g", *v);
+	else
+		std::snprintf(buf, sizeof(buf), " -");
+	out += buf;
+}
+
+/// Parse one ` <num|->` token at `p`; advances `p`. False on garbage.
+inline bool decode_opt(const char *&p, std::optional<double> &v)
+{
+	while (*p == ' ')
+		++p;
+	if (*p == '-' && (p[1] == ' ' || p[1] == '\n' || p[1] == '\0')) {
+		++p;
+		v.reset();
+		return true;
+	}
+	char *end = nullptr;
+	double d = std::strtod(p, &end);
+	if (end == p)
+		return false;
+	p = end;
+	v = d;
+	return true;
+}
+
+} // namespace detail
+
+/// Serialise both legs of a test for the child -> daemon pipe.
+inline std::string encode_results(const std::optional<ThroughputResult> &tcp,
+                                  const std::optional<ThroughputResult> &udp)
+{
+	std::string out;
+	const std::pair<const char *, const std::optional<ThroughputResult> *> legs[] = {
+		{ "tcp", &tcp },
+		{ "udp", &udp },
+	};
+	for (const auto &[tag, leg] : legs) {
+		out += tag;
+		if (*leg) {
+			detail::encode_opt(out, (*leg)->mbps);
+			detail::encode_opt(out, (*leg)->udp_jitter_ms);
+			detail::encode_opt(out, (*leg)->udp_loss_pct);
+		} else {
+			out += " -";
+		}
+		out += '\n';
+	}
+	return out;
+}
+
+/// Parse `encode_results` output. Unknown or malformed lines are skipped, so
+/// a truncated pipe read (child killed mid-write) yields unset legs, never a
+/// fabricated 0.
+inline void decode_results(const std::string &in, std::optional<ThroughputResult> &tcp,
+                           std::optional<ThroughputResult> &udp)
+{
+	tcp.reset();
+	udp.reset();
+	size_t pos = 0;
+	while (pos < in.size()) {
+		size_t nl = in.find('\n', pos);
+		if (nl == std::string::npos)
+			break; // incomplete trailing line
+		std::string line = in.substr(pos, nl - pos);
+		pos = nl + 1;
+
+		std::optional<ThroughputResult> *leg = nullptr;
+		if (line.rfind("tcp ", 0) == 0)
+			leg = &tcp;
+		else if (line.rfind("udp ", 0) == 0)
+			leg = &udp;
+		else
+			continue;
+
+		const char *p = line.c_str() + 4;
+		if (std::strcmp(p, "-") == 0)
+			continue;
+		ThroughputResult r;
+		if (detail::decode_opt(p, r.mbps) && detail::decode_opt(p, r.udp_jitter_ms) &&
+		    detail::decode_opt(p, r.udp_loss_pct) && r.mbps)
+			*leg = r;
+	}
+}
 
 /// Runs libiperf3 client tests; constructs tests, parses JSON results.
 class ThroughputRunner

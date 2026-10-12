@@ -16,6 +16,7 @@
 #include <cmath>
 #include <cstdint>
 #include <deque>
+#include <optional>
 #include <string>
 
 namespace probe
@@ -32,6 +33,23 @@ struct Params {
 	/// Ping interval in seconds (fractional allowed).
 	double ping_interval = 1.0;
 };
+
+/// Pick the RTT (ms) of a matched echo reply.
+///
+/// `mono_rtt_us` is send->read on the monotonic clock: it includes any time
+/// the reply sat in the socket buffer while the event loop was busy.
+/// `kernel_rtt_ns`, when the kernel stamped the reply (SO_TIMESTAMPNS), is
+/// send->arrival on the realtime clock and excludes that delay, so it is
+/// preferred. It is rejected when it cannot be right — negative, or longer
+/// than the monotonic span (a realtime clock step between send and receive) —
+/// and the monotonic RTT is used instead.
+inline double select_rtt_ms(std::optional<int64_t> kernel_rtt_ns, uint64_t mono_rtt_us)
+{
+	if (kernel_rtt_ns && *kernel_rtt_ns >= 0 &&
+	    static_cast<uint64_t>(*kernel_rtt_ns) / 1000U <= mono_rtt_us)
+		return static_cast<double>(*kernel_rtt_ns) / 1e6;
+	return static_cast<double>(mono_rtt_us) / 1000.0;
+}
 
 /// One managed link.
 struct Link {

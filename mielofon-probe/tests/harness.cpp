@@ -4,8 +4,9 @@
  * Host-runnable (plain C++ toolchain, json-c) unit tests for the pure,
  * dependency-free parts of the probe daemon: the per-link window math
  * (link.hpp), the byte-counter rate sampler (counters.cpp), the Prometheus
- * textfile renderer (metrics.cpp) and the iperf3 JSON result parser
- * (iperf_json.cpp). These are deliberately isolated from libubus/libiperf3 so
+ * textfile renderer (metrics.cpp), the iperf3 JSON result parser
+ * (iperf_json.cpp), the RTT source selection (link.hpp) and the throughput
+ * child's result pipe format (throughput.hpp). These are deliberately isolated from libubus/libiperf3 so
  * the harness runs on CI without the OpenWrt target headers.
  *
  * Follows obserwrt's golden-vector harness style: CHECK macros + a nonzero
@@ -23,6 +24,7 @@
 #include "link.hpp"
 #include "metrics.hpp"
 #include "snapshot.hpp"
+#include "throughput.hpp"
 
 static int g_failures = 0;
 
@@ -88,6 +90,77 @@ static void test_link_window()
 	probe::Link one;
 	one.record_reply(5.0, 64, 1);
 	CHECK(!one.jitter(jit));
+}
+
+/* ---- RTT source selection --------------------------------------------- */
+
+static void test_select_rtt()
+{
+	// Regression: a 20 ms reply read 9 s late (event loop stalled by a
+	// throughput test) must keep its real RTT from the kernel RX stamp
+	// instead of becoming a 9000 ms sample that wrecks the jitter window.
+	double rtt = probe::select_rtt_ms(20000000LL, 9000000ULL);
+	CHECK(rtt > 19.99 && rtt < 20.01);
+
+	// No kernel stamp: monotonic send->read span.
+	rtt = probe::select_rtt_ms(std::nullopt, 15000ULL);
+	CHECK(rtt > 14.99 && rtt < 15.01);
+
+	// Realtime clock stepped: kernel RTT negative or longer than the
+	// monotonic span is impossible, fall back to monotonic.
+	rtt = probe::select_rtt_ms(-5000000LL, 15000ULL);
+	CHECK(rtt > 14.99 && rtt < 15.01);
+	rtt = probe::select_rtt_ms(3600000000000LL, 15000ULL);
+	CHECK(rtt > 14.99 && rtt < 15.01);
+
+	// The stall scenario end to end on the window: 59 x 20 ms plus one
+	// late-read reply. With the kernel stamp jitter stays ~0, with the old
+	// read-time RTT it explodes past any sane threshold.
+	probe::Link good, bad;
+	good.window = bad.window = 60;
+	for (int i = 0; i < 59; i++) {
+		good.record_reply(20.0, 64, 1);
+		bad.record_reply(20.0, 64, 1);
+	}
+	good.record_reply(probe::select_rtt_ms(20000000LL, 9000000ULL), 64, 1);
+	bad.record_reply(9000.0, 64, 1);
+	double jit = 0;
+	CHECK(good.jitter(jit) && jit < 0.01);
+	CHECK(bad.jitter(jit) && jit > 1000.0);
+}
+
+/* ---- throughput child result pipe -------------------------------------- */
+
+static void test_result_codec()
+{
+	probe::ThroughputResult tcp;
+	tcp.mbps = 87.5;
+	probe::ThroughputResult udp;
+	udp.mbps = 19.75;
+	udp.udp_jitter_ms = 1.25;
+	udp.udp_loss_pct = 0.5;
+
+	std::optional<probe::ThroughputResult> t, u;
+	probe::decode_results(probe::encode_results(tcp, udp), t, u);
+	CHECK(t && t->mbps && *t->mbps > 87.49 && *t->mbps < 87.51);
+	CHECK(t && !t->udp_jitter_ms && !t->udp_loss_pct);
+	CHECK(u && u->mbps && *u->mbps > 19.74 && *u->mbps < 19.76);
+	CHECK(u && u->udp_jitter_ms && *u->udp_jitter_ms > 1.24);
+	CHECK(u && u->udp_loss_pct && *u->udp_loss_pct > 0.49);
+
+	// A failed leg stays unset, never a fabricated 0.
+	probe::decode_results(probe::encode_results(tcp, std::nullopt), t, u);
+	CHECK(t.has_value());
+	CHECK(!u.has_value());
+
+	// Child killed by the watchdog: nothing or a torn line on the pipe.
+	probe::decode_results("", t, u);
+	CHECK(!t && !u);
+	probe::decode_results("tcp 87.5 - -\nudp 19", t, u);
+	CHECK(t.has_value());
+	CHECK(!u.has_value());
+	probe::decode_results("tcp garbage\n", t, u);
+	CHECK(!t.has_value());
 }
 
 /* ---- counter rate sampler ---------------------------------------------- */
@@ -188,6 +261,8 @@ static void test_metrics()
 int main()
 {
 	test_link_window();
+	test_select_rtt();
+	test_result_codec();
 	test_counters();
 	test_iperf_json();
 	test_metrics();
