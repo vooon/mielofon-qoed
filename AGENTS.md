@@ -50,8 +50,7 @@ This is a **PUBLIC** repository describing software for a **private** production
   `Package/`, so `crates/`/`docs/` are ignored by the feed. Mirror conventions
   from `vooon/my-openwrt-feed`.
 - Source layout: `crates/controller/`, `crates/agent/`, `crates/mielofon-proto/`,
-  `crates/mielofon-otel/`, `mielofon-probe/` (legacy C++ daemon, no longer used
-  by the agent; to be removed), `docs/`, `.github/workflows/`.
+  `crates/mielofon-otel/`, `docs/`, `.github/workflows/`.
 - Runtime toolchain (OpenWrt, OSPF/BIRD mesh config) and the Ansible integration
   live in a separate private repo — out of scope here.
 
