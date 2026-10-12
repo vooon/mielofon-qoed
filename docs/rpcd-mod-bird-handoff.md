@@ -1,5 +1,10 @@
 # rpcd-mod-bird change notes (as implemented)
 
+> **Historical.** The authoritative contract is the plugin source:
+> [rpcd-mod-bird](https://github.com/vooon/my-openwrt-feed/tree/master/rpcd-mod-bird).
+> Notably `routes[].as_path` is an ASN list (not a string) and `route`
+> shipped in 0.5.0.
+
 Background: this is the rpcd-side half of the mielofon agent link
 auto-discovery design; see `docs/link-autodiscovery.md` for the
 consumer-side rationale. Both changes below are **implemented** in the feed;

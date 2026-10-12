@@ -12,6 +12,7 @@ path = "src/main.rs"
 
 [dependencies]
 mielofon-otel = { workspace = true }
+mielofon-proto = { workspace = true }
 tokio = { workspace = true }
 axum = { workspace = true }
 axum-server = { workspace = true }

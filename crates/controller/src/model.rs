@@ -10,42 +10,8 @@ fn now_secs() -> u64 {
         .as_secs()
 }
 
-/// Identifies a directed link.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct LinkKey {
-    pub from: String,
-    pub to: String,
-    pub interface: String,
-}
-
-impl LinkKey {
-    pub fn new(
-        from: impl Into<String>,
-        to: impl Into<String>,
-        interface: impl Into<String>,
-    ) -> Self {
-        LinkKey {
-            from: from.into(),
-            to: to.into(),
-            interface: interface.into(),
-        }
-    }
-
-    /// Compact stable identifier used as map keys and command ids.
-    pub fn id(&self) -> String {
-        format!("{}/{}/{}", self.from, self.to, self.interface)
-    }
-}
-
-/// Probe state reported by the agent alongside measurements.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
-#[serde(rename_all = "lowercase")]
-pub enum ProbeState {
-    #[default]
-    Quiet,
-    Busy,
-    Conflict,
-}
+/// Wire types shared with the agent.
+pub use mielofon_proto::{LinkKey, ProbeState};
 
 /// Quality class assigned by the controller from thresholds.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

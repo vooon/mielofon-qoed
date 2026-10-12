@@ -1,8 +1,8 @@
 # Mielofon agent configuration (SANITIZED example).
 #
 # The agent pulls commands from the controller over a long-lived mTLS
-# long-poll, runs the probe it is told to run, and applies the OSPF cost it
-# is told to apply. All addresses below are placeholders (RFC 5737 / RFC 3849).
+# long-poll, reports link measurements, and applies the OSPF cost it is told
+# to apply. All addresses below are placeholders (RFC 5737 / RFC 3849).
 #
 # Links are AUTO-DISCOVERED from BIRD/OSPF, not listed per-link: the agent
 # reads `bird status` (rpcd-mod-bird) and matches the mesh OSPF protocol's
@@ -12,9 +12,7 @@
 # list is needed when a discovered interface must stay unmanaged.
 
 config agent 'main'
-	option enabled '1'
-	# Syslog verbosity: debug < info < notice < warning < err.
-	# 'notice' keeps registration summary; 'warning' silences routine spam.
+	# Log verbosity: debug < info (= notice) < warning < err.
 	option log_level 'notice'
 	# Agent identity. Empty/defaults to the router hostname.
 	option agent_name 'spoke-1'
@@ -24,7 +22,7 @@ config agent 'main'
 	option cacert '/etc/mielofon/ca.pem'
 	option cert    '/etc/mielofon/agent.cer'
 	option key     '/etc/mielofon/agent.key'
-	# Long-poll hold for /v1/agent/command (ms). 0 = plain drain.
+	# Long-poll hold for /v1/agent/command (ms).
 	option command_timeout_ms '30000'
 	# OSPF protocol whose point-to-point interfaces are managed links.
 	# Nodes may run unrelated OSPF instances; they are ignored.
@@ -36,23 +34,19 @@ config agent 'main'
 	# convention is configured here:
 	#   awg_hub1 minus "awg_" -> "hub1" (matches the peer hostname's first label)
 	option iface_prefix 'awg_'
-	# Quiet threshold in Mbps: above this the throughput tier is skipped.
-	option quiet_max_mbps '15'
-	# Continuous ICMP cadence of the resident mielofon-probe daemon (seconds).
-	# Each managed link is pinged this often; rtt/jitter/loss are rolling
-	# window statistics, harvested over ubus (never a per-command subprocess).
+	# Interface holding the mesh loopback, reported for the trace walker.
+	option loopback_iface 'dummy_awg'
+	# Continuous ICMP cadence per managed link (seconds, fractional allowed)
+	# and the rolling window (pings) rtt/jitter/loss are computed over.
 	option ping_interval '1'
-	# TCP duration of a gated throughput run, applied to both the TCP and UDP
-	# leg of the resident mielofon-probe daemon.
+	option ping_window '60'
+	# Quiet threshold in Mbps: above this the throughput test is skipped.
+	option quiet_max_mbps '15'
+	# Duration (seconds) of the gated TCP throughput test (iperf3 upload to
+	# the peer).
 	option tcp_duration '4'
-	# TCP port for the iperf3 throughput probe; keep in sync with the
-	# iperf3-server TCP listener (iperf3-server UCI `server` section).
+	# Peer iperf3 server port; keep in sync with the iperf3-server listener.
 	option iperf_port '5201'
-	# Optional UDP leg: rate (Mbps) and a separate UDP listener port. Leave
-	# udp_port empty to reuse iperf_port (iperf3 -s serves both protocols on
-	# one port); set it when running a dedicated UDP iperf3-server.
-	option udp_rate_mbps '20'
-	# option udp_port '5202'
 	# Optional Prometheus textfile (node-exporter collector), rewritten
 	# atomically every prometheus_interval seconds. Empty disables.
 	# option prometheus_textfile '/run/prometheus/textfile/mielofon-agent.prom'

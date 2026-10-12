@@ -48,6 +48,10 @@ The requester's Ansible integration lives **in a separate private repo**; you ar
 - **Dashboard:** embed a small static web UI served from each node over the mTLS (or a separately-gated read endpoint). Show per-link live metrics, quality class, applied cost, `state: quiet|busy|conflict`, and a **path view** (route from source to destination composed of per-link segments with live quality).
 
 ### 2.2 `mielofon-agent` (ucode)
+
+> **Superseded (2026-10):** the agent is now Rust (`crates/agent`), with
+> probing in-process; the ucode agent and the C++ `mielofon-probe` daemon
+> described in this spec are retired. See `docs/architecture.md`.
 - Pure **ucode** (the OpenWrt scripting language), no Python.
 - Runs on every mesh router. For each configured outgoing link, on a schedule:
   1. **Always-on tier (never gated):** RTT (ping), loss, and a transaction-rate probe (netperf `TCP_RR`/`UDP_RR`). These are cheap and **congestion-immune** — they stay valid even while real user traffic (e.g. a large download) is flowing.

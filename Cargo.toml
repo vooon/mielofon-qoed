@@ -2,7 +2,9 @@
 resolver = "2"
 members = [
     "crates/mielofon-otel",
+    "crates/mielofon-proto",
     "crates/controller",
+    "crates/agent",
 ]
 default-members = ["crates/controller"]
 
@@ -14,6 +16,7 @@ repository = "https://github.com/vooon/mielofon-qoed"
 
 [workspace.dependencies]
 mielofon-otel = { path = "crates/mielofon-otel" }
+mielofon-proto = { path = "crates/mielofon-proto" }
 
 # Async runtime / HTTP
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "net", "time", "sync"] }

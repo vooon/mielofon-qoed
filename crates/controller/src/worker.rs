@@ -5,53 +5,12 @@
 //! drains by polling `POST /v1/agent/work`.
 
 use crate::model::LinkKey;
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
 use tokio::sync::Notify;
 
-/// Probe tier.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
-#[serde(rename_all = "lowercase")]
-pub enum Tier {
-    Always,
-    Throughput,
-}
-
-/// A command the controller dispatches to an agent.
-#[derive(Debug, Clone, Serialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
-pub enum WorkCmd {
-    Probe {
-        id: String,
-        tier: Tier,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        token: Option<String>,
-        link: LinkKey,
-        /// W3C `traceparent` of the dispatch span, echoed back by the agent so
-        /// the reply/report spans join the same trace.
-        #[serde(skip_serializing_if = "Option::is_none")]
-        traceparent: Option<String>,
-    },
-    ApplyCost {
-        id: String,
-        link: LinkKey,
-        cost: u32,
-        /// W3C `traceparent` of the dispatch span (see above).
-        #[serde(skip_serializing_if = "Option::is_none")]
-        traceparent: Option<String>,
-    },
-    /// Ask an agent to resolve `target` (an IP/prefix) against BIRD and report
-    /// the `next_hops` it would transport to. Used by the end-to-end trace
-    /// walker (`crates/controller/src/trace.rs`).
-    Trace {
-        id: String,
-        target: String,
-        /// W3C `traceparent` of the dispatch span (see above).
-        #[serde(skip_serializing_if = "Option::is_none")]
-        traceparent: Option<String>,
-    },
-}
+pub use mielofon_proto::{RegisterReq, RegisterResp, Tier, WorkCmd, WorkResp};
 
 /// Per-agent state: its managed links, pending work, last-issued timestamps
 /// per tier, the last cost the controller told it to apply, and the mesh
@@ -300,33 +259,10 @@ fn cmd_key(c: &WorkCmd) -> (String, String) {
     }
 }
 
-/// Request bodies for the agent endpoints.
-#[derive(Debug, Deserialize)]
-pub struct RegisterReq {
-    pub agent: String,
-    #[serde(default)]
-    pub links: Vec<LinkKey>,
-    /// Mesh loopback address (IPv6) the agent reported, used by the trace
-    /// walker to resolve a destination node name into a routable target.
-    #[serde(default)]
-    pub loopback: Option<String>,
-}
-
-#[derive(Debug, Serialize)]
-pub struct RegisterResp {
-    pub ok: bool,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub commands: Vec<WorkCmd>,
-}
-
+/// Request bodies for the legacy (non long-poll) agent endpoints.
 #[derive(Debug, Deserialize)]
 pub struct WorkReq {
     pub agent: String,
-}
-
-#[derive(Debug, Serialize)]
-pub struct WorkResp {
-    pub commands: Vec<WorkCmd>,
 }
 
 #[derive(Debug, Deserialize)]

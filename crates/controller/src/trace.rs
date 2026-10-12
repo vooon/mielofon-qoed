@@ -18,7 +18,7 @@
 
 use crate::model::{LinkKey, ProbeState, Quality};
 use crate::state::AppState;
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Mutex;
 use std::time::Instant;
@@ -46,51 +46,7 @@ impl std::fmt::Display for TraceError {
 
 impl std::error::Error for TraceError {}
 
-/// One BIRD route from `rpcd-mod-bird route` (passed through untouched — the
-/// controller owns ECMP parsing). Field names pin the feed's contract.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RouteRep {
-    pub prefix: String,
-    #[serde(default)]
-    pub primary: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub proto: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub preference: Option<u32>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub cost: Option<u32>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub local_pref: Option<u32>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub as_path: Option<String>,
-    #[serde(default)]
-    pub next_hops: Vec<NextHopRep>,
-}
-
-/// One ECMP next hop. `via addr on iface` = continue into the mesh; `dev iface`
-/// = the prefix is attached locally (on the destination this is `dummy_awg`).
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
-pub enum NextHopRep {
-    Via {
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        addr: Option<String>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        iface: Option<String>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        cost: Option<u32>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        proto: Option<String>,
-    },
-    Dev {
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        iface: Option<String>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        cost: Option<u32>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        proto: Option<String>,
-    },
-}
+pub use mielofon_proto::{NextHopRep, RouteRep};
 
 /// What the agent answers for one dispatched `trace` command.
 #[derive(Debug, Clone)]

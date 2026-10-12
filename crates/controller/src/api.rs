@@ -285,17 +285,7 @@ pub async fn apply_ack(
     Json(serde_json::json!({"ok": true}))
 }
 
-/// Long-poll command fetch.
-#[derive(Debug, Deserialize)]
-pub struct CommandReq {
-    pub agent: String,
-    #[serde(default = "default_timeout_ms")]
-    pub timeout_ms: u64,
-}
-
-fn default_timeout_ms() -> u64 {
-    30_000
-}
+pub use mielofon_proto::{AgentReply, CommandReq};
 
 /// Long-polled work fetch: returns queued commands immediately, otherwise
 /// holds the request until a command is queued (scheduler `notify`) or the
@@ -324,59 +314,6 @@ pub async fn command_long_poll(
             }
         }
     }
-}
-
-/// A reply for a previously dispatched command. Every reply echoes the
-/// command's job identifier (`id`).
-#[derive(Debug, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
-pub enum AgentReply {
-    Probe {
-        agent: String,
-        id: String,
-        link: LinkKey,
-        ts: Option<u64>,
-        #[serde(default)]
-        rtt_ms: Option<f64>,
-        #[serde(default)]
-        loss_pct: Option<f64>,
-        #[serde(default)]
-        jitter_ms: Option<f64>,
-        #[serde(default)]
-        tcp_mbps: Option<f64>,
-        util_mbps: f64,
-        state: ProbeState,
-        #[serde(default)]
-        token: Option<String>,
-        /// Echo of the dispatch span's W3C `traceparent`; the ingest span is
-        /// re-parented under it so command→agent→result forms one trace.
-        #[serde(default)]
-        traceparent: Option<String>,
-    },
-    Applied {
-        agent: String,
-        id: String,
-        link: LinkKey,
-        cost: u32,
-        /// Echo of the dispatch span's W3C `traceparent`.
-        #[serde(default)]
-        traceparent: Option<String>,
-    },
-    /// Answer to a `WorkCmd::Trace`: the hop's BIRD route resolution for the
-    /// command's `target` prefix, passed through from `rpcd-mod-bird route`.
-    /// The controller owns the ECMP parsing (see `crates/controller/src/trace.rs`).
-    Trace {
-        agent: String,
-        id: String,
-        /// Echo of the dispatch span's W3C `traceparent`.
-        #[serde(default)]
-        traceparent: Option<String>,
-        prefix: String,
-        #[serde(default)]
-        code: i64,
-        #[serde(default)]
-        routes: Vec<crate::trace::RouteRep>,
-    },
 }
 
 /// Run `f` inside a span whose W3C parent is `traceparent`, when present.
@@ -433,6 +370,7 @@ pub async fn agent_reply(
             id,
             link,
             cost,
+            note: _,
             traceparent,
         } => {
             with_traceparent(traceparent.as_deref(), || {
