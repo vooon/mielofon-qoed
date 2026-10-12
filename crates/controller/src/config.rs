@@ -242,6 +242,37 @@ pub struct Classifier {
     /// threshold — from flipping a link's class and re-routing OSPF cost. The
     /// first classification of a link applies immediately.
     pub hysteresis_passes: u32,
+    /// How the two directions of one tunnel (`A→B` on A, `B→A` on B) are
+    /// combined before classification. See [`PairCost`].
+    pub pair_cost: PairCost,
+}
+
+/// Pairing of a tunnel's two directed links.
+///
+/// OSPF cost is set per direction (each side's outgoing interface), so
+/// classifying the two halves independently lets them drift apart and routes
+/// go asymmetric for no real reason. The round-trip dimensions (rtt, loss,
+/// jitter — ICMP echo) measure the same path from either end, so a paired
+/// link always takes the worse of both sides' values for them. Throughput is
+/// the one truly directional dimension (each side's iperf measures its own
+/// upload), and this setting decides what happens to it.
+///
+/// A link is paired with the reverse link (`from`/`to` swapped) only when
+/// exactly one link exists in each direction between the two nodes; anything
+/// else is classified on its own.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum PairCost {
+    /// Shared round-trip dims, own-direction throughput: both halves get the
+    /// same cost unless throughput really differs by direction (e.g. one-way
+    /// shaping), in which case each direction is costed on its own upload.
+    #[default]
+    Directional,
+    /// Shared round-trip dims and the worse throughput of both directions:
+    /// both halves always get the same cost, so OSPF paths stay symmetric.
+    Symmetric,
+    /// No pairing: each directed link is classified from its own samples.
+    Off,
 }
 
 impl Default for Classifier {
@@ -253,6 +284,7 @@ impl Default for Classifier {
             tcp_carry_secs: 3600,
             busy_hold_secs: 120,
             hysteresis_passes: 3,
+            pair_cost: PairCost::Directional,
         }
     }
 }
