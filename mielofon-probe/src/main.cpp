@@ -271,6 +271,32 @@ static int method_configure(struct ubus_context *ctx, struct ubus_object *obj,
 	return 0;
 }
 
+/* Reply body for a throughput outcome. */
+static void blobmsg_add_throughput(struct blob_buf *b, const std::string &iface,
+                                   const probe::ThroughputOutcome &out)
+{
+	blobmsg_add_string(b, "interface", iface.c_str());
+	blobmsg_add_u8(b, "busy", out.busy ? 1 : 0);
+	blobmsg_add_double(b, "util_mbps", out.util_mbps);
+	if (out.tcp && out.tcp->mbps)
+		blobmsg_add_double(b, "tcp_mbps", *out.tcp->mbps);
+	if (out.udp) {
+		if (out.udp->mbps)
+			blobmsg_add_double(b, "udp_mbps", *out.udp->mbps);
+		if (out.udp->udp_jitter_ms)
+			blobmsg_add_double(b, "udp_jitter_ms", *out.udp->udp_jitter_ms);
+		if (out.udp->udp_loss_pct)
+			blobmsg_add_double(b, "udp_loss_pct", *out.udp->udp_loss_pct);
+	}
+}
+
+/* A `throughput` call answered once the forked test finishes. */
+struct DeferredThroughput {
+	struct ubus_context *ctx;
+	struct ubus_request_data req;
+	std::string iface;
+};
+
 /* `throughput` — run a gated TCP+UDP test on a link (quiet gate + fence). */
 static int method_throughput(struct ubus_context *ctx, struct ubus_object *obj,
                              struct ubus_request_data *req, const char *method,
@@ -293,25 +319,31 @@ static int method_throughput(struct ubus_context *ctx, struct ubus_object *obj,
 	if (tb[THR_DURATION])
 		duration = blobmsg_get_u32(tb[THR_DURATION]);
 
-	// Runs TCP then UDP in-process; blocks for ~2*duration seconds. The
-	// controller holds the fence, so only one such test runs cluster-wide.
-	probe::ThroughputOutcome out = g_loop->run_throughput(iface, duration);
+	// The test runs in a child process (~2*duration seconds); the reply is
+	// deferred so the daemon keeps pinging and answering `status` meanwhile.
+	auto deferred = std::make_shared<DeferredThroughput>();
+	deferred->ctx = ctx;
+	deferred->iface = iface;
+
+	auto immediate = g_loop->begin_throughput(
+		iface, duration, [deferred](const probe::ThroughputOutcome &out) {
+			struct blob_buf b = {};
+			blob_buf_init(&b, 0);
+			blobmsg_add_throughput(&b, deferred->iface, out);
+			ubus_send_reply(deferred->ctx, &deferred->req, b.head);
+			blob_buf_free(&b);
+			ubus_complete_deferred_request(deferred->ctx, &deferred->req,
+			                               UBUS_STATUS_OK);
+		});
+
+	if (!immediate) {
+		ubus_defer_request(ctx, req, &deferred->req);
+		return 0;
+	}
 
 	struct blob_buf b = {};
 	blob_buf_init(&b, 0);
-	blobmsg_add_string(&b, "interface", iface.c_str());
-	blobmsg_add_u8(&b, "busy", out.busy ? 1 : 0);
-	blobmsg_add_double(&b, "util_mbps", out.util_mbps);
-	if (out.tcp && out.tcp->mbps)
-		blobmsg_add_double(&b, "tcp_mbps", *out.tcp->mbps);
-	if (out.udp) {
-		if (out.udp->mbps)
-			blobmsg_add_double(&b, "udp_mbps", *out.udp->mbps);
-		if (out.udp->udp_jitter_ms)
-			blobmsg_add_double(&b, "udp_jitter_ms", *out.udp->udp_jitter_ms);
-		if (out.udp->udp_loss_pct)
-			blobmsg_add_double(&b, "udp_loss_pct", *out.udp->udp_loss_pct);
-	}
+	blobmsg_add_throughput(&b, iface, *immediate);
 	ubus_send_reply(ctx, req, b.head);
 	blob_buf_free(&b);
 	return 0;

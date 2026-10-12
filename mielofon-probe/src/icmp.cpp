@@ -4,9 +4,14 @@
  * One raw socket per managed link (ICMPv6 for the mesh, ICMPv4 for
  * completeness). The loop is a single uloop_timeout on the ping cadence that
  * sends one echo per link per tick, plus one uloop_fd per link socket that
- * reads replies. A reply is matched by its (id, seq); RTT is measured on the
- * monotonic clock between send and the matching reply. Each send that is still
- * in flight when the next tick fires is a timeout (loss).
+ * reads replies. A reply is matched by its (id, seq); its RTT is taken from the
+ * kernel receive timestamp (SO_TIMESTAMPNS), so a reply that sat in the socket
+ * buffer while the loop was busy still gets its real RTT, with the monotonic
+ * send->read span as the fallback. Each send still unanswered when the next
+ * tick fires (after draining the socket) is a timeout (loss).
+ *
+ * Throughput tests run in a forked child (libiperf3 blocks for the whole
+ * test); pings pause while one runs, see `begin_throughput()`.
  *
  * `Peer` and the uloop glue are local to this TU; the single daemon instance
  * (`g_loop`) and an fd->Peer map let the C callbacks reach the right Peer.
@@ -16,11 +21,14 @@
 
 #include <arpa/inet.h>
 #include <errno.h>
+#include <fcntl.h>
 #include <netinet/in.h>
 #include <netinet/icmp6.h>
 #include <netinet/ip_icmp.h>
 #include <netinet/ip.h>
+#include <signal.h>
 #include <sys/socket.h>
+#include <sys/wait.h>
 #include <syslog.h>
 #include <time.h>
 #include <unistd.h>
@@ -56,6 +64,8 @@ struct Peer {
 	bool inflight = false;
 	uint16_t inflight_seq = 0;
 	uint64_t inflight_us = 0;
+	/// Realtime clock at send (ns), matched against the kernel RX stamp.
+	int64_t inflight_rt_ns = 0;
 
 	struct uloop_fd ufd = {};
 };
@@ -66,6 +76,13 @@ uint64_t mono_us()
 	clock_gettime(CLOCK_MONOTONIC, &ts);
 	return static_cast<uint64_t>(ts.tv_sec) * 1000000ULL +
 	       static_cast<uint64_t>(ts.tv_nsec / 1000);
+}
+
+int64_t real_ns()
+{
+	struct timespec ts;
+	clock_gettime(CLOCK_REALTIME, &ts);
+	return static_cast<int64_t>(ts.tv_sec) * 1000000000LL + ts.tv_nsec;
 }
 
 uint64_t wall_secs()
@@ -97,6 +114,29 @@ namespace
 IcmpLoop *g_loop = nullptr;
 std::map<int, Peer *> g_fd_peers;
 struct uloop_timeout g_tick;
+struct uloop_process g_test_proc;
+struct uloop_timeout g_test_watchdog;
+
+/// Pings stay paused this long after a throughput test ends, so the queue the
+/// test built up on the uplink drains before sampling resumes.
+const uint64_t kTestGraceMinUs = 2000000;
+/// Watchdog slack on top of the two legs' nominal duration (connect, setup).
+const int kTestWatchdogSlackSecs = 20;
+
+void test_proc_cb(struct uloop_process *proc, int ret)
+{
+	(void)proc;
+	(void)ret;
+	if (g_loop != nullptr)
+		g_loop->finish_throughput();
+}
+
+void test_watchdog_cb(struct uloop_timeout *t)
+{
+	(void)t;
+	if (g_loop != nullptr)
+		g_loop->kill_throughput();
+}
 
 void peer_fd_cb(struct uloop_fd *u, unsigned int events)
 {
@@ -181,6 +221,11 @@ int open_socket(const Link &l, int &family, sockaddr_storage &dst,
 		       std::strerror(errno));
 		return -1;
 	}
+	// Kernel RX timestamps; best effort, RTT falls back to the monotonic clock.
+	int on = 1;
+	if (setsockopt(fd, SOL_SOCKET, SO_TIMESTAMPNS, &on, sizeof(on)) != 0)
+		syslog(LOG_WARNING, "open %s: SO_TIMESTAMPNS failed: %s",
+		       l.interface.c_str(), std::strerror(errno));
 	// NOTE: for raw ICMPv6 the kernel computes the checksum itself; setting
 	// IPV6_CHECKSUM here is invalid (EINVAL) — it is only meaningful for raw
 	// sockets carrying non-ICMP protocols. ICMPv4 checksums are computed by
@@ -206,6 +251,13 @@ IcmpLoop::IcmpLoop() : throughput_(params_)
 IcmpLoop::~IcmpLoop()
 {
 	g_loop = nullptr;
+	if (test_pid_ > 0) {
+		uloop_process_delete(&g_test_proc);
+		uloop_timeout_cancel(&g_test_watchdog);
+		kill(test_pid_, SIGKILL);
+		waitpid(test_pid_, nullptr, 0);
+		close(test_fd_);
+	}
 	for (auto &it : peers_) {
 		auto *p = static_cast<Peer *>(it.second);
 		if (p->fd >= 0) {
@@ -301,14 +353,27 @@ void IcmpLoop::tick()
 	for (const auto &it : peers_)
 		ifaces.push_back(it.first);
 	auto util = counters_.sample(ifaces, params_.ping_interval);
+	const bool paused = pings_paused();
 
 	for (const auto &it : peers_) {
 		Peer *p = static_cast<Peer *>(it.second);
 		auto u = util.find(it.first);
 		if (u != util.end())
 			p->link.util_mbps = u->second;
+		if (paused) {
+			// Keep a reply that already arrived; drop the rest unrecorded —
+			// neither an RTT nor a loss measured under our own test load.
+			recv_probe(p);
+			p->inflight = false;
+			continue;
+		}
 		send_probe(p);
 	}
+}
+
+bool IcmpLoop::pings_paused() const
+{
+	return test_pid_ > 0 || mono_us() < pause_until_us_;
 }
 
 void IcmpLoop::send_probe(void *pvoid)
@@ -317,9 +382,14 @@ void IcmpLoop::send_probe(void *pvoid)
 	uint64_t now = mono_us();
 
 	// An in-flight probe that never got a reply before this tick is loss.
+	// Drain the socket first: the tick may run before the fd callback for a
+	// reply that is already queued.
 	if (p.inflight) {
-		p.link.record_timeout();
-		p.inflight = false;
+		recv_probe(&p);
+		if (p.inflight) {
+			p.link.record_timeout();
+			p.inflight = false;
+		}
 	}
 
 	uint8_t buf[64];
@@ -357,6 +427,9 @@ void IcmpLoop::send_probe(void *pvoid)
 	p.inflight = true;
 	p.inflight_seq = pseq;
 	p.inflight_us = now;
+	// Taken after the monotonic stamp, so the kernel RTT can only come out
+	// shorter than the monotonic one (see select_rtt_ms()).
+	p.inflight_rt_ns = real_ns();
 	p.link.record_sent(wall_secs());
 }
 
@@ -364,13 +437,34 @@ void IcmpLoop::recv_probe(void *pvoid)
 {
 	Peer &p = *static_cast<Peer *>(pvoid);
 	uint8_t buf[512];
+	alignas(struct cmsghdr) uint8_t cbuf[CMSG_SPACE(sizeof(struct timespec)) + 64];
 	uint64_t now = mono_us();
 
 	for (;;) {
-		ssize_t r = recv(p.fd, buf, sizeof(buf), 0);
+		struct iovec iov = { buf, sizeof(buf) };
+		struct msghdr msg = {};
+		msg.msg_iov = &iov;
+		msg.msg_iovlen = 1;
+		msg.msg_control = cbuf;
+		msg.msg_controllen = sizeof(cbuf);
+
+		ssize_t r = recvmsg(p.fd, &msg, 0);
 		if (r < 0)
 			break;
 
+		std::optional<int64_t> rx_ns;
+		for (struct cmsghdr *c = CMSG_FIRSTHDR(&msg); c != nullptr;
+		     c = CMSG_NXTHDR(&msg, c)) {
+			if (c->cmsg_level == SOL_SOCKET && c->cmsg_type == SCM_TIMESTAMPNS &&
+			    c->cmsg_len >= CMSG_LEN(sizeof(struct timespec))) {
+				struct timespec ts;
+				std::memcpy(&ts, CMSG_DATA(c), sizeof(ts));
+				rx_ns = static_cast<int64_t>(ts.tv_sec) * 1000000000LL + ts.tv_nsec;
+			}
+		}
+
+		uint16_t seq = 0;
+		uint64_t ttl = 0;
 		if (p.family == AF_INET) {
 			if (static_cast<size_t>(r) < sizeof(iphdr))
 				continue;
@@ -381,34 +475,26 @@ void IcmpLoop::recv_probe(void *pvoid)
 			const icmphdr *h = reinterpret_cast<const icmphdr *>(buf + off);
 			if (h->type != ICMP_ECHOREPLY || ntohs(h->un.echo.id) != p.id)
 				continue;
-			if (!p.inflight || ntohs(h->un.echo.sequence) != p.inflight_seq)
-				continue;
-			uint64_t sent_us;
-			if (off + sizeof(*h) + sizeof(sent_us) > static_cast<size_t>(r))
-				continue;
-			std::memcpy(&sent_us, buf + off + sizeof(*h), sizeof(sent_us));
-			double rtt_ms = static_cast<double>(now - sent_us) / 1000.0;
-			p.link.record_reply(rtt_ms, ip->ttl, wall_secs());
-			p.inflight = false;
-			break;
+			seq = ntohs(h->un.echo.sequence);
+			ttl = ip->ttl;
 		} else {
 			if (static_cast<size_t>(r) < sizeof(icmp6_hdr))
 				continue;
 			const icmp6_hdr *h = reinterpret_cast<const icmp6_hdr *>(buf);
-			if (h->icmp6_type != ICMP6_ECHO_REPLY ||
-			    ntohs(h->icmp6_id) != p.id)
+			if (h->icmp6_type != ICMP6_ECHO_REPLY || ntohs(h->icmp6_id) != p.id)
 				continue;
-			if (!p.inflight || ntohs(h->icmp6_seq) != p.inflight_seq)
-				continue;
-			uint64_t sent_us;
-			if (sizeof(*h) + sizeof(sent_us) > static_cast<size_t>(r))
-				continue;
-			std::memcpy(&sent_us, buf + sizeof(*h), sizeof(sent_us));
-			double rtt_ms = static_cast<double>(now - sent_us) / 1000.0;
-			p.link.record_reply(rtt_ms, 0, wall_secs());
-			p.inflight = false;
-			break;
+			seq = ntohs(h->icmp6_seq);
 		}
+		if (!p.inflight || seq != p.inflight_seq)
+			continue;
+
+		std::optional<int64_t> kernel_rtt_ns;
+		if (rx_ns)
+			kernel_rtt_ns = *rx_ns - p.inflight_rt_ns;
+		double rtt_ms = select_rtt_ms(kernel_rtt_ns, now - p.inflight_us);
+		p.link.record_reply(rtt_ms, ttl, wall_secs());
+		p.inflight = false;
+		break;
 	}
 }
 
@@ -447,8 +533,8 @@ void *IcmpLoop::find_peer(const std::string &interface) const
 	return it == peers_.end() ? nullptr : it->second;
 }
 
-ThroughputOutcome IcmpLoop::run_throughput(const std::string &interface,
-                                           int duration)
+std::optional<ThroughputOutcome>
+IcmpLoop::begin_throughput(const std::string &interface, int duration, ThroughputDone done)
 {
 	ThroughputOutcome out;
 	void *pv = find_peer(interface);
@@ -458,16 +544,108 @@ ThroughputOutcome IcmpLoop::run_throughput(const std::string &interface,
 	Peer &p = *static_cast<Peer *>(pv);
 	out.util_mbps = p.link.util_mbps;
 
+	// One test at a time per node; the controller's fence makes this rare.
+	if (test_pid_ > 0) {
+		out.busy = true;
+		return out;
+	}
+
 	// Quiet gate: do not run a load test while the link is carrying traffic.
 	if (out.util_mbps > params_.quiet_max_mbps) {
 		out.busy = true;
 		return out;
 	}
 
-	// TCP then UDP, in-process (serialised by the caller / fence).
-	out.tcp = throughput_.run_tcp(p.link, duration);
-	out.udp = throughput_.run_udp(p.link, duration);
-	return out;
+	duration = std::clamp(duration, 1, 60);
+
+	int fds[2];
+	if (pipe2(fds, O_CLOEXEC) != 0) {
+		syslog(LOG_WARNING, "throughput %s: pipe failed: %s", interface.c_str(),
+		       std::strerror(errno));
+		return out;
+	}
+
+	pid_t pid = fork();
+	if (pid < 0) {
+		syslog(LOG_WARNING, "throughput %s: fork failed: %s", interface.c_str(),
+		       std::strerror(errno));
+		close(fds[0]);
+		close(fds[1]);
+		return out;
+	}
+
+	if (pid == 0) {
+		// Child: TCP then UDP, report on the pipe, never return into uloop.
+		close(fds[0]);
+		auto tcp = throughput_.run_tcp(p.link, duration);
+		auto udp = throughput_.run_udp(p.link, duration);
+		std::string res = encode_results(tcp, udp);
+		const char *ptr = res.data();
+		size_t left = res.size();
+		while (left > 0) {
+			ssize_t n = write(fds[1], ptr, left);
+			if (n <= 0)
+				break;
+			ptr += n;
+			left -= static_cast<size_t>(n);
+		}
+		_exit(0);
+	}
+
+	close(fds[1]);
+	test_pid_ = pid;
+	test_fd_ = fds[0];
+	test_util_mbps_ = out.util_mbps;
+	test_done_ = std::move(done);
+
+	g_test_proc = {};
+	g_test_proc.pid = pid;
+	g_test_proc.cb = test_proc_cb;
+	uloop_process_add(&g_test_proc);
+
+	g_test_watchdog = {};
+	g_test_watchdog.cb = test_watchdog_cb;
+	uloop_timeout_set(&g_test_watchdog, (2 * duration + kTestWatchdogSlackSecs) * 1000);
+
+	syslog(LOG_DEBUG, "throughput %s: test started (pid %d, %ds per leg)",
+	       interface.c_str(), static_cast<int>(pid), duration);
+	return std::nullopt;
+}
+
+void IcmpLoop::finish_throughput()
+{
+	uloop_timeout_cancel(&g_test_watchdog);
+
+	// The child has exited, so the pipe holds all it wrote and reads to EOF.
+	std::string data;
+	char buf[256];
+	ssize_t n;
+	while ((n = read(test_fd_, buf, sizeof(buf))) > 0)
+		data.append(buf, static_cast<size_t>(n));
+	close(test_fd_);
+	test_fd_ = -1;
+	test_pid_ = -1;
+
+	ThroughputOutcome out;
+	out.util_mbps = test_util_mbps_;
+	decode_results(data, out.tcp, out.udp);
+
+	uint64_t grace = static_cast<uint64_t>(2.0 * params_.ping_interval * 1e6);
+	pause_until_us_ = mono_us() + std::max(grace, kTestGraceMinUs);
+
+	ThroughputDone done = std::move(test_done_);
+	test_done_ = nullptr;
+	if (done)
+		done(out);
+}
+
+void IcmpLoop::kill_throughput()
+{
+	if (test_pid_ <= 0)
+		return;
+	syslog(LOG_WARNING, "throughput: test pid %d overran, killing",
+	       static_cast<int>(test_pid_));
+	kill(test_pid_, SIGKILL); // test_proc_cb then reports an empty result
 }
 
 } // namespace probe
