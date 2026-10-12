@@ -1,7 +1,7 @@
 //! Prometheus self-observability via the node-exporter textfile collector.
 //!
 //! Metric names match the former ucode agent (`mielofon_agent_*`) so existing
-//! dashboards keep working; the ping counters of the former `mielofon-probe`
+//! dashboards keep working; the ping counters of the former C++ probe
 //! daemon are folded in as `mielofon_agent_pings_*_total`.
 
 use crate::icmp::LinkStats;
