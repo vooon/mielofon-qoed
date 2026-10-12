@@ -18,11 +18,18 @@
 //! noisy sample — or a metric wobbling across a threshold — from flipping the
 //! class and re-routing OSPF cost. The first classification of a link applies
 //! immediately.
+//!
+//! Pairing: the two directed halves of one tunnel (`A→B`, `B→A`) are
+//! classified from a merged view (`classifier.pair_cost`, see
+//! `config::PairCost`), so the round-trip dimensions both ends measure cannot
+//! drift the two OSPF costs apart. The derived record still carries each
+//! half's own measurements.
 
+use crate::config::PairCost;
 use crate::model::{LinkKey, ProbeState, Quality, QualityRecord};
 use crate::quality;
 use crate::state::AppState;
-use crate::store::WindowSpec;
+use crate::store::{WindowSpec, WindowView};
 use std::collections::HashMap;
 use std::sync::RwLock;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -69,6 +76,68 @@ fn now_secs() -> u64 {
         .as_secs()
 }
 
+/// Map each link to its reverse half (`from`/`to` swapped). A link is paired
+/// only when exactly one link exists in each direction between the two nodes;
+/// parallel tunnels between the same pair cannot be matched by node names and
+/// are left unpaired.
+pub fn pair_links(links: &[LinkKey]) -> HashMap<LinkKey, LinkKey> {
+    let mut by_dir: HashMap<(&str, &str), Vec<&LinkKey>> = HashMap::new();
+    for l in links {
+        by_dir
+            .entry((l.from.as_str(), l.to.as_str()))
+            .or_default()
+            .push(l);
+    }
+
+    let mut pairs = HashMap::new();
+    for l in links {
+        let (Some(fwd), Some(rev)) = (
+            by_dir.get(&(l.from.as_str(), l.to.as_str())),
+            by_dir.get(&(l.to.as_str(), l.from.as_str())),
+        ) else {
+            continue;
+        };
+        if fwd.len() == 1 && rev.len() == 1 && l.from != l.to {
+            pairs.insert(l.clone(), rev[0].clone());
+        }
+    }
+    pairs
+}
+
+/// Worse of two upper-bound metrics (higher is worse); either may be unset.
+fn worse_upper(a: Option<f64>, b: Option<f64>) -> Option<f64> {
+    match (a, b) {
+        (Some(x), Some(y)) => Some(x.max(y)),
+        (x, y) => x.or(y),
+    }
+}
+
+/// Worse of two lower-bound metrics (lower is worse); either may be unset.
+fn worse_lower(a: Option<f64>, b: Option<f64>) -> Option<f64> {
+    match (a, b) {
+        (Some(x), Some(y)) => Some(x.min(y)),
+        (x, y) => x.or(y),
+    }
+}
+
+/// The view a paired link is classified from: the round-trip dims (rtt, loss,
+/// jitter) are the worse of both halves; throughput is the link's own
+/// (`Directional`) or the worse of both (`Symmetric`). State/ts/util stay the
+/// link's own — busy/conflict hold is a per-direction matter.
+pub fn merge_pair(own: &WindowView, rev: &WindowView, mode: PairCost) -> WindowView {
+    let mut v = own.clone();
+    if mode == PairCost::Off {
+        return v;
+    }
+    v.rtt_ms = worse_upper(own.rtt_ms, rev.rtt_ms);
+    v.loss_pct = worse_upper(own.loss_pct, rev.loss_pct);
+    v.jitter_ms = worse_upper(own.jitter_ms, rev.jitter_ms);
+    if mode == PairCost::Symmetric {
+        v.tcp_mbps = worse_lower(own.tcp_mbps, rev.tcp_mbps);
+    }
+    v
+}
+
 /// One classification pass over all links with recent samples.
 pub fn classify_once(state: &AppState) {
     let cfg = &state.cfg;
@@ -79,8 +148,19 @@ pub fn classify_once(state: &AppState) {
     };
     let now = now_secs();
 
-    for link in state.tsdb.links() {
-        let Some(view) = state.tsdb.window(&link, &spec, now) else {
+    let links = state.tsdb.links();
+    let views: HashMap<LinkKey, WindowView> = links
+        .iter()
+        .filter_map(|l| state.tsdb.window(l, &spec, now).map(|v| (l.clone(), v)))
+        .collect();
+    let pairs = if cfg.classifier.pair_cost == PairCost::Off {
+        HashMap::new()
+    } else {
+        pair_links(&links)
+    };
+
+    for link in links {
+        let Some(view) = views.get(&link) else {
             continue;
         };
 
@@ -98,14 +178,18 @@ pub fn classify_once(state: &AppState) {
                     (Some(last.quality), Some(last.ospf_cost))
                 })
             };
-            write_derived(state, &link, &view, held_quality, held_cost);
+            write_derived(state, &link, view, held_quality, held_cost);
             continue;
         }
 
         // Fresh data: classify from the window, then apply hysteresis — a new
         // class only takes effect after `hysteresis_passes` consecutive passes
         // agree. The first classification of a link applies immediately.
-        let candidate = quality::classify_window(&cfg.quality, &view);
+        let class_view = match pairs.get(&link).and_then(|rev| views.get(rev)) {
+            Some(rev) => merge_pair(view, rev, cfg.classifier.pair_cost),
+            None => view.clone(),
+        };
+        let candidate = quality::classify_window(&cfg.quality, &class_view);
 
         let held = state.classifier.last.read().expect("classifier lock");
         let current = held.get(&link);
@@ -163,7 +247,7 @@ pub fn classify_once(state: &AppState) {
                     ospf_cost: effective_cost,
                 },
             );
-        write_derived(state, &link, &view, Some(effective), Some(effective_cost));
+        write_derived(state, &link, view, Some(effective), Some(effective_cost));
     }
 }
 
@@ -224,6 +308,7 @@ mod tests {
                 tcp_carry_secs: carry,
                 busy_hold_secs: 120,
                 hysteresis_passes,
+                pair_cost: PairCost::Directional,
             },
             ..Config::default()
         };
@@ -407,5 +492,142 @@ mod tests {
             }
         }
         assert!(got_bad, "sustained degradation must eventually apply");
+    }
+
+    fn state_with_pair(mode: PairCost) -> AppState {
+        let cfg = Config {
+            classifier: Classifier {
+                hysteresis_passes: 1,
+                pair_cost: mode,
+                ..Classifier::default()
+            },
+            ..Config::default()
+        };
+        AppState::new(cfg)
+    }
+
+    fn append_dims(state: &AppState, link: &LinkKey, ts: u64, rtt: f64, tcp: Option<f64>) {
+        state.tsdb.append(
+            link,
+            RawSample::from_dims(
+                ProbeState::Quiet,
+                ts,
+                Some(rtt),
+                Some(0.0),
+                Some(2.0),
+                tcp,
+                0.0,
+            ),
+        );
+    }
+
+    fn cost(state: &AppState, link: &LinkKey) -> Option<u32> {
+        state.kv.get(link).and_then(|r| r.ospf_cost)
+    }
+
+    #[test]
+    fn pairs_only_unambiguous_reverse_links() {
+        let ab = LinkKey::new("node-0", "hub-a", "awg_hub_a");
+        let ba = LinkKey::new("hub-a", "node-0", "awg_node_0");
+        // One-way only: no reverse half registered.
+        let cb = LinkKey::new("node-1", "hub-a", "awg_hub_a");
+        // Parallel tunnels node-2 -> hub-b: names cannot tell them apart.
+        let p1 = LinkKey::new("node-2", "hub-b", "awg_hub_b");
+        let p2 = LinkKey::new("node-2", "hub-b", "awg_hub_b2");
+        let pr = LinkKey::new("hub-b", "node-2", "awg_node_2");
+
+        let pairs = pair_links(&[
+            ab.clone(),
+            ba.clone(),
+            cb.clone(),
+            p1.clone(),
+            p2,
+            pr.clone(),
+        ]);
+        assert_eq!(pairs.get(&ab), Some(&ba));
+        assert_eq!(pairs.get(&ba), Some(&ab));
+        assert!(!pairs.contains_key(&cb));
+        assert!(!pairs.contains_key(&p1));
+        assert!(
+            !pairs.contains_key(&pr),
+            "reverse of parallel tunnels is ambiguous"
+        );
+    }
+
+    #[test]
+    fn paired_halves_share_round_trip_dims() {
+        // Both ends ping the same round trip but measured differently (one
+        // side saw congestion): without pairing the costs drift apart.
+        let ab = LinkKey::new("node-0", "hub-a", "awg_hub_a");
+        let ba = LinkKey::new("hub-a", "node-0", "awg_node_0");
+        let now = crate::tsdb::now_secs();
+
+        let state = state_with_pair(PairCost::Directional);
+        append_dims(&state, &ab, now, 15.0, None);
+        append_dims(&state, &ba, now, 120.0, None);
+        classify_once(&state);
+        assert_eq!(
+            cost(&state, &ab),
+            Some(50),
+            "worse rtt (poor) applies to both"
+        );
+        assert_eq!(cost(&state, &ba), Some(50));
+        // The derived record still shows each half's own measurement.
+        assert_eq!(state.kv.get(&ab).unwrap().rtt_ms, Some(15.0));
+
+        let off = state_with_pair(PairCost::Off);
+        append_dims(&off, &ab, now, 15.0, None);
+        append_dims(&off, &ba, now, 120.0, None);
+        classify_once(&off);
+        assert_eq!(cost(&off, &ab), Some(10));
+        assert_eq!(cost(&off, &ba), Some(50));
+    }
+
+    #[test]
+    fn throughput_is_directional_or_symmetric_by_mode() {
+        // One-way shaping: node-0's upload to hub-a is throttled, the reverse
+        // direction is healthy; rtt is good both ways.
+        let ab = LinkKey::new("node-0", "hub-a", "awg_hub_a");
+        let ba = LinkKey::new("hub-a", "node-0", "awg_node_0");
+        let now = crate::tsdb::now_secs();
+
+        let dir = state_with_pair(PairCost::Directional);
+        append_dims(&dir, &ab, now, 15.0, Some(1.5));
+        append_dims(&dir, &ba, now, 15.0, Some(80.0));
+        classify_once(&dir);
+        assert_eq!(cost(&dir, &ab), Some(100), "throttled direction penalised");
+        assert_eq!(
+            cost(&dir, &ba),
+            Some(10),
+            "healthy direction keeps its cost"
+        );
+
+        let sym = state_with_pair(PairCost::Symmetric);
+        append_dims(&sym, &ab, now, 15.0, Some(1.5));
+        append_dims(&sym, &ba, now, 15.0, Some(80.0));
+        classify_once(&sym);
+        assert_eq!(cost(&sym, &ab), Some(100));
+        assert_eq!(cost(&sym, &ba), Some(100), "symmetric: both take the worse");
+    }
+
+    #[test]
+    fn merge_pair_keeps_unset_dims_from_the_other_half() {
+        let own = WindowView {
+            rtt_ms: None,
+            loss_pct: Some(0.5),
+            ..Default::default()
+        };
+        let rev = WindowView {
+            rtt_ms: Some(30.0),
+            loss_pct: None,
+            tcp_mbps: Some(5.0),
+            ..Default::default()
+        };
+        let v = merge_pair(&own, &rev, PairCost::Directional);
+        assert_eq!(v.rtt_ms, Some(30.0));
+        assert_eq!(v.loss_pct, Some(0.5));
+        assert_eq!(v.tcp_mbps, None, "directional never borrows reverse tcp");
+        let v = merge_pair(&own, &rev, PairCost::Symmetric);
+        assert_eq!(v.tcp_mbps, Some(5.0));
     }
 }

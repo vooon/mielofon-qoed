@@ -142,6 +142,17 @@ dead-interval so the no-controller state is safe. Importantly, a low-RTT link
 that is throughput-throttled is still penalised (the key failure mode active
 probes must catch).
 
+OSPF cost is per direction: each side sets it on its own outgoing interface.
+The two directed halves of a tunnel (`A→B`, `B→A`) are therefore classified
+together (`[classifier] pair_cost`). Rtt, loss and jitter come from ICMP echo,
+so both ends measure the same round trip and a pair always uses the worse
+value of the two. Throughput is the only truly directional dimension (each
+side's iperf measures its own upload): in `directional` mode (the default)
+each half keeps its own, so the halves only get different costs under real
+one-way shaping; `symmetric` uses the worse of both so the costs are always
+equal. Halves are matched by swapped node names, so only when exactly one
+tunnel exists between two nodes; anything else is classified on its own.
+
 ### Lockdown rules
 
 - mTLS on members + clients, verified against a dedicated CA; no anonymous

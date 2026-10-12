@@ -77,6 +77,12 @@ ospf_cost = 100
 # instead of reclassifying it as degraded. `hysteresis_passes` requires a new
 # class to be observed that many consecutive passes before it is applied, so a
 # single noisy sample cannot flip the cost.
+# `pair_cost` combines the two directions of one tunnel (A->B and B->A, matched
+# by swapped node names): "directional" takes the worse rtt/loss/jitter of both
+# ends and each direction's own throughput, so the halves only get different
+# costs when throughput really differs by direction; "symmetric" also takes the
+# worse throughput, so both halves always get the same cost; "off" classifies
+# each direction on its own.
 [classifier]
 interval_secs = 5
 always_fresh_secs = 60
@@ -84,6 +90,7 @@ tcp_fresh_secs = 1200
 tcp_carry_secs = 3600
 busy_hold_secs = 120
 hysteresis_passes = 3
+pair_cost = "directional"
 
 # Console logging. `level` sets the minimum tracing level emitted to the
 # console; `format` selects the console output (logfmt or JSON). Both are
