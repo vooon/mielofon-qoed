@@ -830,7 +830,7 @@ checksum = "cf8baf1c55e62ffcace7a9f06f4bd9cd3f0c4beb022d3b367256b91b87513d98"
 
 [[package]]
 name = "mielofon-agent"
-version = "0.11.0"
+version = "0.11.1"
 dependencies = [
  "anyhow",
  "http-body-util",
@@ -851,7 +851,7 @@ dependencies = [
 
 [[package]]
 name = "mielofon-controller"
-version = "0.11.0"
+version = "0.11.1"
 dependencies = [
  "anyhow",
  "axum",
@@ -881,7 +881,7 @@ dependencies = [
 
 [[package]]
 name = "mielofon-otel"
-version = "0.11.0"
+version = "0.11.1"
 dependencies = [
  "anyhow",
  "opentelemetry",
@@ -899,7 +899,7 @@ dependencies = [
 
 [[package]]
 name = "mielofon-proto"
-version = "0.11.0"
+version = "0.11.1"
 dependencies = [
  "serde",
  "serde_json",
