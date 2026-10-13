@@ -7,25 +7,27 @@
 use crate::icmp::LinkStats;
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Mutex;
 
+/// Command counters. `AtomicUsize`, not `AtomicU64`: 32-bit MIPS has no
+/// 64-bit atomics, and a 32-bit count of commands does not wrap in practice.
 #[derive(Default)]
 pub struct Counters {
-    pub commands_received: AtomicU64,
-    pub commands_succeeded: AtomicU64,
-    pub commands_errored: AtomicU64,
-    pub probe_ping: AtomicU64,
-    pub probe_iperf: AtomicU64,
-    pub probe_busy: AtomicU64,
-    pub probe_errors_ping: AtomicU64,
-    pub probe_errors_iperf: AtomicU64,
-    pub apply_cost: AtomicU64,
-    pub apply_cost_errors: AtomicU64,
+    pub commands_received: AtomicUsize,
+    pub commands_succeeded: AtomicUsize,
+    pub commands_errored: AtomicUsize,
+    pub probe_ping: AtomicUsize,
+    pub probe_iperf: AtomicUsize,
+    pub probe_busy: AtomicUsize,
+    pub probe_errors_ping: AtomicUsize,
+    pub probe_errors_iperf: AtomicUsize,
+    pub apply_cost: AtomicUsize,
+    pub apply_cost_errors: AtomicUsize,
 }
 
 impl Counters {
-    pub fn inc(c: &AtomicU64) {
+    pub fn inc(c: &AtomicUsize) {
         c.fetch_add(1, Ordering::Relaxed);
     }
 }
@@ -79,7 +81,7 @@ impl Metrics {
     /// statistics, `None` when the link has no probe task yet).
     pub fn render(&self, links: &[(Labels, Option<LinkStats>)]) -> String {
         let c = &self.counters;
-        let get = |a: &AtomicU64| a.load(Ordering::Relaxed);
+        let get = |a: &AtomicUsize| a.load(Ordering::Relaxed);
         let mut o = Out(String::new());
 
         o.decl("mielofon_agent_up", "gauge", "Agent is up and reporting.");
