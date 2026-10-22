@@ -54,6 +54,16 @@ pub struct WindowView {
     pub tcp_carried: bool,
 }
 
+impl WindowView {
+    /// Whether the window holds a current always-tier measurement. The ping
+    /// window reports `loss_pct` as soon as it has one outcome, so a window
+    /// without any of rtt/loss/jitter has no fresh ping data at all: the
+    /// agent stopped answering, or its ping window was still empty.
+    pub fn measured(&self) -> bool {
+        self.rtt_ms.is_some() || self.loss_pct.is_some() || self.jitter_ms.is_some()
+    }
+}
+
 /// The measurement-store interface. All methods are cheap and wait-free where
 /// bounded: consumers call them from the request path and background loops.
 pub trait Store: Send + Sync {

@@ -13,6 +13,12 @@
 //! cost for up to `busy_hold_secs`; beyond that the sample is stale and the
 //! classifier stops touching it (the underlay owns hard outages).
 //!
+//! Unknown semantics: a window with no current always-tier measurement (no
+//! rtt/loss/jitter within `always_fresh_secs` — the agent stopped answering,
+//! or its ping window was still empty) says nothing about the link, so the
+//! last decision is kept as well. An unconstrained classification would
+//! otherwise fall through to `good` and reset a degraded link's cost.
+//!
 //! Hysteresis: a link's class only changes once a new class has been observed
 //! on `hysteresis_passes` consecutive *fresh samples* (a pass that sees the
 //! same newest sample as the previous pass does not count). This stops a
@@ -184,26 +190,26 @@ pub fn classify_once(state: &AppState) {
         if (view.state == ProbeState::Busy || view.state == ProbeState::Conflict)
             && now.saturating_sub(view.ts) < cfg.classifier.busy_hold_secs
         {
-            // Always write the derived record (so the link stays on the map,
-            // state=busy, quality unset if never classified) and stamp it with
-            // the held cost when one exists.
-            let (held_quality, held_cost) = {
-                let guard = state.classifier.last.read().expect("classifier lock");
-                guard.get(&link).map_or((None, None), |last| {
-                    (Some(last.quality), Some(last.ospf_cost))
-                })
-            };
-            write_derived(state, &link, view, held_quality, held_cost);
+            hold_last(state, &link, view);
+            continue;
+        }
+
+        let class_view = match pairs.get(&link).and_then(|rev| views.get(rev)) {
+            Some(rev) => merge_pair(view, rev, cfg.classifier.pair_cost),
+            None => view.clone(),
+        };
+
+        // Unknown: no current ping data for the tunnel (own half, or either
+        // half when paired). Nothing can be said about it now — keep the past
+        // decision instead of classifying an empty window as good.
+        if !class_view.measured() {
+            hold_last(state, &link, view);
             continue;
         }
 
         // Fresh data: classify from the window, then apply hysteresis — a new
         // class only takes effect after `hysteresis_passes` consecutive fresh
         // samples agree. The first classification of a link applies immediately.
-        let class_view = match pairs.get(&link).and_then(|rev| views.get(rev)) {
-            Some(rev) => merge_pair(view, rev, cfg.classifier.pair_cost),
-            None => view.clone(),
-        };
         let candidate = quality::classify_window(&cfg.quality, &class_view);
 
         let held = state.classifier.last.read().expect("classifier lock");
@@ -268,6 +274,20 @@ pub fn classify_once(state: &AppState) {
             );
         write_derived(state, &link, view, Some(effective), Some(effective_cost));
     }
+}
+
+/// Keep a link's last derived quality/cost. The derived record is still
+/// written (so the link stays on the map with its current state/ts, quality
+/// unset if it was never classified), stamped with the held cost when one
+/// exists.
+fn hold_last(state: &AppState, link: &LinkKey, view: &WindowView) {
+    let (held_quality, held_cost) = {
+        let guard = state.classifier.last.read().expect("classifier lock");
+        guard.get(link).map_or((None, None), |last| {
+            (Some(last.quality), Some(last.ospf_cost))
+        })
+    };
+    write_derived(state, link, view, held_quality, held_cost);
 }
 
 /// Stamp the collapsed window (rtt/loss/jitter/tcp/util/state) plus the derived
@@ -455,6 +475,70 @@ mod tests {
         );
         classify_once(&state);
         assert!(state.kv.get(&link).is_none());
+    }
+
+    #[test]
+    fn unmeasured_window_keeps_last_decision() {
+        let state = state_with(1200, 3600);
+        let link = LinkKey::new("spoke-1", "hub-a", "awg_hub_a");
+        own(&state, &[&link]);
+        let base = crate::clock::now_secs();
+        // A link last decided Bad (cost 100), whose pings then stopped: the
+        // only sample inside the carry horizon is an old throughput one, so
+        // the window has tcp but no rtt/loss/jitter.
+        state
+            .classifier
+            .last
+            .write()
+            .expect("classifier lock")
+            .insert(
+                link.clone(),
+                LastPolicy {
+                    quality: Quality::Bad,
+                    ospf_cost: 100,
+                },
+            );
+        state.tsdb.append(
+            &link,
+            RawSample::from_dims(
+                ProbeState::Quiet,
+                base - 120,
+                None,
+                None,
+                None,
+                Some(90.0),
+                0.0,
+            ),
+        );
+        classify_once(&state);
+        let rec = state.kv.get(&link).expect("record stays on the map");
+        assert_eq!(rec.rtt_ms, None);
+        assert_eq!(
+            rec.quality,
+            Some(Quality::Bad),
+            "no ping data must not reset the link to good"
+        );
+        assert_eq!(rec.ospf_cost, Some(100));
+
+        // Never decided + never measured: on the map, but no quality/cost.
+        let fresh = LinkKey::new("spoke-1", "hub-b", "awg_hub_b");
+        own(&state, &[&link, &fresh]);
+        state.tsdb.append(
+            &fresh,
+            RawSample::from_dims(
+                ProbeState::Quiet,
+                base - 120,
+                None,
+                None,
+                None,
+                Some(90.0),
+                0.0,
+            ),
+        );
+        classify_once(&state);
+        let rec = state.kv.get(&fresh).expect("record stays on the map");
+        assert_eq!(rec.quality, None);
+        assert_eq!(rec.ospf_cost, None);
     }
 
     #[test]
