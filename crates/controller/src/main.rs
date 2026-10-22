@@ -49,6 +49,11 @@ struct DaemonArgs {
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
+    // Select the ring CryptoProvider as the process default so rustls doesn't
+    // fail on provider ambiguity (multiple deps pull different rustls
+    // features). Every subcommand that opens a TLS config needs it.
+    let _ =
+        rustls::crypto::CryptoProvider::install_default(rustls::crypto::ring::default_provider());
     match cli.command {
         Command::Daemon(args) => run_daemon(&args.config).await,
         Command::Cert(args) => mielofon_controller::cert::run(args),
@@ -58,11 +63,6 @@ async fn main() -> anyhow::Result<()> {
 
 async fn run_daemon(path: &str) -> anyhow::Result<()> {
     let cfg = Config::load(path)?;
-
-    // Select the ring CryptoProvider as the process default so rustls doesn't
-    // fail on provider ambiguity (multiple deps pull different rustls features).
-    let _ =
-        rustls::crypto::CryptoProvider::install_default(rustls::crypto::ring::default_provider());
 
     let guard = mielofon_otel::install(
         &cfg.otel,
