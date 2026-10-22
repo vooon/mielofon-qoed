@@ -140,7 +140,8 @@ Command shapes — each carries a job `id`:
 
 The controller's scheduler issues `probe/always` per link on an interval, and
 `probe/throughput` only when the link's fence lease is free — it acquires the
-lease before issuing the command. `apply_cost` is issued when the derived cost
+lease before issuing the command — and the agent holds no lease on another
+link (it runs one iperf3 test at a time). `apply_cost` is issued when the derived cost
 for a link differs from the last cost the controller told the agent to apply.
 While no agent is long-polling, probe work is not queued (bounded). Every
 `register` replaces the agent's link set, drops queued work, forgets which
