@@ -112,7 +112,13 @@ sit behind NAT, so agents pull work from the controller rather than the
 controller connecting out to them. A controller that does not know the agent
 (restart, eviction after 300 s without a poll) answers the poll with `404`
 and the agent registers again; applied costs live in BIRD's runtime config,
-so every registration re-seeds them.
+so every registration re-seeds them. The agent also remembers the last cost
+it was told to apply per link and, on every refresh (`refresh_interval`,
+60 s by default), compares it with
+the cost BIRD reports for the interface: a drift (a BIRD config redeploy
+resets every interface to its static default) is re-applied at once, without
+waiting for the controller, and counted as
+`mielofon_agent_apply_cost_total{result="reapplied"}`.
 
 The agent package (`mielofon-agent/`) installs `/usr/sbin/mielofon-agent`, a
 procd init and a UCI config (`/etc/config/mielofon-agent`) that carries the
@@ -122,7 +128,8 @@ mTLS identity (`/etc/mielofon/agent.{key,cer}` + `ca.pem`) and a single
 - **Transport**: mTLS HTTPS (hyper + rustls with the ring provider), pinned to
   the mesh CA, same certificate files as the controller's clients listener.
 - **Discovery** (`docs/link-autodiscovery.md`): `bird status` and
-  `network.interface.<iface> status` over ubus, re-run every 30 s; a changed
+  `network.interface.<iface> status` over ubus, re-run every
+  `refresh_interval` (60 s); a changed
   link set triggers a re-register.
 - **Measurement** is in-process. Each managed link has a ping task on a raw
   ICMPv6 socket pinned to the tunnel interface and aimed at the OSPF

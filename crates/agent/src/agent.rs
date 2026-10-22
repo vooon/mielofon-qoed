@@ -23,6 +23,10 @@ struct NodeState {
     /// Interface byte counter at the previous always probe, for the
     /// utilisation reported with the next one.
     counters: HashMap<String, (u64, Instant)>,
+    /// The last cost the controller told us to apply, per interface. The
+    /// refresh re-applies it when BIRD reports something else (a config
+    /// redeploy resets every interface to its static default).
+    desired: HashMap<String, u32>,
 }
 
 pub struct Agent<B> {
@@ -88,26 +92,52 @@ impl<B: Bus> Agent<B> {
         }
     }
 
-    /// Re-discover links and the mesh loopback, and reconcile the probes.
+    /// Re-discover links and the mesh loopback, reconcile the probes, and
+    /// re-apply any cost BIRD has drifted from.
     pub async fn refresh(&self) {
         let links = discover::discover(&self.bus, &self.cfg).await;
         let loopback = discover::loopback(&self.bus, &self.cfg).await;
         self.prober.reconcile(&links);
-        let mut st = self.state.lock().expect("agent state");
-        st.counters
-            .retain(|iface, _| links.iter().any(|l| &l.interface == iface));
-        if st.links != links {
-            info!(
-                "links: {}",
-                links
-                    .iter()
-                    .map(|l| format!("{}→{}", l.interface, l.to))
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            );
+        let drifted: Vec<(String, u32, u32)> = {
+            let mut st = self.state.lock().expect("agent state");
+            st.counters
+                .retain(|iface, _| links.iter().any(|l| &l.interface == iface));
+            st.desired
+                .retain(|iface, _| links.iter().any(|l| &l.interface == iface));
+            if st.links != links {
+                info!(
+                    "links: {}",
+                    links
+                        .iter()
+                        .map(|l| format!("{}→{}", l.interface, l.to))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                );
+            }
+            let drifted = links
+                .iter()
+                .filter_map(|l| {
+                    let want = *st.desired.get(&l.interface)?;
+                    let has = l.cost?;
+                    (has != want).then(|| (l.interface.clone(), has, want))
+                })
+                .collect();
+            st.links = links;
+            st.loopback = loopback;
+            drifted
+        };
+        let c = &self.metrics.counters;
+        for (iface, has, want) in drifted {
+            warn!("cost {iface}: BIRD has {has}, re-applying {want}");
+            let _serial = self.apply_lock.lock().await;
+            match bird::set_ospf_cost(&self.bus, &iface, want, self.cost_retry).await {
+                Ok(()) => Counters::inc(&c.apply_cost_reapplied),
+                Err(e) => {
+                    warn!("cost {iface}: re-apply failed: {e}");
+                    Counters::inc(&c.apply_cost_errors);
+                }
+            }
         }
-        st.links = links;
-        st.loopback = loopback;
     }
 
     fn key(&self, l: &Link) -> LinkKey {
@@ -274,6 +304,11 @@ impl<B: Bus> Agent<B> {
                     None => {
                         Counters::inc(&c.apply_cost);
                         Counters::inc(&c.commands_succeeded);
+                        self.state
+                            .lock()
+                            .expect("agent state")
+                            .desired
+                            .insert(link.interface.clone(), cost);
                     }
                     Some(e) => {
                         warn!("apply {id}: {e}");
@@ -351,7 +386,7 @@ mod tests {
             "bird.status",
             Ok(json!({
                 "ospf": [{ "protocol": "mesh_v3", "interfaces": [
-                    { "interface": "awg_hub", "type": "ptp" }
+                    { "interface": "awg_hub", "type": "ptp", "cost": 1000 }
                 ]}],
                 "bgp": [{ "name": "peer_hub_example_com" }]
             })),
@@ -441,6 +476,48 @@ mod tests {
             })
             .await;
         assert!(always.is_none(), "an unknown always probe is dropped");
+    }
+
+    #[tokio::test]
+    async fn refresh_reapplies_a_cost_bird_drifted_from() {
+        let a = agent();
+        a.refresh().await;
+        a.bus.on(
+            "bird.set_ospf_cost",
+            Ok(json!({ "code": 0, "stdout": "ok" })),
+        );
+        let applies = || {
+            a.bus
+                .calls
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|(k, args)| k == "bird.set_ospf_cost" && args["cost"] == 20)
+                .count()
+        };
+        // Nothing desired yet: a refresh never touches BIRD on its own.
+        assert_eq!(applies(), 0);
+        a.execute(WorkCmd::ApplyCost {
+            id: "apply/1".into(),
+            link: LinkKey::new("node-0", "hub.example.com", "awg_hub"),
+            cost: 20,
+            traceparent: None,
+        })
+        .await;
+        assert_eq!(applies(), 1);
+        // BIRD still reports the static 1000 (config redeploy): re-applied.
+        a.refresh().await;
+        assert_eq!(applies(), 2);
+        assert_eq!(
+            a.metrics
+                .counters
+                .apply_cost_reapplied
+                .load(std::sync::atomic::Ordering::Relaxed),
+            1
+        );
+        // Still drifting next refresh: tried again.
+        a.refresh().await;
+        assert_eq!(applies(), 3);
     }
 
     #[tokio::test]

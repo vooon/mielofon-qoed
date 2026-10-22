@@ -33,6 +33,10 @@ pub struct Link {
     /// The OSPF neighbour's link-local address on this interface while the
     /// adjacency is up: the probe target that stays on the tunnel.
     pub peer_ll: Option<Ipv6Addr>,
+    /// The OSPF cost BIRD currently has on the interface (`None` when the
+    /// snapshot does not report it), so an applied cost that a BIRD config
+    /// redeploy reset can be noticed and re-applied.
+    pub cost: Option<u32>,
 }
 
 /// The peer's full hostname from its BGP protocol name: `peer_<hostname>`
@@ -112,6 +116,27 @@ fn is_global(a: &Ipv6Addr) -> bool {
     !is_link_local(a)
 }
 
+/// Current OSPF cost per interface of the mesh protocol, from
+/// `ospf[].interfaces[].cost`.
+pub fn interface_costs(status: &Value, cfg: &Config) -> HashMap<String, u32> {
+    let Some(ospf) = status["ospf"].as_array().and_then(|a| {
+        a.iter()
+            .find(|o| o["protocol"] == cfg.ospf_protocol.as_str())
+    }) else {
+        return HashMap::new();
+    };
+    ospf["interfaces"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|i| {
+            let iface = i["interface"].as_str()?;
+            let cost = u32::try_from(i["cost"].as_u64()?).ok()?;
+            Some((iface.to_string(), cost))
+        })
+        .collect()
+}
+
 /// Link-local address of the OSPF neighbour per interface, from the mesh
 /// protocol's `neighbors[]` rows (BIRD prints the OSPFv3 neighbour's
 /// link-local as its IP). Older rpcd-mod-bird snapshots have no rows.
@@ -163,6 +188,7 @@ pub async fn discover(bus: &impl Bus, cfg: &Config) -> Vec<Link> {
     };
 
     let neighbors = neighbor_addrs(&status, cfg);
+    let costs = interface_costs(&status, cfg);
     let mut links = Vec::new();
     for (interface, to) in select_links(&status, cfg) {
         let object = format!("network.interface.{interface}");
@@ -176,6 +202,7 @@ pub async fn discover(bus: &impl Bus, cfg: &Config) -> Vec<Link> {
         match addr {
             Some((source, target)) => links.push(Link {
                 peer_ll: neighbors.get(&interface).copied(),
+                cost: costs.get(&interface).copied(),
                 interface,
                 to,
                 source,
@@ -237,6 +264,14 @@ mod tests {
                 { "name": "peer_hub3_example_com" }
             ]
         })
+    }
+
+    #[test]
+    fn interface_costs_of_the_mesh_protocol() {
+        let c = interface_costs(&status(), &cfg());
+        assert_eq!(c.get("awg_hub1"), Some(&10));
+        assert_eq!(c.get("dummy_awg"), Some(&10));
+        assert!(!c.contains_key("eth2"), "other protocol, no cost");
     }
 
     #[test]

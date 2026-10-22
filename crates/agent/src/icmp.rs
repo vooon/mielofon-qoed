@@ -431,6 +431,7 @@ mod tests {
             source: Ipv6Addr::LOCALHOST,
             target: Ipv6Addr::LOCALHOST,
             peer_ll: None,
+            cost: None,
         };
         let p = Prober::new(Duration::from_millis(100), 60, Arc::new(Gate::default()));
         p.reconcile(std::slice::from_ref(&link));
@@ -445,6 +446,7 @@ mod tests {
         // A changed link restarts the task on the same window.
         let scoped = Link {
             peer_ll: Some(Ipv6Addr::LOCALHOST),
+            cost: None,
             ..link
         };
         p.reconcile(&[scoped]);
@@ -465,6 +467,7 @@ mod tests {
             source: Ipv6Addr::LOCALHOST,
             target: Ipv6Addr::LOCALHOST,
             peer_ll: None,
+            cost: None,
         };
         let sock = open_socket(&link).unwrap();
         let mut pkt = [0u8; 16];

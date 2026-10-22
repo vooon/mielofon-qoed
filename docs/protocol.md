@@ -184,6 +184,10 @@ POST /v1/agent/reply              // clients
   `mielofon_probe_failures_total`.
 - An `applied` reply with a `note` is a failure: the controller forgets the
   cost was sent and re-issues it after 30 s.
+- A cost applied without a `note` becomes the agent's desired cost for that
+  link: the agent re-applies it on its own whenever its periodic BIRD
+  snapshot shows the interface at a different cost (a config redeploy reset
+  it), so the controller's "already sent" memory stays true.
 - `POST /v1/quality` (same body as a probe reply minus `kind`/`id`) ingests a
   bare measurement for tooling; the fence/work/ack endpoints of the ucode
   agent are gone.

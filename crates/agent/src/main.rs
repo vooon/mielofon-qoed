@@ -31,7 +31,6 @@ use tracing::{debug, error, info, warn};
 
 /// Re-discovery cadence: tunnels and BGP sessions come up seconds apart at
 /// boot, so the first register may see a partial link set.
-const REFRESH: Duration = Duration::from_secs(30);
 const REPLY_TIMEOUT: Duration = Duration::from_secs(30);
 /// Consecutive failed long-polls after which the agent registers again: the
 /// controller may have restarted (and forgotten us) without ever answering.
@@ -157,7 +156,7 @@ impl Runtime {
 
     /// Periodic re-discovery; re-register when the link set changed.
     async fn refresher(self: Arc<Self>) {
-        let mut tick = tokio::time::interval(REFRESH);
+        let mut tick = tokio::time::interval(self.agent.cfg.refresh_interval);
         tick.tick().await;
         loop {
             tick.tick().await;
