@@ -280,7 +280,7 @@ pub fn classify_once(state: &AppState) {
 /// hub→spoke offset when a member advertises towards a non-member.
 pub fn policy_cost(cfg: &crate::config::Config, link: &LinkKey, q: Quality) -> u32 {
     let base = quality::cost_for_quality(&cfg.quality, q);
-    let hub_to_spoke = cfg.members.contains_key(&link.from) && !cfg.members.contains_key(&link.to);
+    let hub_to_spoke = cfg.is_hub(&link.from) && !cfg.is_hub(&link.to);
     if hub_to_spoke {
         base.saturating_add(cfg.classifier.hub_spoke_cost_offset)
     } else {
@@ -656,8 +656,9 @@ mod tests {
 
     #[test]
     fn hub_to_spoke_links_carry_the_transit_offset() {
-        // hub-a and hub-b are members; node-0 is a spoke. Same quality on
-        // every link: only the hub→spoke direction is pushed out of transit.
+        // hub-a is a member, hub-b a hub by topology only (no controller);
+        // node-0 is a spoke. Same quality on every link: only the
+        // hub→spoke direction is pushed out of transit.
         let mut cfg = Config {
             classifier: Classifier {
                 hysteresis_passes: 1,
@@ -667,8 +668,7 @@ mod tests {
         };
         cfg.members
             .insert("hub-a".into(), "203.0.113.1".parse().unwrap());
-        cfg.members
-            .insert("hub-b".into(), "203.0.113.2".parse().unwrap());
+        cfg.cluster.hubs = vec!["hub-a".into(), "hub-b".into()];
         let state = AppState::new(cfg);
         let hub_spoke = LinkKey::new("hub-a", "node-0", "awg_sp_node_0");
         let spoke_hub = LinkKey::new("node-0", "hub-a", "awg_hub_a");
@@ -681,6 +681,15 @@ mod tests {
         classify_once(&state);
         assert_eq!(cost(&state, &spoke_hub), Some(10), "spoke→hub: class cost");
         assert_eq!(cost(&state, &hub_hub), Some(10), "hub↔hub: class cost");
+        let hub_hub_rev = LinkKey::new("hub-b", "hub-a", "awg_int_hub_a");
+        own(&state, &[&hub_spoke, &spoke_hub, &hub_hub, &hub_hub_rev]);
+        append_dims(&state, &hub_hub_rev, now, 15.0, None);
+        classify_once(&state);
+        assert_eq!(
+            cost(&state, &hub_hub_rev),
+            Some(10),
+            "listed hub → member: class cost"
+        );
         assert_eq!(
             cost(&state, &hub_spoke),
             Some(1010),

@@ -276,7 +276,11 @@ impl<B: Bus> Agent<B> {
                 Some(AgentReply::Probe {
                     agent,
                     id,
-                    link: self.key(&l),
+                    // The controller's key, not ours: it may spell the peer
+                    // the way that node registered (a BIRD protocol name
+                    // cannot carry a hyphen), and the sample must land on
+                    // the link the controller owns.
+                    link,
                     ts: None,
                     rtt_ms: snap.rtt_ms,
                     loss_pct: snap.loss_pct,
@@ -422,6 +426,29 @@ mod tests {
             vec![LinkKey::new("node-0", "hub.example.com", "awg_hub")]
         );
         assert_eq!(req.loopback.as_deref(), Some("2001:db8:1::1"));
+    }
+
+    #[tokio::test]
+    async fn probe_reply_echoes_the_controllers_link_key() {
+        // The controller may spell the peer differently from what BIRD let
+        // us decode; its key is the one the sample must land on.
+        let a = agent();
+        a.refresh().await;
+        let key = LinkKey::new("node-0", "hub-example.com", "awg_hub");
+        let r = a
+            .execute(WorkCmd::Probe {
+                id: "always/2".into(),
+                tier: Tier::Always,
+                token: None,
+                link: key.clone(),
+                traceparent: None,
+            })
+            .await
+            .unwrap();
+        let AgentReply::Probe { link, .. } = r else {
+            panic!("expected a probe reply");
+        };
+        assert_eq!(link, key);
     }
 
     #[tokio::test]

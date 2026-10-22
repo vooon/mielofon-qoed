@@ -296,6 +296,9 @@ pub fn handle_reply(state: &AppState, reply: AgentReply) {
             note,
             traceparent,
         } => with_traceparent(traceparent.as_deref(), || {
+            // An older agent names the link after its own BIRD decoding.
+            let mut link = link;
+            link.to = state.workers.canonical_peer(&link.to);
             if let Some(note) = &note {
                 crate::api::PROBE_FAILURES.fetch_add(1, Ordering::Relaxed);
                 warn!(agent, link = %link.id(), id, "probe failed: {note}");

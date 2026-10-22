@@ -165,6 +165,11 @@ impl Default for Quality {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
 pub struct Cluster {
+    /// Hubs of the mesh: the nodes whose links towards a non-hub get the
+    /// `hub_spoke_cost_offset`. A hub need not run a controller (be a
+    /// `[members]` entry), it only needs to be one topologically. Empty
+    /// means "the members".
+    pub hubs: Vec<String>,
     pub grace_ttl_secs: u64,
     /// Interval between gossip anti-entropy pushes to peers.
     pub gossip_interval_secs: u64,
@@ -173,6 +178,7 @@ pub struct Cluster {
 impl Default for Cluster {
     fn default() -> Self {
         Cluster {
+            hubs: Vec::new(),
             grace_ttl_secs: 300,
             gossip_interval_secs: 5,
         }
@@ -258,11 +264,12 @@ pub struct Classifier {
     /// How the two directions of one tunnel (`A→B` on A, `B→A` on B) are
     /// combined before classification. See [`PairCost`].
     pub pair_cost: PairCost,
-    /// Added to the derived cost of every link a hub (a `[members]` entry)
-    /// advertises towards a non-member. Spokes must never carry transit
-    /// between hubs: with the offset a hub→spoke→hub path always loses to
-    /// any direct hub↔hub link, while the spoke still gets a finite,
-    /// quality-ranked fallback. Spoke→hub and hub↔hub links are unaffected.
+    /// Added to the derived cost of every link a hub (`[cluster] hubs`,
+    /// else the members) advertises towards a non-hub. Spokes must never
+    /// carry transit between hubs: with the offset a hub→spoke→hub path
+    /// always loses to any direct hub↔hub link, while the spoke still gets
+    /// a finite, quality-ranked fallback. Spoke→hub and hub↔hub links are
+    /// unaffected.
     pub hub_spoke_cost_offset: u32,
 }
 
@@ -367,6 +374,16 @@ pub struct Config {
 }
 
 impl Config {
+    /// Whether `name` is a hub: listed under `[cluster] hubs`, or a member
+    /// when that list is empty.
+    pub fn is_hub(&self, name: &str) -> bool {
+        if self.cluster.hubs.is_empty() {
+            self.members.contains_key(name)
+        } else {
+            self.cluster.hubs.iter().any(|h| h == name)
+        }
+    }
+
     /// Load from a TOML file.
     pub fn load(path: &str) -> anyhow::Result<Config> {
         let text = std::fs::read_to_string(path)
