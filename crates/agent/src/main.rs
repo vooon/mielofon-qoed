@@ -42,17 +42,31 @@ fn log_filter(level: &str) -> String {
     }
 }
 
-fn init_logging(level: &str) {
-    // procd forwards stderr to syslog, which adds its own timestamps.
-    let filter = tracing_subscriber::EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new(log_filter(level)));
-    tracing_subscriber::fmt()
-        .with_env_filter(filter)
-        .without_time()
-        .with_target(false)
-        .with_ansi(false)
-        .with_writer(std::io::stderr)
-        .init();
+/// Console log (stderr → syslog via procd) plus, when `otel_endpoint` is
+/// set, OTLP export of spans (and optionally the log) to the collector.
+fn init_telemetry(cfg: &Config) -> Result<mielofon_otel::TelemetryGuard> {
+    let signal = |on: bool| mielofon_otel::OTelSignalConfig {
+        enabled: Some(on),
+        ..Default::default()
+    };
+    let otel = mielofon_otel::OTelConfig {
+        enabled: Some(!cfg.otel_endpoint.is_empty()),
+        endpoint: cfg.otel_endpoint.clone(),
+        service_name: None,
+        traces: signal(cfg.otel_traces),
+        // Metrics stay on the Prometheus textfile.
+        metrics: signal(false),
+        logs: signal(cfg.otel_logs),
+    };
+    let filter = std::env::var("RUST_LOG").unwrap_or_else(|_| log_filter(&cfg.log_level));
+    mielofon_otel::install(
+        &otel,
+        &filter,
+        mielofon_otel::ConsoleFormat::Syslog,
+        "mielofon-agent",
+        env!("CARGO_PKG_VERSION"),
+    )
+    .context("telemetry")
 }
 
 pub struct Runtime {
@@ -101,7 +115,10 @@ impl Runtime {
 async fn run() -> Result<()> {
     let bus = UbusCli::default();
     let cfg = Config::load(&bus).await?;
-    init_logging(&cfg.log_level);
+    // The OTLP exporter's rustls needs a process-level provider; the QUIC
+    // client config carries its own.
+    let _ = rustls::crypto::ring::default_provider().install_default();
+    let guard = init_telemetry(&cfg)?;
     info!(
         "mielofon-agent {} starting as {} (controller endpoints: {})",
         env!("CARGO_PKG_VERSION"),
@@ -135,6 +152,8 @@ async fn run() -> Result<()> {
         _ = int.recv() => info!("SIGINT, exiting"),
     }
     rt.write_metrics();
+    // Flush pending spans before procd sees us gone.
+    guard.shutdown();
     Ok(())
 }
 

@@ -10,11 +10,14 @@ pub enum ConsoleFormat {
     /// `logfmt` style: `level=info target=... message="..."`.
     #[default]
     Logfmt,
+    /// Bare lines for a syslog-fed stderr (procd): no timestamp, no target,
+    /// no colour.
+    Syslog,
 }
 
 /// Error returned when parsing a console format name.
 #[derive(Debug, thiserror::Error)]
-#[error("unknown console log format {0:?}; expected \"json\" or \"logfmt\"")]
+#[error("unknown console log format {0:?}; expected \"json\", \"logfmt\" or \"syslog\"")]
 pub struct ParseFormatError(String);
 
 impl ConsoleFormat {
@@ -23,6 +26,7 @@ impl ConsoleFormat {
         match s.trim().to_ascii_lowercase().as_str() {
             "json" => Ok(ConsoleFormat::Json),
             "logfmt" => Ok(ConsoleFormat::Logfmt),
+            "syslog" => Ok(ConsoleFormat::Syslog),
             other => Err(ParseFormatError(other.to_string())),
         }
     }

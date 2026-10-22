@@ -47,7 +47,7 @@ fn plan_tick(state: &AppState) {
         {
             let span =
                 tracing::info_span!("agent.command", agent=%agent, tier="always", link=%link_id);
-            let traceparent = span.in_scope(crate::tracectx::current_traceparent);
+            let traceparent = span.in_scope(mielofon_otel::tracectx::current_traceparent);
             let cmd = WorkCmd::Probe {
                 id: cmd_id(),
                 tier: Tier::Always,
@@ -72,7 +72,7 @@ fn plan_tick(state: &AppState) {
         {
             if let Ok(lease) = state.fence.acquire(&agent, &link, FENCE_TTL_SECS) {
                 let span = tracing::info_span!("agent.command", agent=%agent, tier="throughput", link=%link_id);
-                let traceparent = span.in_scope(crate::tracectx::current_traceparent);
+                let traceparent = span.in_scope(mielofon_otel::tracectx::current_traceparent);
                 let cmd = WorkCmd::Probe {
                     id: cmd_id(),
                     tier: Tier::Throughput,
@@ -99,7 +99,7 @@ fn plan_tick(state: &AppState) {
         if state.workers.apply_due(&agent, &link, cost, now) {
             let span =
                 tracing::info_span!("agent.command", agent=%agent, kind="apply", link=%link_id);
-            let traceparent = span.in_scope(crate::tracectx::current_traceparent);
+            let traceparent = span.in_scope(mielofon_otel::tracectx::current_traceparent);
             let cmd = WorkCmd::ApplyCost {
                 id: cmd_id(),
                 link: link.clone(),

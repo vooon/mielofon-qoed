@@ -1,12 +1,10 @@
-//! Distributed trace correlation across the controller → agent boundary.
+//! Distributed trace correlation across the controller ↔ agent boundary.
 //!
 //! The controller stamps every dispatched command with the W3C `traceparent`
-//! of its dispatch span; the (uninstrumented, ucode) agent echoes that string
-//! back on the reply, and the controller re-parents the ingest span under the
-//! dispatch span. The result is a single trace spanning
-//! `dispatch → (agent gap) → result`, even though nothing runs inside the
-//! agent, and the wall-clock delta between the dispatch and reply spans is the
-//! measurable round-trip.
+//! of its dispatch span. The agent opens its command span under that parent
+//! (so its iperf3 legs and BIRD calls land in the same trace) and echoes the
+//! string back on the reply, under which the controller re-parents its
+//! ingest span. One trace spans `dispatch → agent.command → report`.
 
 use opentelemetry::propagation::{Extractor, Injector, TextMapPropagator};
 use opentelemetry::trace::TraceContextExt;
@@ -34,6 +32,14 @@ pub fn parent_context(traceparent: Option<&str>) -> Option<Context> {
     carrier.0.insert("traceparent".to_string(), tp.to_string());
     let cx = TraceContextPropagator::new().extract(&carrier);
     cx.span().span_context().is_valid().then_some(cx)
+}
+
+/// Parent `span` under `traceparent` when it carries a valid context; a
+/// missing or malformed one leaves the span a root (OTEL off on the sender).
+pub fn set_parent(span: &tracing::Span, traceparent: Option<&str>) {
+    if let Some(cx) = parent_context(traceparent) {
+        let _ = span.set_parent(cx);
+    }
 }
 
 /// A minimal injector/extractor carrier (single `traceparent` entry).

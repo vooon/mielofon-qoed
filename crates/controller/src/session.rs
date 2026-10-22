@@ -269,7 +269,7 @@ fn on_failure(state: &AppState, agent: &str, cmd: &WorkCmd, err: &std::io::Error
 fn with_traceparent<T>(traceparent: Option<&str>, f: impl FnOnce() -> T) -> T {
     let span = tracing::info_span!("agent.report");
     use tracing_opentelemetry::OpenTelemetrySpanExt;
-    if let Some(cx) = crate::tracectx::parent_context(traceparent) {
+    if let Some(cx) = mielofon_otel::tracectx::parent_context(traceparent) {
         let _ = span.set_parent(cx);
     }
     span.in_scope(f)

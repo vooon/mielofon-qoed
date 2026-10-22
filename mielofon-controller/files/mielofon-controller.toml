@@ -105,7 +105,8 @@ pair_cost = "directional"
 hub_spoke_cost_offset = 1000
 
 # Console logging. `level` sets the minimum tracing level emitted to the
-# console; `format` selects the console output (logfmt or JSON). Both are
+# console; `format` selects the console output (logfmt, json, or syslog for
+# a procd-fed stderr: no timestamp, target or colour). Both are
 # independent of the per-signal OTEL levels below.
 [log]
 level = "info"

@@ -8,6 +8,7 @@
 
 mod config;
 mod format;
+pub mod tracectx;
 
 pub use config::{OTelConfig, OTelSignalConfig, ParseError};
 pub use format::{ConsoleFormat, ParseFormatError};
@@ -164,6 +165,13 @@ pub fn install(
     let console_layer = match format {
         ConsoleFormat::Json => tracing_subscriber::fmt::layer().json().boxed(),
         ConsoleFormat::Logfmt => tracing_subscriber::fmt::layer().boxed(),
+        // procd forwards stderr to syslog, which adds its own timestamp and
+        // cannot show colour.
+        ConsoleFormat::Syslog => tracing_subscriber::fmt::layer()
+            .without_time()
+            .with_target(false)
+            .with_ansi(false)
+            .boxed(),
     };
     let registry = registry.with(console_layer.with_filter(console_filter));
 

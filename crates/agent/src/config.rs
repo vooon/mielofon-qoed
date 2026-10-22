@@ -59,6 +59,12 @@ pub struct Config {
     pub refresh_interval: Duration,
     /// Syslog-style level: debug, info, notice, warning, err.
     pub log_level: String,
+    /// OTLP/HTTP collector (`http(s)://host:port`); empty disables OTEL.
+    pub otel_endpoint: String,
+    /// Export spans (one per command, with its iperf3 legs) to the collector.
+    pub otel_traces: bool,
+    /// Also forward the log to the collector (syslog usually has it already).
+    pub otel_logs: bool,
 }
 
 fn opt<'a>(sec: &'a Map<String, Value>, name: &str) -> Option<&'a str> {
@@ -70,6 +76,15 @@ fn opt<'a>(sec: &'a Map<String, Value>, name: &str) -> Option<&'a str> {
 
 fn num<T: std::str::FromStr>(sec: &Map<String, Value>, name: &str, def: T) -> T {
     opt(sec, name).and_then(|v| v.parse().ok()).unwrap_or(def)
+}
+
+/// A UCI boolean: `1`/`0`, `on`/`off`, `true`/`false`, `yes`/`no`.
+fn flag(sec: &Map<String, Value>, name: &str, def: bool) -> bool {
+    match opt(sec, name).map(str::to_ascii_lowercase).as_deref() {
+        Some("1" | "on" | "true" | "yes" | "enabled") => true,
+        Some("0" | "off" | "false" | "no" | "disabled") => false,
+        _ => def,
+    }
 }
 
 /// A UCI `list` option: an array in `ubus call uci get`, or a single string
@@ -188,6 +203,9 @@ impl Config {
             ),
             refresh_interval: Duration::from_secs(num(main, "refresh_interval", 60_u64).max(10)),
             log_level: opt(main, "log_level").unwrap_or("notice").to_string(),
+            otel_endpoint: opt(main, "otel_endpoint").unwrap_or("").to_string(),
+            otel_traces: flag(main, "otel_traces", true),
+            otel_logs: flag(main, "otel_logs", false),
         })
     }
 
@@ -299,6 +317,20 @@ mod tests {
         v["main"]["iface_prefix"] = json!("awg_int_");
         let c = Config::from_uci(&v, "node-0").unwrap();
         assert_eq!(c.ifaces, vec!["awg_int_*".to_string()], "legacy prefix");
+    }
+
+    #[test]
+    fn otel_is_off_without_an_endpoint_and_flags_parse() {
+        let c = Config::from_uci(&values(), "node-0").unwrap();
+        assert_eq!(c.otel_endpoint, "");
+        assert!(c.otel_traces && !c.otel_logs, "defaults");
+        let mut v = values();
+        v["main"]["otel_endpoint"] = json!("https://collector.example:4318");
+        v["main"]["otel_logs"] = json!("on");
+        v["main"]["otel_traces"] = json!("0");
+        let c = Config::from_uci(&v, "node-0").unwrap();
+        assert_eq!(c.otel_endpoint, "https://collector.example:4318");
+        assert!(!c.otel_traces && c.otel_logs);
     }
 
     #[test]
