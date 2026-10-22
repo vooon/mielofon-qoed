@@ -5,8 +5,7 @@
 # publish real hostnames/IPs/ASNs.
 
 [node]
-name = "hub-a"           # placeholder node name
-advertise = "203.0.113.1" # RFC 5737 documentation address
+name = "hub-a"           # placeholder node name; peers reach it via [members]
 
 [cluster]
 grace_ttl_secs = 300
@@ -101,9 +100,12 @@ format = "logfmt"
 
 # Time-series history (per-link raw samples + 60s aggregates, replicated via
 # gossip). `path` enables the durable embedded redb file; an empty path keeps
-# history in memory only (lost on restart).
+# history in memory only (lost on restart). Keep it outside /etc/mielofon,
+# which is configuration (conffiles, sysupgrade backups). On OpenWrt /var is
+# tmpfs: point it at persistent storage (e.g. a data partition) to keep
+# history across reboots.
 [ts]
-path = "/etc/mielofon/tsdb.redb"
+path = "/var/lib/mielofon/tsdb.redb"
 raw_retention_secs = 7200
 agg_retention_secs = 86400
 

@@ -21,7 +21,8 @@ The repo is both the mielofon source **and** an OpenWrt feed. In `feeds.conf`:
 src-git mielofon https://github.com/vooon/mielofon-qoed.git
 ```
 
-- `crates/` — Rust workspace source (`controller`, `mielofon-otel`).
+- `crates/` — Rust workspace source (`controller`, `agent`, `mielofon-proto`,
+  `mielofon-otel`).
 - `mielofon-controller/` and `mielofon-agent/` — feed `Package/` definitions.
 - OpenWrt's feed scanner ignores non-package directories (e.g. `crates/`).
 
@@ -61,7 +62,10 @@ run inside each controller, decoupling measurement from decision:
 2. **Policy classifier**: a loop re-derives each link's quality class and OSPF
    cost from a *window* of stored samples (per-dimension freshness, with the
    sparse throughput dimension carried for a longer window), and writes the
-   derived record to the LWW KV.
+   derived record to the LWW KV. A member classifies only the links of its
+   own registered agents (the reverse half of a tunnel owned elsewhere is
+   available through the replicated samples), so each derived record has a
+   single writer cluster-wide.
 3. **Scheduler** issues per-link always-on probe work on a cadence, and gated
    throughput probe work only when the link's fence lease is free (acquiring
    the lease itself before dispatch).
@@ -98,7 +102,10 @@ command endpoint, answers each command with raw measurements (echoing the job
 id), and applies the OSPF cost it is told to apply. It holds no scheduling,
 policy, or classification logic, and never acquires the fence itself. Spokes
 sit behind NAT, so agents pull work from the controller rather than the
-controller connecting out to them.
+controller connecting out to them. A controller that does not know the agent
+(restart, eviction after 300 s without a poll) answers the poll with `404`
+and the agent registers again; applied costs live in BIRD's runtime config,
+so every registration re-seeds them.
 
 The agent package (`mielofon-agent/`) installs `/usr/sbin/mielofon-agent`, a
 procd init and a UCI config (`/etc/config/mielofon-agent`) that carries the
@@ -126,16 +133,17 @@ mTLS identity (`/etc/mielofon/agent.{key,cer}` + `ca.pem`) and a single
 ### Probe fence (soft lease)
 
 The fence is owned entirely by the controller scheduler. A lease has a TTL and
-token; only one intrusive throughput probe is scheduled cluster-wide at a time
-and the controller releases the lease when the corresponding reply arrives.
-Because cluster consistency is eventual, a rare overlap is tolerated and
-reported as `conflict` rather than degraded. See `protocol.md`.
+token, is keyed by directed link, and the controller releases it when the
+corresponding reply arrives (or at once, when the command could not be
+queued). The agent itself runs one throughput test at a time per node and
+skips the test while the link carries traffic above `quiet_max_mbps`.
 
-> Known limitation: today the fence lives per controller process (in-memory).
-> In a multi-node cluster each node schedules independently; as with the rest of
-> the fabric this tolerates a rare overlapping throughput probe (reported
-> `conflict`). Moving the lease into the replicated gossip store so the fence is
-> truly cluster-global is a future step.
+> Known limitation: the fence lives per controller process (in-memory) and
+> per directed link. The two halves of a tunnel, owned by agents registered
+> at different members, can therefore test at the same time; the utilisation
+> gate catches most overlaps, the rest are tolerated (eventual consistency)
+> and reported as `conflict`. Moving the lease into the replicated gossip
+> store so the fence is truly cluster-global is a future step.
 
 ### Quality classification
 
@@ -189,6 +197,7 @@ See `crates/mielofon-otel` for the shared telemetry setup.
 ```
 crates/controller/src/
   main.rs        entrypoint: three listeners, background gossip + prune
+  clock.rs       wall-clock helper
   config.rs      TOML config (node, members, listeners, tls, quality, otel)
   tls.rs         rustls mTLS (server + client) built from a pinned CA
   state.rs       shared AppState
@@ -197,6 +206,8 @@ crates/controller/src/
   kv.rs          LWW per-link store (holds *derived* policy records)
   classifier.rs  background loop: window -> quality/cost -> derived KV
   model.rs       Link, QualityRecord, Quality, ProbeState
+  scheduler.rs   per-tick probe/apply dispatch, agent eviction
+  worker.rs      agent registry + per-agent work queues
   fence.rs       soft-lease probe mutex
   quality.rs     classification + OSPF cost derivation (window-aware)
   api.rs         axum handlers and routers for the three listeners

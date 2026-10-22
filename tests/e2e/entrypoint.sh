@@ -65,11 +65,10 @@ fi
 	--key "${WORK_DIR}/node.key" \
 	--crt "${WORK_DIR}/node.crt"
 
-# 4. Render the TOML: advertise our pod IP, list all peers.
+# 4. Render the TOML: our node name, list all peers.
 {
 	echo "[node]"
 	echo "name = \"${NODE_NAME}\""
-	echo "advertise = \"${POD_IP}\""
 	echo
 	echo "[cluster]"
 	echo "grace_ttl_secs = 60"

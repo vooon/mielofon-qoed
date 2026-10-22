@@ -10,15 +10,19 @@ use crate::icmp::{Gate, Prober};
 use crate::metrics::{Counters, LastThroughput, Metrics};
 use crate::throughput::Throughput;
 use mielofon_proto::{AgentReply, LinkKey, ProbeState, RegisterReq, Tier, WorkCmd};
+use std::collections::HashMap;
 use std::net::Ipv6Addr;
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tracing::{info, warn};
 
 #[derive(Default)]
 struct NodeState {
     links: Vec<Link>,
     loopback: Option<Ipv6Addr>,
+    /// Interface byte counter at the previous always probe, for the
+    /// utilisation reported with the next one.
+    counters: HashMap<String, (u64, Instant)>,
 }
 
 pub struct Agent<B> {
@@ -30,6 +34,9 @@ pub struct Agent<B> {
     /// Delay between `set_ospf_cost` retries while BIRD is reconfiguring.
     pub cost_retry: Duration,
     state: Mutex<NodeState>,
+    /// `set_ospf_cost` reconfigures BIRD under an rpcd-side flock; applying
+    /// several costs at once would just make them fail "busy" on each other.
+    apply_lock: tokio::sync::Mutex<()>,
 }
 
 fn unix_now() -> u64 {
@@ -57,8 +64,24 @@ impl<B: Bus> Agent<B> {
             metrics: Metrics::default(),
             cost_retry: Duration::from_secs(2),
             state: Mutex::new(NodeState::default()),
+            apply_lock: tokio::sync::Mutex::new(()),
             cfg,
             bus,
+        }
+    }
+
+    /// Link utilisation (Mbps, rx+tx) since the previous call for `iface`;
+    /// 0.0 on the first call or when the counters cannot be read.
+    fn util_since_last(&self, iface: &str) -> f64 {
+        let Ok(bytes) = crate::throughput::read_bytes(iface) else {
+            return 0.0;
+        };
+        let now = Instant::now();
+        let mut st = self.state.lock().expect("agent state");
+        let prev = st.counters.insert(iface.to_string(), (bytes, now));
+        match prev {
+            Some((before, at)) => crate::throughput::rate_mbps(before, bytes, now - at),
+            None => 0.0,
         }
     }
 
@@ -68,6 +91,8 @@ impl<B: Bus> Agent<B> {
         let loopback = discover::loopback(&self.bus, &self.cfg).await;
         self.prober.reconcile(&links);
         let mut st = self.state.lock().expect("agent state");
+        st.counters
+            .retain(|iface, _| links.iter().any(|l| &l.interface == iface));
         if st.links != links {
             info!(
                 "links: {}",
@@ -122,7 +147,8 @@ impl<B: Bus> Agent<B> {
             } => {
                 let Some(l) = self.find(&link.interface) else {
                     Counters::inc(&c.commands_errored);
-                    warn!("probe {id}: unknown interface {}", link.interface);
+                    let note = format!("unknown interface {}", link.interface);
+                    warn!("probe {id}: {note}");
                     // A throughput command holds the controller's fence: answer
                     // busy so the lease is released now, not at its TTL.
                     return (tier == Tier::Throughput).then_some(AgentReply::Probe {
@@ -137,17 +163,18 @@ impl<B: Bus> Agent<B> {
                         util_mbps: 0.0,
                         state: ProbeState::Busy,
                         token,
+                        note: Some(note),
                         traceparent,
                     });
                 };
 
-                let (util, tcp, state, token) = if tier == Tier::Throughput {
+                let (util, tcp, state, token, note) = if tier == Tier::Throughput {
                     Counters::inc(&c.probe_iperf);
                     let out = self.throughput.run(&l).await;
                     if out.busy {
                         Counters::inc(&c.probe_busy);
                     }
-                    if out.tcp_mbps.is_none() && out.util_mbps <= self.cfg.quiet_max_mbps {
+                    if out.error.is_some() {
                         Counters::inc(&c.probe_errors_iperf);
                     }
                     self.metrics
@@ -168,10 +195,20 @@ impl<B: Bus> Agent<B> {
                     } else {
                         ProbeState::Quiet
                     };
-                    (out.util_mbps, out.tcp_mbps, state, token)
+                    (out.util_mbps, out.tcp_mbps, state, token, out.error)
                 } else {
                     Counters::inc(&c.probe_ping);
-                    (0.0, None, ProbeState::Quiet, None)
+                    // Real traffic since the last probe: a link in use is
+                    // reported busy on every tier, so the controller's
+                    // busy-hold does not depend on the 5-minute throughput
+                    // cadence.
+                    let util = self.util_since_last(&l.interface);
+                    let state = if util > self.cfg.quiet_max_mbps {
+                        ProbeState::Busy
+                    } else {
+                        ProbeState::Quiet
+                    };
+                    (util, None, state, None, None)
                 };
 
                 // Always-tier dims come from the live ping window — for a
@@ -197,6 +234,7 @@ impl<B: Bus> Agent<B> {
                     util_mbps: util,
                     state,
                     token,
+                    note,
                     traceparent,
                 })
             }
@@ -210,6 +248,7 @@ impl<B: Bus> Agent<B> {
                 let note = if self.find(&link.interface).is_none() {
                     Some(format!("unknown interface {}", link.interface))
                 } else {
+                    let _serial = self.apply_lock.lock().await;
                     bird::set_ospf_cost(&self.bus, &link.interface, cost, self.cost_retry)
                         .await
                         .err()

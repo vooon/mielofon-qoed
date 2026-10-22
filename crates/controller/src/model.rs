@@ -1,14 +1,7 @@
 //! Shared value types: links, quality records, probe state.
 
+use crate::clock::now_secs;
 use serde::{Deserialize, Serialize};
-use std::time::{SystemTime, UNIX_EPOCH};
-
-fn now_secs() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs()
-}
 
 /// Wire types shared with the agent.
 pub use mielofon_proto::{LinkKey, ProbeState};

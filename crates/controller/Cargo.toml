@@ -16,8 +16,6 @@ mielofon-proto = { workspace = true }
 tokio = { workspace = true }
 axum = { workspace = true }
 axum-server = { workspace = true }
-tower = { workspace = true }
-http = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 toml = { workspace = true }
@@ -25,8 +23,6 @@ tracing = { workspace = true }
 tracing-opentelemetry = { workspace = true }
 opentelemetry = { workspace = true }
 opentelemetry_sdk = { workspace = true }
-prometheus = { workspace = true }
-thiserror = { workspace = true }
 anyhow = { workspace = true }
 uuid = { workspace = true }
 redb = { workspace = true }
@@ -43,6 +39,7 @@ workspace = true
 workspace = true
 
 [dev-dependencies]
+tower = { workspace = true }
 tokio = { workspace = true, features = ["full"] }
 http-body-util = "0.1"
 axum = { workspace = true, features = ["http1", "tokio"] }

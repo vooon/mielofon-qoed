@@ -54,6 +54,21 @@ pub fn tls_config(cacert: &str, cert: &str, key: &str) -> Result<ClientConfig> {
         .context("client identity")
 }
 
+/// A non-2xx answer from the controller. Callers that care about the status
+/// (the long-poll's 404 = "register first") downcast to it.
+#[derive(Debug)]
+pub struct HttpError {
+    pub status: u16,
+}
+
+impl std::fmt::Display for HttpError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "HTTP {}", self.status)
+    }
+}
+
+impl std::error::Error for HttpError {}
+
 pub struct Controller {
     base: String,
     http: Client<HttpsConnector<HttpConnector>, Full<Bytes>>,
@@ -104,7 +119,10 @@ impl Controller {
             .map_err(|_| anyhow!("POST {path}: timed out"))?
             .with_context(|| format!("POST {path}"))?;
         if !status.is_success() {
-            bail!("POST {path}: HTTP {status}");
+            return Err(HttpError {
+                status: status.as_u16(),
+            })
+            .with_context(|| format!("POST {path}"));
         }
         serde_json::from_slice(&bytes).with_context(|| format!("POST {path}: decode reply"))
     }

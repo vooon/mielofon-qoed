@@ -5,11 +5,10 @@
 //! over. Because cluster consistency is eventual, a rare overlap is tolerated
 //! and reported by the agent as `conflict`.
 
-use crate::model::ProbeState;
+use crate::clock::now_secs;
 use std::collections::hash_map::Entry;
 use std::collections::HashMap;
 use std::sync::Mutex;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct Lease {
@@ -84,11 +83,6 @@ impl Lease {
     pub fn expired(&self, now: u64) -> bool {
         now.saturating_sub(self.issued_at) >= self.ttl_secs
     }
-
-    /// What the agent should report if it overlaps an existing lease.
-    pub fn overlap_state(&self) -> ProbeState {
-        ProbeState::Conflict
-    }
 }
 
 fn new_lease(agent: &str, link: &str, ttl_secs: u64, now: u64) -> Lease {
@@ -99,13 +93,6 @@ fn new_lease(agent: &str, link: &str, ttl_secs: u64, now: u64) -> Lease {
         issued_at: now,
         ttl_secs,
     }
-}
-
-fn now_secs() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs()
 }
 
 /// Fresh unique token for a newly acquired lease.

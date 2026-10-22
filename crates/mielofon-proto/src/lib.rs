@@ -149,6 +149,10 @@ pub enum AgentReply {
         /// Fence token echoed from a throughput command.
         #[serde(default)]
         token: Option<String>,
+        /// Why the probe produced no measurement (e.g. iperf3 could not reach
+        /// the peer). The dimensions stay `null`; this is for the operator.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        note: Option<String>,
         /// Echo of the dispatch span's W3C `traceparent`.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         traceparent: Option<String>,
@@ -271,10 +275,12 @@ mod tests {
             util_mbps: 0.0,
             state: ProbeState::Quiet,
             token: None,
+            note: None,
             traceparent: None,
         };
         let js = serde_json::to_value(&r).unwrap();
         assert_eq!(js["kind"], "probe");
+        assert!(js.get("note").is_none());
         assert!(js["rtt_ms"].is_null());
         assert_eq!(js["loss_pct"], 0.0);
     }

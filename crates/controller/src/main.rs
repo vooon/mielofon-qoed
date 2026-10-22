@@ -1,8 +1,9 @@
 //! Mielofon controller entrypoint. Runs three listeners:
 //!   members (9551, mTLS) — cluster gossip
-//!   clients (9552, mTLS) — agents (quality reports + fence)
+//!   clients (9552, mTLS) — agents (commands, replies, measurements)
 //!   admin  (9553, loopback) — dashboard, /metrics, /healthz, /readyz, reads
 
+use anyhow::Context;
 use axum_server::tls_rustls::RustlsConfig;
 use std::net::TcpListener;
 use std::sync::Arc;
@@ -59,7 +60,7 @@ async fn run_daemon(path: &str) -> anyhow::Result<()> {
     let _ =
         rustls::crypto::CryptoProvider::install_default(rustls::crypto::ring::default_provider());
 
-    let _guard = mielofon_otel::install(
+    let guard = mielofon_otel::install(
         &cfg.otel,
         &cfg.log.level,
         cfg.log.format.parse().map_err(anyhow::Error::from)?,
@@ -75,24 +76,29 @@ async fn run_daemon(path: &str) -> anyhow::Result<()> {
     let state = AppState::new(cfg.clone());
     state.set_ready(false);
 
+    // Bind every listener before the background loops start, so a port clash
+    // or a bad bind address fails the start instead of a half-running daemon.
+    let admin_bind = state.cfg.listeners.admin();
+    let admin_listener = bind(admin_bind, "admin")?;
+    let cluster_listener = bind(state.cfg.listeners.cluster(), "cluster")?;
+    let client_listener = bind(state.cfg.listeners.client(), "client")?;
+
     // Background: gossip anti-entropy pushes + KV expiry pruning.
-    let gossip_state = state.clone();
-    let gossip_client = client_tls.clone();
     tokio::spawn(mielofon_controller::gossip::gossip_loop(
-        gossip_state,
-        gossip_client,
+        state.clone(),
+        client_tls.clone(),
     ));
 
     // Probe/policy scheduler — the controller is the mesh decision-maker and
     // drives registered agents through their work queues.
-    let sched_state = state.clone();
-    tokio::spawn(mielofon_controller::scheduler::scheduler_loop(sched_state));
+    tokio::spawn(mielofon_controller::scheduler::scheduler_loop(
+        state.clone(),
+    ));
 
     // Policy classifier — derives quality/cost from a window of stored samples
     // (decoupled from measurement ingest).
-    let class_state = state.clone();
     tokio::spawn(mielofon_controller::classifier::classifier_loop(
-        class_state,
+        state.clone(),
     ));
 
     let prune_state = state.clone();
@@ -101,51 +107,37 @@ async fn run_daemon(path: &str) -> anyhow::Result<()> {
         let mut tick = tokio::time::interval(std::time::Duration::from_secs(grace / 2));
         loop {
             tick.tick().await;
-            let now = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_secs();
-            prune_state.kv.prune(now, grace);
+            prune_state
+                .kv
+                .prune(mielofon_controller::clock::now_secs(), grace);
         }
     });
 
     // Time-series durability + retention (drains in-memory samples/buckets into
     // the redb file when persisting, and bounds the hot rings).
-    let tsdb_state = state.clone();
-    tokio::spawn(mielofon_controller::tsdb::flush_loop(
-        tsdb_state.tsdb.clone(),
-    ));
+    tokio::spawn(mielofon_controller::tsdb::flush_loop(state.tsdb.clone()));
 
-    // Bind admin (plain HTTP on loopback) up front so a port clash is caught.
-    let admin_bind = state.cfg.listeners.admin();
-    let admin_listener = TcpListener::bind(admin_bind)
-        .map_err(|e| anyhow::anyhow!("bind admin {admin_bind}: {e}"))?;
-    admin_listener
-        .set_nonblocking(true)
-        .map_err(|e| anyhow::anyhow!("set admin nonblocking: {e}"))?;
     let admin_srv = axum_server::from_tcp(admin_listener)
-        .map_err(|e| anyhow::anyhow!("admin server init: {e}"))?
+        .context("admin server init")?
         .serve(
             api::admin_router()
                 .with_state(state.clone())
                 .into_make_service(),
         );
-    let admin_handle = tokio::spawn(async move {
-        let _ = admin_srv.await;
-    });
-
-    // Bind cluster + client (mTLS).
+    let admin_handle = tokio::spawn(async move { admin_srv.await.context("admin listener") });
     let cluster_handle = tokio::spawn(serve_mtls(
         state.clone(),
         api::cluster_router(),
         server_tls.clone(),
-        state.cfg.listeners.cluster(),
+        cluster_listener,
+        "cluster",
     ));
     let client_handle = tokio::spawn(serve_mtls(
         state.clone(),
         api::client_router(),
-        server_tls.clone(),
-        state.cfg.listeners.client(),
+        server_tls,
+        client_listener,
+        "client",
     ));
 
     state.set_ready(true);
@@ -155,45 +147,74 @@ async fn run_daemon(path: &str) -> anyhow::Result<()> {
         "mielofon-controller up and ready"
     );
 
-    tokio::select! {
-        _ = admin_handle => {}
-        _ = cluster_handle => {}
-        _ = client_handle => {}
-        _ = tokio::signal::ctrl_c() => {
+    // A listener task ending is a failure (they never return on their own);
+    // a stop signal is a clean shutdown.
+    let result = tokio::select! {
+        r = admin_handle => listener_exit("admin", r),
+        r = cluster_handle => listener_exit("cluster", r),
+        r = client_handle => listener_exit("client", r),
+        _ = shutdown_signal() => {
             info!("shutdown signal received");
+            Ok(())
         }
-    }
+    };
 
     state.set_ready(false);
-    _guard.shutdown();
-    Ok(())
+    // procd stops us with SIGTERM: persist what the 30 s flush loop has not
+    // written yet and drain the OTEL exporters before exiting.
+    state.tsdb.flush();
+    guard.shutdown();
+    result
+}
+
+/// Resolves on SIGTERM (procd/systemd stop) or SIGINT (console).
+async fn shutdown_signal() {
+    use tokio::signal::unix::{signal, SignalKind};
+    let mut term = match signal(SignalKind::terminate()) {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::warn!("SIGTERM handler: {e}; only SIGINT stops the daemon");
+            let _ = tokio::signal::ctrl_c().await;
+            return;
+        }
+    };
+    tokio::select! {
+        _ = tokio::signal::ctrl_c() => {}
+        _ = term.recv() => {}
+    }
+}
+
+fn listener_exit(
+    name: &str,
+    joined: Result<anyhow::Result<()>, tokio::task::JoinError>,
+) -> anyhow::Result<()> {
+    match joined {
+        Ok(Ok(())) => anyhow::bail!("{name} listener stopped unexpectedly"),
+        Ok(Err(e)) => Err(e.context(format!("{name} listener"))),
+        Err(e) => anyhow::bail!("{name} listener task: {e}"),
+    }
+}
+
+fn bind(addr: std::net::SocketAddr, name: &str) -> anyhow::Result<TcpListener> {
+    let listener = TcpListener::bind(addr).with_context(|| format!("bind {name} {addr}"))?;
+    listener
+        .set_nonblocking(true)
+        .with_context(|| format!("set {name} listener nonblocking"))?;
+    Ok(listener)
 }
 
 async fn serve_mtls(
     state: AppState,
     router: axum::Router<AppState>,
     tls: Arc<rustls::ServerConfig>,
-    addr: std::net::SocketAddr,
-) {
-    let listener = match TcpListener::bind(addr) {
-        Ok(l) => l,
-        Err(e) => {
-            info!(%addr, "mtls listener bind failed: {e}");
-            return;
-        }
-    };
-    if let Err(e) = listener.set_nonblocking(true) {
-        info!(%addr, "mtls listener nonblocking failed: {e}");
-        return;
-    }
+    listener: TcpListener,
+    name: &'static str,
+) -> anyhow::Result<()> {
     let cfg = RustlsConfig::from_config(tls);
-    let server = match axum_server::from_tcp_rustls(listener, cfg) {
-        Ok(s) => s,
-        Err(e) => {
-            info!(%addr, "mtls server init failed: {e}");
-            return;
-        }
-    };
-    let server = server.serve(router.with_state(state).into_make_service());
-    let _ = server.await;
+    let server = axum_server::from_tcp_rustls(listener, cfg)
+        .with_context(|| format!("{name} mTLS server init"))?;
+    server
+        .serve(router.with_state(state).into_make_service())
+        .await
+        .with_context(|| format!("{name} mTLS listener"))
 }

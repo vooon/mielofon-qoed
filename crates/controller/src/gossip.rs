@@ -2,10 +2,13 @@
 //! and accepts full-view exchanges. LWW merge means last-writer-wins; the
 //! store tolerates eventual convergence (no consensus required).
 //!
-//! Alongside the KV, each exchange carries the node's new time-series samples
-//! (`ts_samples`, a bounded delta since the per-peer watermark). Samples are
-//! idempotent on the receiver (per-link timestamps are monotonic), so resends
-//! after a dropped round are harmless.
+//! Alongside the KV, each push carries the node's new time-series samples
+//! (`ts_samples`, a bounded delta since the per-peer watermark). Samples
+//! travel only on the push path, and the watermark advances only once the
+//! peer has acknowledged the round, so a dropped round is simply re-sent.
+//! Samples are idempotent on the receiver (per-link timestamps are
+//! monotonic), so resends are harmless. The exchange response carries the
+//! responder's KV view, which the pusher merges as well.
 
 use crate::model::{LinkKey, QualityRecord};
 use crate::state::AppState;
@@ -15,7 +18,12 @@ use axum::http::StatusCode;
 use axum::Json;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
+use std::time::Duration;
 use tracing::{info, warn};
+
+/// Bound on one push (connect + handshake + exchange), so a black-holed
+/// member never stalls the round for the other members.
+const PUSH_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Anti-entropy exchange request: the sender's full KV view + its fresh
 /// time-series samples.
@@ -27,7 +35,9 @@ pub struct ExchangeReq {
     pub ts_samples: Vec<(LinkKey, RawSample)>,
 }
 
-#[derive(Debug, Serialize)]
+/// The responder's KV view. `ts_samples` is kept for peers running an older
+/// release that still answers with samples; this node never fills it.
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExchangeResp {
     pub node: String,
     pub records: Vec<(LinkKey, QualityRecord)>,
@@ -44,20 +54,15 @@ pub async fn exchange(
     if !req.ts_samples.is_empty() {
         state.tsdb.merge_delta(&req.ts_samples);
     }
-    // Inbound push proves round-trip reachability to this peer as well.
-    state.peers.mark_ok(&req.node, 0);
+    // Inbound push proves reachability from this peer (not a round-trip we
+    // timed, so the measured rtt from our own pushes is kept).
+    state.peers.mark_seen(&req.node);
     trace_gossip(&req.node, req.records.len());
 
-    // Reply with our KV view + our fresh time-series delta for this peer.
-    let (ts_samples, last) = take_for_peer(&state, &req.node);
-    if !ts_samples.is_empty() {
-        state.tsdb.note_sent(&req.node, last);
-    }
-    let view = state.kv.all();
     Ok(Json(ExchangeResp {
         node: state.cfg.node.name.clone(),
-        records: view,
-        ts_samples,
+        records: state.kv.all(),
+        ts_samples: Vec::new(),
     }))
 }
 
@@ -70,76 +75,87 @@ fn take_for_peer(state: &AppState, peer: &str) -> (Vec<(LinkKey, RawSample)>, u6
     (samples, last)
 }
 
-/// Serialize the current KV view to bytes (for the outgoing gossip push).
-pub fn encode_view(state: &AppState) -> Vec<u8> {
-    let resp = ExchangeResp {
-        node: state.cfg.node.name.clone(),
-        records: state.kv.all(),
-        ts_samples: Vec::new(),
-    };
-    serde_json::to_vec(&resp).unwrap_or_default()
-}
-
-/// Push our view to all cluster members over their members listener.
+/// Push our view to all cluster members over their members listener. Members
+/// are pushed concurrently; each push is bounded by `PUSH_TIMEOUT`.
 pub async fn gossip_loop(state: AppState, client: Arc<rustls::ClientConfig>) {
     let interval = state.cfg.cluster.gossip_interval_secs.max(1);
-    let mut tick = tokio::time::interval(std::time::Duration::from_secs(interval));
+    let mut tick = tokio::time::interval(Duration::from_secs(interval));
     loop {
         tick.tick().await;
-        let MyView { node, records } = snapshot(&state);
+        let records = Arc::new(state.kv.all());
+        let mut rounds = Vec::new();
         for (name, addr) in &state.cfg.members {
             if name == &state.cfg.node.name {
                 continue;
             }
-            let (ts_samples, last) = take_for_peer(&state, name);
-            let req = ExchangeReq {
-                node: node.clone(),
-                records: records.clone(),
-                ts_samples,
-            };
-            let body = match serde_json::to_vec(&req) {
-                Ok(b) => b,
-                Err(_) => continue,
-            };
-            let url_path = "/v1/gossip/exchange".to_string();
-            let started = std::time::Instant::now();
-            match crate::remote::post(
-                *addr,
-                state.cfg.listeners.cluster_port,
+            rounds.push(tokio::spawn(push_one(
+                state.clone(),
                 client.clone(),
-                &url_path,
-                &body,
-            )
-            .await
-            {
-                Ok(()) => {
-                    // The round succeeded: this peer has the samples.
-                    state.tsdb.note_sent(name, last);
-                    state
-                        .peers
-                        .mark_ok(name, started.elapsed().as_millis() as u64);
-                }
-                // Tolerate a flapping fabric: the next interval retries (the
-                // watermark is untouched, so everything is re-sent).
-                Err(e) => warn!("gossip push to {name}: {e}"),
-            }
+                name.clone(),
+                *addr,
+                records.clone(),
+            )));
+        }
+        for r in rounds {
+            let _ = r.await;
         }
     }
 }
 
-struct MyView {
-    node: String,
-    records: Vec<(LinkKey, QualityRecord)>,
-}
-
-fn snapshot(state: &AppState) -> MyView {
-    MyView {
+async fn push_one(
+    state: AppState,
+    client: Arc<rustls::ClientConfig>,
+    name: String,
+    addr: std::net::IpAddr,
+    records: Arc<Vec<(LinkKey, QualityRecord)>>,
+) {
+    let (ts_samples, last) = take_for_peer(&state, &name);
+    let req = ExchangeReq {
         node: state.cfg.node.name.clone(),
-        records: state.kv.all(),
+        records: records.as_ref().clone(),
+        ts_samples,
+    };
+    let body = match serde_json::to_vec(&req) {
+        Ok(b) => b,
+        Err(e) => {
+            warn!("gossip encode for {name}: {e}");
+            return;
+        }
+    };
+    let started = std::time::Instant::now();
+    let resp = crate::remote::post(
+        addr,
+        state.cfg.listeners.cluster_port,
+        client,
+        "/v1/gossip/exchange",
+        &body,
+        PUSH_TIMEOUT,
+    )
+    .await;
+    match resp {
+        Ok(bytes) => {
+            // The round succeeded: this peer has the samples.
+            state.tsdb.note_sent(&name, last);
+            state
+                .peers
+                .mark_ok(&name, started.elapsed().as_millis() as u64);
+            match serde_json::from_slice::<ExchangeResp>(&bytes) {
+                Ok(view) => {
+                    state.kv.merge(&view.records);
+                    if !view.ts_samples.is_empty() {
+                        state.tsdb.merge_delta(&view.ts_samples);
+                    }
+                }
+                Err(e) => warn!("gossip reply from {name}: {e}"),
+            }
+        }
+        // Tolerate a flapping fabric: the next interval retries (the
+        // watermark is untouched, so everything is re-sent).
+        Err(e) => warn!("gossip push to {name}: {e:#}"),
     }
 }
 
-/// Record a gossip ping/trace for observability (placeholder hook).
+/// Record a gossip exchange for observability.
 pub fn trace_gossip(node: &str, n: usize) {
     info!(target: "mielofon::gossip", peer = node, records = n, "anti-entropy exchange");
 }

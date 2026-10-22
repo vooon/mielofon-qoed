@@ -57,7 +57,7 @@ This is a **PUBLIC** repository describing software for a **private** production
 ## Commands
 - Build controller: `cargo build --package mielofon-controller` (native)
 - Static CI artifact: `cargo build --release --package mielofon-controller --target x86_64-unknown-linux-musl`
-- Verify (Rust): `cargo fmt --all -- --check`, `cargo clippy --all-targets -- -D warnings`, `cargo test --workspace`
+- Verify (Rust): `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo test --workspace`
 - Agent raw-socket tests (need CAP_NET_RAW; ignored by default): build with
   `cargo test -p mielofon-agent --no-run`, then
   `unshare -rn sh -c 'ip link set lo up && <test-binary> --ignored icmp::'`

@@ -22,7 +22,6 @@ mielofon-proto = { path = "crates/mielofon-proto" }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "net", "time", "sync"] }
 axum = { version = "0.8", features = ["http1", "tokio"] }
 tower = { version = "0.5", features = ["util"] }
-http = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 toml = "1.1"
@@ -38,9 +37,6 @@ axum-server = { version = "0.8", features = ["tls-rustls"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 
-# Prometheus metrics
-prometheus = "0.14"
-
 # OpenTelemetry (OTLP/HTTP only, gRPC-free)
 opentelemetry = { version = "0.33", default-features = false, features = ["trace", "metrics", "logs", "internal-logs"] }
 opentelemetry_sdk = { version = "0.33", features = ["trace", "metrics", "logs", "rt-tokio"] }
@@ -53,7 +49,7 @@ opentelemetry-appender-tracing = "0.33"
 tracing-opentelemetry = "0.34"
 opentelemetry-semantic-conventions = "0.32"
 
-# Error / libc
+# Errors
 thiserror = "2"
 anyhow = "1"
 

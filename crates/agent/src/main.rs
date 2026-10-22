@@ -33,6 +33,9 @@ use tracing::{debug, error, info, warn};
 /// boot, so the first register may see a partial link set.
 const REFRESH: Duration = Duration::from_secs(30);
 const REPLY_TIMEOUT: Duration = Duration::from_secs(30);
+/// Consecutive failed long-polls after which the agent registers again: the
+/// controller may have restarted (and forgotten us) without ever answering.
+const POLL_FAILURES_BEFORE_REREGISTER: u32 = 3;
 
 /// Map the UCI syslog-style level onto a tracing filter.
 fn log_filter(level: &str) -> &'static str {
@@ -97,13 +100,18 @@ impl Runtime {
         Ok(())
     }
 
-    /// Register when needed, then long-poll; forever.
+    /// Register when needed, then long-poll; forever. A `404` from the
+    /// command endpoint means the controller does not know us (it restarted
+    /// or evicted us): register again before the next poll. Repeated
+    /// transport failures also trigger a re-register, in case the controller
+    /// came back without ever answering a poll.
     async fn pump(self: Arc<Self>) {
         let cfg = &self.agent.cfg;
         let poll = CommandReq {
             agent: cfg.agent.clone(),
             timeout_ms: cfg.command_timeout.as_millis() as u64,
         };
+        let mut failures = 0u32;
         loop {
             if self.need_register.swap(false, Ordering::AcqRel) {
                 if let Err(e) = self.register().await {
@@ -123,11 +131,24 @@ impl Runtime {
                 .await
             {
                 Ok(r) => {
+                    failures = 0;
                     debug!("{} command(s)", r.commands.len());
                     self.dispatch(r.commands);
                 }
+                Err(e)
+                    if e.downcast_ref::<client::HttpError>()
+                        .is_some_and(|h| h.status == 404) =>
+                {
+                    info!("controller does not know us; registering again");
+                    self.need_register.store(true, Ordering::Release);
+                }
                 Err(e) => {
+                    failures += 1;
                     warn!("command long-poll failed: {e:#}; retrying");
+                    if failures >= POLL_FAILURES_BEFORE_REREGISTER {
+                        failures = 0;
+                        self.need_register.store(true, Ordering::Release);
+                    }
                     tokio::time::sleep(Duration::from_secs(2)).await;
                 }
             }

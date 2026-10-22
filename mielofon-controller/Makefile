@@ -33,9 +33,10 @@ define Package/mielofon-controller/description
   dashboard. It is the decision-maker for the whole mesh.
 endef
 
+# The whole directory: the operator deploys the node identity and the mesh
+# PKI (/etc/mielofon/pki/) there under names of their choosing.
 define Package/mielofon-controller/conffiles
 /etc/config/mielofon-controller
-/etc/mielofon/mielofon-controller.toml
 /etc/mielofon/
 endef
 

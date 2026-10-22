@@ -114,7 +114,13 @@ POST /v1/agent/command            // clients
 { "agent": "spoke-1", "timeout_ms": 30000 }
 // -> { "commands": [ … ] }        // drained; { "commands": [] } on timeout;
 //                                   the agent re-polls immediately
+// -> 404 { "error": "agent not registered" }   // register first
 ```
+
+A `404` means this controller does not know the agent — it restarted, or
+evicted the agent after 300 s without a poll. The agent registers again
+before its next poll (it also re-registers after three consecutive failed
+polls, in case the controller came back without answering one).
 
 Command shapes — each carries a job `id`:
 
@@ -134,8 +140,10 @@ The controller's scheduler issues `probe/always` per link on an interval, and
 `probe/throughput` only when the link's fence lease is free — it acquires the
 lease before issuing the command. `apply_cost` is issued when the derived cost
 for a link differs from the last cost the controller told the agent to apply.
-While no agent is long-polling, probe work is not queued (bounded); the policy
-snapshot is re-seeded through `register` on reconnect.
+While no agent is long-polling, probe work is not queued (bounded). Every
+`register` replaces the agent's link set, drops queued work, forgets which
+costs were sent and re-seeds the policy snapshot — a re-registering agent may
+have rebooted and lost its applied costs.
 
 ### Reply
 
@@ -148,7 +156,8 @@ POST /v1/agent/reply              // clients
   "rtt_ms":15.0, "loss_pct":0.0, "jitter_ms":2.5,
   "tcp_mbps":null, "util_mbps":0.0, "state":"quiet", "token": null }
 
-{ "id": "apply/spoke-1/…", "kind": "applied", "link": { … }, "cost": 50 }
+{ "id": "apply/spoke-1/…", "kind": "applied", "link": { … }, "cost": 50,
+  "note": "bird returned code 3" }   // note only when the cost was NOT applied
 ```
 
 - Always-on replies carry no token. Throughput replies echo the fence token
@@ -160,9 +169,16 @@ POST /v1/agent/reply              // clients
   measurement** for those fields so they stay populated across fence-gated runs.
   The controller stores reports verbatim — no history carry-forward.
 - A busy link is reported `state: "busy"` (with `util_mbps`) and is never
-  classified as degraded.
-- `/v1/quality` and `/v1/apply/ack` remain supported as the equivalent
-  non-correlated endpoints.
+  classified as degraded. Always-on replies carry the utilisation since the
+  previous probe, so a link in use is busy on every tier.
+- A probe that could not measure (iperf3 failed, unknown interface) adds a
+  `note`; the dimensions stay `null`. The controller logs it and counts it in
+  `mielofon_probe_failures_total`.
+- An `applied` reply with a `note` is a failure: the controller forgets the
+  cost was sent and re-issues it after 30 s.
+- `POST /v1/quality` (same body as a probe reply minus `kind`/`id`) ingests a
+  bare measurement for tooling; the fence/work/ack endpoints of the ucode
+  agent are gone.
 
 ## Fence (soft lease)
 
@@ -188,10 +204,11 @@ GET /metrics                                 Prometheus text exposition
 
 Every ingested report is appended to a per-link time-series: a raw sample
 (always probes every 15 s, throughput every 300 s) plus a 60 s aggregate
-bucket (min/avg/max per dimension). Raw samples are **replicated** between
-cluster members through the gossip exchange (each push carries the fresh
-samples since the per-peer watermark, idempotent on the receiver); buckets
-are a local rollup and are not gossiped. History is kept in-memory (raw
+bucket (min/avg/max per dimension). Two reports in the same second are merged
+dimension-wise. Raw samples are **replicated** between cluster members
+through the gossip exchange (each push carries the fresh samples since the
+per-peer watermark, which only advances once the peer answered; idempotent
+on the receiver); buckets are a local rollup and are not gossiped. History is kept in-memory (raw
 `raw_retention_secs`, buckets `agg_retention_secs`) and, when `[ts] path` is
 set, durably mirrored to an embedded redb file flushed in batches.
 
@@ -231,10 +248,13 @@ auto-refresh.
 ## Gossip (anti-entropy)
 
 Members exchange the full KV view. LWW merge keeps the newest `ts` per link;
-records older than `grace_ttl_secs` expire.
+records older than `grace_ttl_secs` expire. Each member derives policy only
+for links of its own registered agents, so every derived record has one
+writer and the merge never flaps. Pushes to all members run concurrently,
+each bounded by a 10 s timeout.
 
 ```jsonc
 POST /v1/gossip/exchange          // members
-{ "node": "hub-a", "records": [[…]] }
-// -> { "node": "hub-b", "records": […] }
+{ "node": "hub-a", "records": [[…]], "ts_samples": [[…]] }
+// -> { "node": "hub-b", "records": […] }   // merged by the pusher
 ```

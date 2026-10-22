@@ -52,19 +52,18 @@ impl Listeners {
     }
 }
 
-/// Node identity: name (placeholder) and advertise address used by peers.
+/// Node identity: the placeholder name this node registers under. Peers
+/// reach it through the address listed for that name under `[members]`.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
 pub struct Node {
     pub name: String,
-    pub advertise: IpAddr,
 }
 
 impl Default for Node {
     fn default() -> Self {
         Node {
             name: "hub-a".into(),
-            advertise: "203.0.113.1".parse().unwrap(),
         }
     }
 }
@@ -123,6 +122,10 @@ impl QualityClass {
 /// Quality classification. A measurement is assigned the worst class whose
 /// threshold it crosses; only dims listed per class take part. Conservative
 /// defaults (per handoff): good/acceptable/poor/bad with increasing costs.
+///
+/// A class's thresholds are the bounds a link must stay within to *remain*
+/// in that class: crossing `poor`'s bound already makes a link `bad`, so the
+/// `bad` thresholds never change a result and exist only for symmetry.
 ///
 /// Jitter is the always-tier congestion signal: it is upper-bounded like rtt,
 /// conservatively scaled below the rtt cutoffs (a healthy path has far lower
@@ -317,7 +320,6 @@ impl Default for TsConfig {
 /// ```toml
 /// [node]
 /// name = "hub-a"
-/// advertise = "203.0.113.1"
 /// [members]
 /// "hub-a" = "203.0.113.1"
 /// [listeners]
@@ -326,7 +328,7 @@ impl Default for TsConfig {
 /// [log]
 /// level = "info"
 /// [ts]
-/// path = "/etc/mielofon/tsdb.redb"
+/// path = "/var/lib/mielofon/tsdb.redb"
 /// [frontend]
 /// root_dir = "/usr/share/mielofon/dashboard"
 /// [otel]

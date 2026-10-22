@@ -14,22 +14,15 @@ impl LwwStore {
         Self::default()
     }
 
-    /// Insert or overwrite by timestamp (LWW). Returns the previous record, if any.
-    pub fn put(&self, key: LinkKey, mut rec: QualityRecord) -> Option<QualityRecord> {
+    /// Insert or overwrite by timestamp (LWW: an equal or newer `ts` wins).
+    /// Returns false when an older record was rejected.
+    pub fn put(&self, key: LinkKey, rec: QualityRecord) -> bool {
         let mut map = self.inner.write().expect("kv lock poisoned");
-        let prev = map.get(&key);
-        let prev_ts = prev.map(|p| p.ts).unwrap_or(0);
-        if rec.ts < prev_ts {
-            return prev.cloned();
+        if map.get(&key).is_some_and(|prev| rec.ts < prev.ts) {
+            return false;
         }
-        if let Some(p) = prev {
-            if p.ts == rec.ts {
-                // best-effort conflict stamping is the caller's job; keep newest by craft
-                rec.ts = rec.ts.max(p.ts);
-            }
-        }
-        map.insert(key, rec.clone());
-        Some(rec)
+        map.insert(key, rec);
+        true
     }
 
     pub fn get(&self, key: &LinkKey) -> Option<QualityRecord> {
@@ -53,7 +46,7 @@ impl LwwStore {
         self.len() == 0
     }
 
-    /// Replace the entire store with `records` (used by gossip anti-entropy merge).
+    /// LWW-merge a peer's records (gossip anti-entropy).
     pub fn merge(&self, records: &[(LinkKey, QualityRecord)]) {
         let mut map = self.inner.write().expect("kv lock poisoned");
         for (k, v) in records {
@@ -131,7 +124,7 @@ mod tests {
             ProbeState::Quiet,
         );
         stale.ts = 400;
-        store.put(key.clone(), stale);
+        assert!(!store.put(key.clone(), stale));
         assert_eq!(store.get(&key).unwrap().ts, 500);
     }
 }
