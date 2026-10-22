@@ -28,7 +28,7 @@ src-git mielofon https://github.com/vooon/mielofon-qoed.git
 
 ## Controller
 
-A small asynchronous Rust daemon (tokio + axum + rustls) forming a multi-node
+A small asynchronous Rust daemon (tokio + quinn + axum + rustls) forming a multi-node
 cluster. Runs on a small set of nodes (all voters). The fabric between nodes is
 the operator WAN/public network, **not** the mesh underlay, so coordination and
 probing stay off the links being measured.
@@ -44,7 +44,7 @@ store's expiry (`grace_ttl_secs`).
 
 | Listener | Port | Transport | Purpose |
 |----------|------|-----------|---------|
-| cluster  | 9551/tcp | mTLS HTTP (rustls) | gossip / anti-entropy between members |
+| cluster  | 9551/udp | mTLS QUIC (quinn + rustls) | gossip / anti-entropy sessions between members |
 | client   | 9552/udp | mTLS QUIC (quinn + rustls) | agent sessions: commands and replies as streams |
 | admin    | 9553/tcp | HTTP on loopback | dashboard `/`, `/metrics`, `/healthz`, `/readyz`, read endpoints, tooling ingest |
 
@@ -243,9 +243,8 @@ crates/controller/src/
   worker.rs      agent registry: links, session, in-flight commands
   fence.rs       soft-lease probe mutex
   quality.rs     classification + OSPF cost derivation (window-aware)
-  api.rs         axum handlers and routers for the three listeners
-  gossip.rs      anti-entropy exchange + periodic push loop
-  remote.rs      minimal mTLS HTTPS client for gossip pushes
+  api.rs         axum handlers and router for the admin listener
+  gossip.rs      member sessions on the cluster listener: exchange + push loop
 ```
 
 ```

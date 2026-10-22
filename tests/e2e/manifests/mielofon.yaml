@@ -17,6 +17,7 @@ spec:
     - name: members
       port: 9551
       targetPort: 9551
+      protocol: UDP
     - name: clients
       port: 9552
       targetPort: 9552
@@ -91,6 +92,7 @@ spec:
           ports:
             - name: members
               containerPort: 9551
+              protocol: UDP
             - name: clients
               containerPort: 9552
               protocol: UDP

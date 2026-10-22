@@ -12,7 +12,6 @@ pub mod kv;
 pub mod map;
 pub mod model;
 pub mod quality;
-pub mod remote;
 pub mod scheduler;
 pub mod session;
 pub mod state;

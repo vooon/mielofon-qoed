@@ -31,9 +31,7 @@ toml = "1.1"
 # TLS (pure Rust, static-musl friendly)
 rustls = "0.23"
 rustls-pemfile = "2"
-tokio-rustls = "0.26"
-hyper-rustls = { version = "0.27", default-features = false, features = ["http1", "ring", "native-tokio"] }
-axum-server = { version = "0.8", features = ["tls-rustls"] }
+axum-server = "0.8"
 
 # Logging / tracing
 tracing = "0.1"

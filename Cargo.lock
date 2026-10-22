@@ -68,15 +68,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "330a5ed07fa54e4702c9d6c4174f74427fc0ef6e214bbd677ae50a5099946470"
 
 [[package]]
-name = "arc-swap"
-version = "1.9.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c049c0be4daef0b145cb3555416b3b8ef5b7888a38aea1a3a155801fe7b0810b"
-dependencies = [
- "rustversion",
-]
-
-[[package]]
 name = "asn1-rs"
 version = "0.7.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -219,7 +210,6 @@ version = "0.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b1df331683d982a0b9492b38127151e6453639cd34926eb9c07d4cd8c6d22bfc"
 dependencies = [
- "arc-swap",
  "bytes",
  "either",
  "fs-err",
@@ -227,11 +217,7 @@ dependencies = [
  "http-body",
  "hyper",
  "hyper-util",
- "pin-project-lite",
- "rustls",
- "rustls-pki-types",
  "tokio",
- "tokio-rustls",
  "tower-service",
 ]
 
@@ -962,7 +948,6 @@ dependencies = [
  "serde",
  "serde_json",
  "tokio",
- "tokio-rustls",
  "toml",
  "tower",
  "tracing",
@@ -998,7 +983,7 @@ dependencies = [
 
 [[package]]
 name = "mielofon-transport"
-version = "0.12.0"
+version = "0.13.0"
 dependencies = [
  "anyhow",
  "quinn",
@@ -1906,16 +1891,6 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 3.0.6",
-]
-
-[[package]]
-name = "tokio-rustls"
-version = "0.26.6"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c9cc2678c2cdd569ef8215e2afd7954ada2ae20b4fdd2c5fe6139a3b02d105db"
-dependencies = [
- "rustls",
- "tokio",
 ]
 
 [[package]]
