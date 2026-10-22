@@ -7,6 +7,33 @@ START=95
 STOP=10
 USE_PROCD=1
 
+# `key = "value"` of the first `$2` assignment in the TOML, or `$3` when
+# absent. Good enough for the flat, quoted paths of the `[tls]` section.
+toml_path() {
+	local v
+	v="$(sed -n "s/^[[:space:]]*$2[[:space:]]*=[[:space:]]*\"\([^\"]*\)\".*/\1/p" "$1" 2>/dev/null | head -n 1)"
+	echo "${v:-$3}"
+}
+
+# The package ships in images for every node, but only hubs carry the TLS
+# material. Without it the daemon can only exit, so refuse to start instead
+# of letting procd respawn it until it gives up: a node that is not a hub
+# stays quiet.
+configured() {
+	local config="$1" f
+	for f in \
+		"$(toml_path "$config" ca /etc/mielofon/ca.pem)" \
+		"$(toml_path "$config" cert /etc/mielofon/node.pem)" \
+		"$(toml_path "$config" key /etc/mielofon/node.key)"; do
+		if [ ! -r "$f" ]; then
+			logger -t mielofon-controller -p daemon.notice \
+				"not starting: $f missing (this node is not a configured hub)"
+			return 1
+		fi
+	done
+	return 0
+}
+
 start_service() {
 	config_load mielofon-controller
 
@@ -16,6 +43,7 @@ start_service() {
 	config_get_bool backtrace main backtrace 0
 
 	[ "$enabled" -eq 1 ] || return
+	configured "$config" || return
 
 	procd_open_instance
 	procd_set_param command /usr/sbin/mielofon-controller daemon "$config"
