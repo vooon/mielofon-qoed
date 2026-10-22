@@ -15,7 +15,7 @@ use mielofon_transport::{request, resolve_all, respond, BiStream, QuicSession, S
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
-use tracing::{debug, info, warn};
+use tracing::{debug, info, info_span, warn, Instrument};
 
 /// Per-address dial budget: a black-holed hub costs this, not a hang.
 const DIAL_TIMEOUT: Duration = Duration::from_secs(3);
@@ -123,13 +123,34 @@ async fn hello(rt: &Runtime, session: &QuicSession, discover: bool) -> Result<()
 /// One controller-opened stream: a command and, unless the agent drops it
 /// (an always probe for an interface it no longer has), its reply.
 async fn handle_stream(rt: Arc<Runtime>, stream: BiStream) {
-    let res = respond(stream, |cmd: WorkCmd| async move {
-        debug!("command {}", kind(&cmd));
-        rt.agent.execute(cmd).await
+    let res = respond(stream, |cmd: WorkCmd| {
+        // The controller's dispatch span is the parent, so the command, its
+        // iperf3 legs and BIRD calls land in the controller's trace.
+        let span = info_span!("agent.command", kind = %kind(&cmd), id = %id(&cmd));
+        mielofon_otel::tracectx::set_parent(&span, traceparent(&cmd));
+        async move {
+            debug!("command {}", kind(&cmd));
+            rt.agent.execute(cmd).await
+        }
+        .instrument(span)
     })
     .await;
     if let Err(e) = res {
         warn!("command stream: {e}");
+    }
+}
+
+fn id(cmd: &WorkCmd) -> &str {
+    match cmd {
+        WorkCmd::Probe { id, .. } | WorkCmd::ApplyCost { id, .. } | WorkCmd::Trace { id, .. } => id,
+    }
+}
+
+fn traceparent(cmd: &WorkCmd) -> Option<&str> {
+    match cmd {
+        WorkCmd::Probe { traceparent, .. }
+        | WorkCmd::ApplyCost { traceparent, .. }
+        | WorkCmd::Trace { traceparent, .. } => traceparent.as_deref(),
     }
 }
 

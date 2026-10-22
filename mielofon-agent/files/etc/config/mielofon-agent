@@ -69,6 +69,14 @@ config agent 'main'
 	# costs (a config redeploy resets them). Each run costs rpcd work, so
 	# keep it at a minute or more.
 	option refresh_interval '60'
+	# OpenTelemetry: OTLP/HTTP collector URL (http:// or https://). Empty
+	# disables export. Each command the controller sends becomes a span
+	# under the controller's own dispatch span, with the iperf3 legs as
+	# children, so one trace shows dispatch -> agent work -> report.
+	# `otel_logs` also forwards the agent log (syslog usually has it).
+	# option otel_endpoint 'https://collector.example:4318'
+	option otel_traces '1'
+	option otel_logs '0'
 	# Optional Prometheus textfile (node-exporter collector), rewritten
 	# atomically every prometheus_interval seconds. Empty disables.
 	# option prometheus_textfile '/run/prometheus/textfile/mielofon-agent.prom'

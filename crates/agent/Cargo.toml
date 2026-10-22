@@ -11,6 +11,7 @@ name = "mielofon-agent"
 path = "src/main.rs"
 
 [dependencies]
+mielofon-otel = { workspace = true }
 mielofon-proto = { workspace = true }
 mielofon-transport = { workspace = true }
 tokio = { workspace = true, features = ["process", "io-util", "fs"] }

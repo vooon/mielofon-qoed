@@ -188,7 +188,8 @@ impl Default for Cluster {
 pub struct Log {
     /// Minimum console level: trace, debug, info, warn, error.
     pub level: String,
-    /// Console log format: `logfmt` or `json`.
+    /// Console log format: `logfmt`, `json` or `syslog` (bare lines for a
+    /// procd-fed stderr).
     pub format: String,
 }
 

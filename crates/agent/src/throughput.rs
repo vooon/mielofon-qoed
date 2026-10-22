@@ -20,7 +20,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::process::Command;
 use tokio::sync::Mutex;
-use tracing::{debug, warn};
+use tracing::{debug, warn, Instrument};
 
 /// Outcome of a throughput request.
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -148,6 +148,11 @@ impl Throughput {
 
     /// One `iperf3 -J` client run; the parsed JSON document.
     async fn iperf(&self, link: &Link, leg: Leg) -> Result<Value> {
+        let span = tracing::info_span!("iperf3", leg = ?leg, iface = %link.interface);
+        self.iperf_run(link, leg).instrument(span).await
+    }
+
+    async fn iperf_run(&self, link: &Link, leg: Leg) -> Result<Value> {
         let secs = self.duration.as_secs().max(1);
         let mut cmd = Command::new(&self.iperf_bin);
         cmd.args(["-J", "-6", "-c"]);

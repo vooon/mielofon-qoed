@@ -19,6 +19,5 @@ pub mod store;
 pub mod tls;
 pub mod tool;
 pub mod trace;
-pub mod tracectx;
 pub mod tsdb;
 pub mod worker;

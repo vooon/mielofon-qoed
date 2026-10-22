@@ -223,6 +223,14 @@ Two paths coexist on the admin listener / via OTLP:
   `opentelemetry-otlp` `grpc-tonic` feature is deliberately not enabled, so no
   gRPC is pulled into the static binary. Configuration mirrors the shape used
   by `pathosd`.
+- **Agent spans**: with `otel_endpoint` set in the agent UCI, every command
+  the controller dispatches becomes an `agent.command` span on the agent,
+  parented under the controller's dispatch span through the `traceparent`
+  the command carries, with one `iperf3` child span per throughput leg. The
+  reply echoes the same `traceparent`, so one trace shows
+  `dispatch → agent.command → report` across both daemons. Agent metrics
+  stay on the Prometheus textfile; the log is forwarded only with
+  `otel_logs`.
 
 See `crates/mielofon-otel` for the shared telemetry setup.
 
