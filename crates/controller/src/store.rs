@@ -43,6 +43,11 @@ pub struct WindowView {
     /// Most recent throughput within `tcp_fresh_secs`, else the last-known
     /// value carried within `tcp_carry_secs`.
     pub tcp_mbps: Option<f64>,
+    /// The gated UDP leg (received rate, jitter, loss at the peer), carried
+    /// with the same horizons as `tcp_mbps`.
+    pub udp_mbps: Option<f64>,
+    pub udp_jitter_ms: Option<f64>,
+    pub udp_loss_pct: Option<f64>,
     pub util_mbps: f64,
     /// True when `tcp_mbps` was carried from beyond its primary fresh window
     /// (still within the carry horizon).

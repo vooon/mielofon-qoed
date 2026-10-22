@@ -530,6 +530,8 @@ mod tests {
             loss_pct: Some(0.0),
             jitter_ms: Some(1.0),
             udp_mbps: None,
+            udp_jitter_ms: None,
+            udp_loss_pct: None,
             util_mbps: 0.0,
             state: ProbeState::Quiet,
             quality: Some(quality),

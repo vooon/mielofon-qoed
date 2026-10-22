@@ -38,8 +38,12 @@ pub struct Config {
     pub quiet_max_mbps: f64,
     /// Duration of the TCP throughput test.
     pub tcp_duration: Duration,
-    /// Peer iperf3 server port.
+    /// Peer iperf3 server port (TCP leg).
     pub iperf_port: u16,
+    /// Peer iperf3 port for the UDP leg; `iperf_port` when unset.
+    pub udp_port: u16,
+    /// Send rate of the UDP leg (Mbps); 0 disables the leg.
+    pub udp_rate_mbps: f64,
     /// iperf3 client binary.
     pub iperf_bin: String,
     /// Prometheus textfile output (empty disables).
@@ -107,6 +111,8 @@ impl Config {
             quiet_max_mbps: num(main, "quiet_max_mbps", 15.0),
             tcp_duration: Duration::from_secs(num(main, "tcp_duration", 4_u64).clamp(1, 60)),
             iperf_port: num(main, "iperf_port", 5201),
+            udp_port: num(main, "udp_port", 0),
+            udp_rate_mbps: num(main, "udp_rate_mbps", 20.0_f64).max(0.0),
             iperf_bin: opt(main, "iperf_bin").unwrap_or("iperf3").to_string(),
             prometheus_textfile: textfile,
             prometheus_interval: Duration::from_secs(
@@ -170,6 +176,7 @@ mod tests {
         assert_eq!(c.ospf_protocol, "mesh_v3");
         assert_eq!(c.excludes, vec!["awg_legacy".to_string()]);
         assert!(c.prometheus_textfile.is_none());
+        assert_eq!((c.udp_port, c.udp_rate_mbps), (0, 20.0));
     }
 
     #[test]

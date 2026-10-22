@@ -50,13 +50,17 @@ pub fn classify_window(cfg: &QualityCfg, view: &WindowView) -> Quality {
     let tcp = view
         .tcp_mbps
         .map(|m| score_lower(m, classes.map(|c| c.tcp_mbps)));
+    let udp = view
+        .udp_mbps
+        .map(|m| score_lower(m, classes.map(|c| c.udp_mbps)));
+    let udp_loss = view
+        .udp_loss_pct
+        .map(|m| score_upper(m, classes.map(|c| c.udp_loss_pct)));
+    let udp_jitter = view
+        .udp_jitter_ms
+        .map(|m| score_upper(m, classes.map(|c| c.udp_jitter_ms)));
 
-    worst([
-        rtt.unwrap_or(0),
-        loss.unwrap_or(0),
-        jitter.unwrap_or(0),
-        tcp.unwrap_or(0),
-    ])
+    worst(&[rtt, loss, jitter, tcp, udp, udp_loss, udp_jitter])
 }
 
 /// Escalate the score while the metric exceeds an upper-bound (≤-ok) class
@@ -84,8 +88,8 @@ fn score_lower(metric: f64, thresholds: [Option<f64>; 4]) -> u8 {
     score.min(3)
 }
 
-fn worst(scores: [u8; 4]) -> Quality {
-    let m = scores.into_iter().max().unwrap_or(0);
+fn worst(scores: &[Option<u8>]) -> Quality {
+    let m = scores.iter().flatten().max().copied().unwrap_or(0);
     match m {
         0 => Quality::Good,
         1 => Quality::Acceptable,
@@ -219,6 +223,26 @@ mod tests {
             classify(&cfg, &view(Some(50.0), Some(0.0), Some(8.0), Some(80.0))),
             Quality::Acceptable
         );
+    }
+
+    #[test]
+    fn udp_leg_constrains_only_when_configured() {
+        // Defaults pin no UDP threshold: a lossy UDP leg changes nothing.
+        let cfg = QualityCfg::default();
+        let v = WindowView {
+            udp_mbps: Some(2.0),
+            udp_loss_pct: Some(30.0),
+            udp_jitter_ms: Some(50.0),
+            ..view(Some(15.0), Some(0.0), Some(2.0), Some(80.0))
+        };
+        assert_eq!(classify_window(&cfg, &v), Quality::Good);
+        // Pinned on the poor class: crossing it is bad.
+        let mut cfg = QualityCfg::default();
+        cfg.poor.udp_loss_pct = Some(5.0);
+        assert_eq!(classify_window(&cfg, &v), Quality::Bad);
+        let mut cfg = QualityCfg::default();
+        cfg.good.udp_mbps = Some(10.0);
+        assert_eq!(classify_window(&cfg, &v), Quality::Acceptable);
     }
 
     #[test]

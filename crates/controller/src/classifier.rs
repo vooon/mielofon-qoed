@@ -137,6 +137,9 @@ pub fn merge_pair(own: &WindowView, rev: &WindowView, mode: PairCost) -> WindowV
     v.jitter_ms = worse_upper(own.jitter_ms, rev.jitter_ms);
     if mode == PairCost::Symmetric {
         v.tcp_mbps = worse_lower(own.tcp_mbps, rev.tcp_mbps);
+        v.udp_mbps = worse_lower(own.udp_mbps, rev.udp_mbps);
+        v.udp_loss_pct = worse_upper(own.udp_loss_pct, rev.udp_loss_pct);
+        v.udp_jitter_ms = worse_upper(own.udp_jitter_ms, rev.udp_jitter_ms);
     }
     v
 }
@@ -284,7 +287,9 @@ fn write_derived(
         loss_pct: view.loss_pct,
         jitter_ms: view.jitter_ms,
         tcp_mbps: view.tcp_mbps,
-        udp_mbps: None,
+        udp_mbps: view.udp_mbps,
+        udp_jitter_ms: view.udp_jitter_ms,
+        udp_loss_pct: view.udp_loss_pct,
         util_mbps: view.util_mbps,
         state: view.state,
         quality,

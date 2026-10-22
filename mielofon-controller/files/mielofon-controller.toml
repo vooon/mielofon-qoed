@@ -33,6 +33,11 @@ key = "/etc/mielofon/node.key"
 # (≤ is ok), tcp_mbps is a lower bound (≥ is ok). A link gets the worst class
 # whose threshold it crosses; ospf_cost is advertised for links in that class.
 #
+# The agents' gated UDP leg (a fixed-rate stream, see the agent's
+# udp_rate_mbps) adds udp_mbps (lower bound), udp_loss_pct and udp_jitter_ms
+# (upper bounds). They are unset here, so the leg is informational until you
+# pin them, e.g. `udp_loss_pct = 2.0` on [quality.poor].
+#
 # jitter_ms is the always-tier congestion signal, derived from the ping RTT
 # distribution (iputils mdev). It is non-intrusive and congestion-immune: it
 # rises under bufferbloat/queueing before the average RTT crosses a class, and

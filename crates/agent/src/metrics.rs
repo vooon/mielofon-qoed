@@ -5,6 +5,7 @@
 //! daemon are folded in as `mielofon_agent_pings_*_total`.
 
 use crate::icmp::LinkStats;
+use crate::throughput::UdpResult;
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -36,6 +37,7 @@ impl Counters {
 #[derive(Debug, Clone, Default)]
 pub struct LastThroughput {
     pub tcp_mbps: Option<f64>,
+    pub udp: Option<UdpResult>,
     pub util_mbps: f64,
     pub busy: bool,
     pub unixtime: u64,
@@ -158,7 +160,7 @@ impl Metrics {
 
         let thr = self.throughput.lock().expect("metrics lock");
         type Gauge = (&'static str, &'static str, &'static str);
-        let per_link: [Gauge; 11] = [
+        let per_link: [Gauge; 14] = [
             (
                 "mielofon_agent_link_configured",
                 "gauge",
@@ -200,6 +202,21 @@ impl Metrics {
                 "Latest TCP throughput (Mbps).",
             ),
             (
+                "mielofon_agent_link_udp_mbps",
+                "gauge",
+                "Latest UDP throughput received by the peer (Mbps).",
+            ),
+            (
+                "mielofon_agent_link_udp_jitter_ms",
+                "gauge",
+                "Latest UDP stream jitter at the peer (ms).",
+            ),
+            (
+                "mielofon_agent_link_udp_loss_pct",
+                "gauge",
+                "Latest UDP stream packet loss at the peer (%).",
+            ),
+            (
                 "mielofon_agent_link_util_mbps",
                 "gauge",
                 "Link utilization at the last throughput gate (Mbps).",
@@ -238,6 +255,17 @@ impl Metrics {
                     "mielofon_agent_link_tcp_mbps" => {
                         t.and_then(|t| t.tcp_mbps).map(|v| v.to_string())
                     }
+                    "mielofon_agent_link_udp_mbps" => {
+                        t.and_then(|t| t.udp).map(|u| u.mbps.to_string())
+                    }
+                    "mielofon_agent_link_udp_jitter_ms" => t
+                        .and_then(|t| t.udp)
+                        .and_then(|u| u.jitter_ms)
+                        .map(|v| v.to_string()),
+                    "mielofon_agent_link_udp_loss_pct" => t
+                        .and_then(|t| t.udp)
+                        .and_then(|u| u.loss_pct)
+                        .map(|v| v.to_string()),
                     "mielofon_agent_link_util_mbps" => t.map(|t| t.util_mbps.to_string()),
                     "mielofon_agent_link_busy" => t.map(|t| u8::from(t.busy).to_string()),
                     "mielofon_agent_last_probe_unixtime" => t.map(|t| t.unixtime.to_string()),
@@ -273,6 +301,11 @@ mod tests {
             "awg_hub_a".into(),
             LastThroughput {
                 tcp_mbps: Some(87.5),
+                udp: Some(UdpResult {
+                    mbps: 19.5,
+                    jitter_ms: Some(1.0),
+                    loss_pct: None,
+                }),
                 util_mbps: 0.25,
                 busy: false,
                 unixtime: 1_700_000_000,
@@ -302,6 +335,11 @@ mod tests {
             "unmeasured stays absent"
         );
         assert!(text.contains("mielofon_agent_link_tcp_mbps{from=\"node-0\",to=\"hub-a\",interface=\"awg_hub_a\"} 87.5"));
+        assert!(text.contains("mielofon_agent_link_udp_mbps{from=\"node-0\",to=\"hub-a\",interface=\"awg_hub_a\"} 19.5"));
+        assert!(
+            !text.contains("mielofon_agent_link_udp_loss_pct{"),
+            "unmeasured udp loss stays absent"
+        );
         assert!(
             text.contains("interface=\"awg_hub_\\\"b\"} 1"),
             "escaped label, configured gauge"

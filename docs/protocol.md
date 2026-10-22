@@ -47,7 +47,9 @@ A directed link `{from, to, interface}` maps to a measurement record:
   "loss_pct": 0.0,
   "jitter_ms": 2.5,
   "tcp_mbps": 1.5,
-  "udp_mbps": null,
+  "udp_mbps": 19.5,
+  "udp_jitter_ms": 1.2,
+  "udp_loss_pct": 0.5,
   "util_mbps": 0.0,
   "state": "quiet",
   "quality": "poor",
@@ -161,7 +163,12 @@ POST /v1/agent/reply              // clients
 ```
 
 - Always-on replies carry no token. Throughput replies echo the fence token
-  from the command; the controller releases the lease on receipt.
+  from the command; the controller releases the lease on receipt. They carry
+  the TCP upload (`tcp_mbps`) and, when the agent's `udp_rate_mbps` is set,
+  the UDP leg (`udp_mbps`, `udp_jitter_ms`, `udp_loss_pct`: what the peer
+  received from a fixed-rate stream, the raw path without TCP's congestion
+  control). The classifier uses the UDP dimensions only where a class pins a
+  threshold for them.
 - Always-on probes always send what they measured and report `rtt_ms`/`loss_pct`/
   `jitter_ms` as `null` when they could not measure (a failed ping must not turn
   into a fake loss or a fake jitter — an unmeasured dimension never constrains
