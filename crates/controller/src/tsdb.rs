@@ -61,6 +61,13 @@ pub struct RawSample {
     pub jitter_ms: Option<f32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tcp_mbps: Option<f32>,
+    /// Gated UDP leg: received rate, jitter and loss at the peer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub udp_mbps: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub udp_jitter_ms: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub udp_loss_pct: Option<f32>,
     /// Link utilization at the probe moment (Mbps).
     pub util_mbps: f32,
     /// `ProbeState` code (0 quiet, 1 busy, 2 conflict).
@@ -78,6 +85,9 @@ impl RawSample {
             loss_pct: other.loss_pct.or(self.loss_pct),
             jitter_ms: other.jitter_ms.or(self.jitter_ms),
             tcp_mbps: other.tcp_mbps.or(self.tcp_mbps),
+            udp_mbps: other.udp_mbps.or(self.udp_mbps),
+            udp_jitter_ms: other.udp_jitter_ms.or(self.udp_jitter_ms),
+            udp_loss_pct: other.udp_loss_pct.or(self.udp_loss_pct),
             util_mbps: self.util_mbps.max(other.util_mbps),
             state: self.state.max(other.state),
         }
@@ -100,9 +110,26 @@ impl RawSample {
             loss_pct: opt(loss_pct),
             jitter_ms: opt(jitter_ms),
             tcp_mbps: opt(tcp_mbps),
+            udp_mbps: None,
+            udp_jitter_ms: None,
+            udp_loss_pct: None,
             util_mbps: util_mbps as f32,
             state: state_code(state),
         }
+    }
+
+    /// Attach the gated UDP leg's dimensions.
+    pub fn with_udp(
+        mut self,
+        mbps: Option<f64>,
+        jitter_ms: Option<f64>,
+        loss_pct: Option<f64>,
+    ) -> Self {
+        let opt = |v: Option<f64>| v.filter(|x| x.is_finite()).map(|x| x as f32);
+        self.udp_mbps = opt(mbps);
+        self.udp_jitter_ms = opt(jitter_ms);
+        self.udp_loss_pct = opt(loss_pct);
+        self
     }
 }
 
@@ -144,8 +171,10 @@ impl DimAgg {
     }
 }
 
-/// One 60s per-link aggregate bucket.
+/// One 60s per-link aggregate bucket. `serde(default)` keeps buckets written
+/// by an older release loadable when a dimension is added.
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
+#[serde(default)]
 pub struct Bucket {
     pub bucket: u64,
     /// Number of raw samples folded in.
@@ -154,6 +183,9 @@ pub struct Bucket {
     pub loss: DimAgg,
     pub jitter: DimAgg,
     pub tcp: DimAgg,
+    pub udp: DimAgg,
+    pub udp_jitter: DimAgg,
+    pub udp_loss: DimAgg,
     pub util: DimAgg,
 }
 
@@ -180,6 +212,15 @@ impl Bucket {
         if let (Some(v), None) = (s.tcp_mbps, already.tcp_mbps) {
             self.tcp.merge(v);
         }
+        if let (Some(v), None) = (s.udp_mbps, already.udp_mbps) {
+            self.udp.merge(v);
+        }
+        if let (Some(v), None) = (s.udp_jitter_ms, already.udp_jitter_ms) {
+            self.udp_jitter.merge(v);
+        }
+        if let (Some(v), None) = (s.udp_loss_pct, already.udp_loss_pct) {
+            self.udp_loss.merge(v);
+        }
     }
 }
 
@@ -204,6 +245,12 @@ pub struct BucketView {
     pub jitter: Option<DimView>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tcp: Option<DimView>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub udp: Option<DimView>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub udp_jitter: Option<DimView>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub udp_loss: Option<DimView>,
     pub util: DimView,
 }
 
@@ -403,6 +450,9 @@ impl Tsdb {
                         loss: b.loss.view(),
                         jitter: b.jitter.view(),
                         tcp: b.tcp.view(),
+                        udp: b.udp.view(),
+                        udp_jitter: b.udp_jitter.view(),
+                        udp_loss: b.udp_loss.view(),
                         util: b.util.view().unwrap_or(DimView {
                             n: 0,
                             min: 0.0,
@@ -684,8 +734,9 @@ impl Store for Tsdb {
             }
         }
 
-        // Throughput dim: freshest value within tcp_fresh_secs, else the
-        // last-known value carried within tcp_carry_secs.
+        // Throughput dims: freshest value within tcp_fresh_secs, else the
+        // last-known value carried within tcp_carry_secs. The UDP leg shares
+        // the horizons (same gated cadence) and travels as one set.
         let mut carried = false;
         for s in ring.iter().rev() {
             let age = now.saturating_sub(s.ts);
@@ -699,6 +750,18 @@ impl Store for Tsdb {
             }
         }
         view.tcp_carried = carried;
+        for s in ring.iter().rev() {
+            let age = now.saturating_sub(s.ts);
+            if age > spec.tcp_carry_secs {
+                break;
+            }
+            if s.udp_mbps.is_some() || s.udp_loss_pct.is_some() {
+                view.udp_mbps = s.udp_mbps.map(f64::from);
+                view.udp_jitter_ms = s.udp_jitter_ms.map(f64::from);
+                view.udp_loss_pct = s.udp_loss_pct.map(f64::from);
+                break;
+            }
+        }
 
         Some(view)
     }
@@ -827,6 +890,28 @@ mod tests {
         assert!(v.tcp_carried, "beyond tcp_fresh, still carried");
         // Always dims come from the fresh probe at base+2000.
         assert_eq!(v.rtt_ms, Some(20.0));
+    }
+
+    #[test]
+    fn window_carries_udp_leg_with_tcp_horizons() {
+        let tsdb = Tsdb::new(TsConfig::default());
+        let a = LinkKey::new("spoke-1", "hub-a", "awg_hub_a");
+        let base = 1_700_000_000_u64;
+        tsdb.append(
+            &a,
+            RawSample::from_dims(ProbeState::Quiet, base, None, None, None, Some(80.0), 0.0)
+                .with_udp(Some(19.5), Some(1.25), Some(0.5)),
+        );
+        tsdb.append(&a, sample(base + 15, 15.0));
+        let v = tsdb.window(&a, &window_spec(), base + 300).expect("window");
+        assert_eq!(
+            (v.udp_mbps, v.udp_jitter_ms, v.udp_loss_pct),
+            (Some(19.5), Some(1.25), Some(0.5))
+        );
+        let r = tsdb.query(&a, 0, u64::MAX);
+        assert_eq!(r.buckets[0].udp_loss.as_ref().map(|d| d.max), Some(0.5));
+        // Past the carry horizon the leg is gone like tcp.
+        assert!(tsdb.window(&a, &window_spec(), base + 7200).is_none());
     }
 
     #[test]

@@ -32,7 +32,10 @@ pub struct GraphLink {
     pub jitter_ms: Option<f64>,
     /// Best-effort TCP throughput (Mbps), only present for throughput probes.
     pub tcp_mbps: Option<f64>,
+    /// Gated UDP leg: received rate, jitter and loss at the peer.
     pub udp_mbps: Option<f64>,
+    pub udp_jitter_ms: Option<f64>,
+    pub udp_loss_pct: Option<f64>,
     pub util_mbps: f64,
     pub state: String,
     pub quality: Option<String>,
@@ -79,6 +82,8 @@ pub fn graph_part(state: &AppState) -> (Vec<GraphNode>, Vec<GraphLink>) {
             jitter_ms: rec.jitter_ms,
             tcp_mbps: rec.tcp_mbps,
             udp_mbps: rec.udp_mbps,
+            udp_jitter_ms: rec.udp_jitter_ms,
+            udp_loss_pct: rec.udp_loss_pct,
             util_mbps: rec.util_mbps,
             state: match rec.state {
                 ProbeState::Quiet => "quiet",

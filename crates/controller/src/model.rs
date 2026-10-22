@@ -34,6 +34,10 @@ pub struct QualityRecord {
     pub tcp_mbps: Option<f64>,
     #[serde(default)]
     pub udp_mbps: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub udp_jitter_ms: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub udp_loss_pct: Option<f64>,
     pub util_mbps: f64,
     pub state: ProbeState,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -59,6 +63,8 @@ impl QualityRecord {
             jitter_ms,
             tcp_mbps,
             udp_mbps,
+            udp_jitter_ms: None,
+            udp_loss_pct: None,
             util_mbps,
             state,
             quality: None,

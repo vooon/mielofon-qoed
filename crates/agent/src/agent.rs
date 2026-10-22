@@ -51,16 +51,19 @@ impl<B: Bus> Agent<B> {
         let gate = Arc::new(Gate::default());
         // Let the queue the test built up drain before sampling resumes.
         let grace = (cfg.ping_interval * 2).max(Duration::from_secs(2));
+        let mut throughput = Throughput::new(
+            cfg.iperf_bin.clone(),
+            cfg.iperf_port,
+            cfg.tcp_duration,
+            cfg.quiet_max_mbps,
+            grace,
+            gate.clone(),
+        );
+        throughput.udp_port = cfg.udp_port;
+        throughput.udp_rate_mbps = cfg.udp_rate_mbps;
         Agent {
-            prober: Prober::new(cfg.ping_interval, cfg.ping_window, gate.clone()),
-            throughput: Throughput::new(
-                cfg.iperf_bin.clone(),
-                cfg.iperf_port,
-                cfg.tcp_duration,
-                cfg.quiet_max_mbps,
-                grace,
-                gate,
-            ),
+            prober: Prober::new(cfg.ping_interval, cfg.ping_window, gate),
+            throughput,
             metrics: Metrics::default(),
             cost_retry: Duration::from_secs(2),
             state: Mutex::new(NodeState::default()),
@@ -160,6 +163,9 @@ impl<B: Bus> Agent<B> {
                         loss_pct: None,
                         jitter_ms: None,
                         tcp_mbps: None,
+                        udp_mbps: None,
+                        udp_jitter_ms: None,
+                        udp_loss_pct: None,
                         util_mbps: 0.0,
                         state: ProbeState::Busy,
                         token,
@@ -168,7 +174,7 @@ impl<B: Bus> Agent<B> {
                     });
                 };
 
-                let (util, tcp, state, token, note) = if tier == Tier::Throughput {
+                let (util, tcp, udp, state, token, note) = if tier == Tier::Throughput {
                     Counters::inc(&c.probe_iperf);
                     let out = self.throughput.run(&l).await;
                     if out.busy {
@@ -185,6 +191,7 @@ impl<B: Bus> Agent<B> {
                             l.interface.clone(),
                             LastThroughput {
                                 tcp_mbps: out.tcp_mbps,
+                                udp: out.udp,
                                 util_mbps: out.util_mbps,
                                 busy: out.busy,
                                 unixtime: unix_now(),
@@ -195,7 +202,14 @@ impl<B: Bus> Agent<B> {
                     } else {
                         ProbeState::Quiet
                     };
-                    (out.util_mbps, out.tcp_mbps, state, token, out.error)
+                    (
+                        out.util_mbps,
+                        out.tcp_mbps,
+                        out.udp,
+                        state,
+                        token,
+                        out.error,
+                    )
                 } else {
                     Counters::inc(&c.probe_ping);
                     // Real traffic since the last probe: a link in use is
@@ -208,7 +222,7 @@ impl<B: Bus> Agent<B> {
                     } else {
                         ProbeState::Quiet
                     };
-                    (util, None, state, None, None)
+                    (util, None, None, state, None, None)
                 };
 
                 // Always-tier dims come from the live ping window — for a
@@ -231,6 +245,9 @@ impl<B: Bus> Agent<B> {
                     loss_pct: snap.loss_pct,
                     jitter_ms: snap.jitter_ms,
                     tcp_mbps: tcp,
+                    udp_mbps: udp.map(|u| u.mbps),
+                    udp_jitter_ms: udp.and_then(|u| u.jitter_ms),
+                    udp_loss_pct: udp.and_then(|u| u.loss_pct),
                     util_mbps: util,
                     state,
                     token,

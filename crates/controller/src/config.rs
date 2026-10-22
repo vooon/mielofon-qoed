@@ -92,9 +92,10 @@ impl Default for Tls {
 pub type Members = BTreeMap<String, IpAddr>;
 
 /// One quality class. Each dimension is optional: an unset threshold does not
-/// constrain that dimension. `rtt_ms`/`loss_pct`/`jitter_ms` are upper bounds
-/// (lower is better); `tcp_mbps` is a lower bound (higher is better).
-/// `ospf_cost` is the metric advertised for links classified into this class.
+/// constrain that dimension. `rtt_ms`/`loss_pct`/`jitter_ms`/`udp_loss_pct`/
+/// `udp_jitter_ms` are upper bounds (lower is better); `tcp_mbps`/`udp_mbps`
+/// are lower bounds (higher is better). `ospf_cost` is the metric advertised
+/// for links classified into this class.
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(default)]
 pub struct QualityClass {
@@ -104,6 +105,13 @@ pub struct QualityClass {
     /// (iputils `mdev`, or the max-min spread on busybox). Upper bound.
     pub jitter_ms: Option<f64>,
     pub tcp_mbps: Option<f64>,
+    /// Gated UDP leg (a fixed-rate stream, the raw path without TCP's
+    /// congestion control): rate the peer received (lower bound), and its
+    /// packet loss / jitter (upper bounds). Unset by default — the leg is
+    /// informational until thresholds are configured.
+    pub udp_mbps: Option<f64>,
+    pub udp_loss_pct: Option<f64>,
+    pub udp_jitter_ms: Option<f64>,
     pub ospf_cost: u32,
 }
 
@@ -115,6 +123,7 @@ impl QualityClass {
             jitter_ms: Some(jitter_ms),
             tcp_mbps: Some(tcp_mbps),
             ospf_cost,
+            ..Default::default()
         }
     }
 }

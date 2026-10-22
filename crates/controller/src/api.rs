@@ -35,6 +35,12 @@ pub struct QualityReq {
     pub jitter_ms: Option<f64>,
     #[serde(default)]
     pub tcp_mbps: Option<f64>,
+    #[serde(default)]
+    pub udp_mbps: Option<f64>,
+    #[serde(default)]
+    pub udp_jitter_ms: Option<f64>,
+    #[serde(default)]
+    pub udp_loss_pct: Option<f64>,
     pub util_mbps: f64,
     pub state: ProbeState,
     /// Echo of the fence token from a gated throughput command. When present,
@@ -112,6 +118,7 @@ pub async fn post_quality(
             loss_pct: req.loss_pct,
             jitter_ms: req.jitter_ms,
             tcp_mbps: req.tcp_mbps,
+            udp: (req.udp_mbps, req.udp_jitter_ms, req.udp_loss_pct),
             util_mbps: req.util_mbps,
             probe_state: req.state,
             token: req.token,
@@ -128,6 +135,8 @@ struct Measure {
     loss_pct: Option<f64>,
     jitter_ms: Option<f64>,
     tcp_mbps: Option<f64>,
+    /// UDP leg: (mbps, jitter_ms, loss_pct).
+    udp: (Option<f64>, Option<f64>, Option<f64>),
     util_mbps: f64,
     probe_state: ProbeState,
     token: Option<String>,
@@ -154,7 +163,8 @@ fn ingest_quality(state: &AppState, m: Measure) {
             m.jitter_ms,
             m.tcp_mbps,
             m.util_mbps,
-        ),
+        )
+        .with_udp(m.udp.0, m.udp.1, m.udp.2),
     );
 
     REPORTS.fetch_add(1, Ordering::Relaxed);
@@ -259,6 +269,9 @@ pub async fn agent_reply(
             loss_pct,
             jitter_ms,
             tcp_mbps,
+            udp_mbps,
+            udp_jitter_ms,
+            udp_loss_pct,
             util_mbps,
             state: probe_state,
             token,
@@ -279,6 +292,7 @@ pub async fn agent_reply(
                         loss_pct,
                         jitter_ms,
                         tcp_mbps,
+                        udp: (udp_mbps, udp_jitter_ms, udp_loss_pct),
                         util_mbps,
                         probe_state,
                         token,
@@ -402,11 +416,14 @@ pub async fn metrics(State(state): State<AppState>) -> impl IntoResponse {
     // sentinel value that a dashboard could mistake for a measurement.
     type Dim = fn(&QualityRecord) -> Option<f64>;
     let records = state.kv.all();
-    let series: [(&str, &str, Dim); 6] = [
+    let series: [(&str, &str, Dim); 9] = [
         ("mielofon_link_rtt_ms", "gauge", |r| r.rtt_ms),
         ("mielofon_link_loss_pct", "gauge", |r| r.loss_pct),
         ("mielofon_link_jitter_ms", "gauge", |r| r.jitter_ms),
         ("mielofon_link_tcp_mbps", "gauge", |r| r.tcp_mbps),
+        ("mielofon_link_udp_mbps", "gauge", |r| r.udp_mbps),
+        ("mielofon_link_udp_jitter_ms", "gauge", |r| r.udp_jitter_ms),
+        ("mielofon_link_udp_loss_pct", "gauge", |r| r.udp_loss_pct),
         ("mielofon_link_quality", "gauge", |r| {
             r.quality.map(|q| quality_label_value(q) as f64)
         }),

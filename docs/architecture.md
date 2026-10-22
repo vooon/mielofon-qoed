@@ -124,7 +124,9 @@ mTLS identity (`/etc/mielofon/agent.{key,cer}` + `ca.pem`) and a single
   is the fallback while the adjacency is down. rtt (mean), jitter (stddev) and
   loss come from a rolling window, with RTT taken from the kernel receive
   timestamp (`SO_TIMESTAMPNS`). The gated throughput test runs `iperf3 -J` (the node's
-  upload to the peer's `iperf3-server`) as a child process, one at a time,
+  upload to the peer's `iperf3-server`: a TCP stream, then a fixed-rate UDP
+  stream reporting the peer's received rate, jitter and loss) as a child
+  process, one at a time,
   skipped while the link carries more than `quiet_max_mbps`; pings pause
   during the test and a short grace after it, so its self-inflicted queueing
   is never recorded.

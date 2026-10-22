@@ -144,6 +144,15 @@ pub enum AgentReply {
         jitter_ms: Option<f64>,
         #[serde(default)]
         tcp_mbps: Option<f64>,
+        /// Gated UDP leg (a fixed-rate stream): received rate, jitter and
+        /// loss as the peer's iperf3 server saw them — the raw path, free of
+        /// TCP's congestion control.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        udp_mbps: Option<f64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        udp_jitter_ms: Option<f64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        udp_loss_pct: Option<f64>,
         util_mbps: f64,
         state: ProbeState,
         /// Fence token echoed from a throughput command.
@@ -272,6 +281,9 @@ mod tests {
             loss_pct: Some(0.0),
             jitter_ms: None,
             tcp_mbps: None,
+            udp_mbps: None,
+            udp_jitter_ms: None,
+            udp_loss_pct: None,
             util_mbps: 0.0,
             state: ProbeState::Quiet,
             token: None,
