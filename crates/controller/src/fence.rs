@@ -66,6 +66,15 @@ impl Fence {
         false
     }
 
+    /// Whether `agent` currently holds an unexpired lease on any link. The
+    /// scheduler uses this to issue one throughput probe per agent at a
+    /// time: the agent runs one iperf3 test at a time anyway, so a second
+    /// command would only come back `busy`.
+    pub fn held_by(&self, agent: &str, now: u64) -> bool {
+        let map = self.lease.lock().expect("fence lock poisoned");
+        map.values().any(|l| l.holder == agent && !l.expired(now))
+    }
+
     /// Non-destructive snapshot of all leases (for `/v1/status`).
     pub fn leases(&self) -> Vec<Lease> {
         let map = self.lease.lock().expect("fence lock poisoned");
@@ -121,6 +130,18 @@ mod tests {
         let l2 = f.acquire("agent-2", "sp1-cr", 30).unwrap();
         assert_eq!(l2.holder, "agent-2");
         let _ = l1;
+    }
+
+    #[test]
+    fn held_by_sees_only_live_leases_of_the_holder() {
+        let f = Fence::new();
+        let l = f.acquire("agent-1", "sp1-cr", 30).unwrap();
+        assert!(f.held_by("agent-1", now_secs()));
+        assert!(!f.held_by("agent-2", now_secs()));
+        // Expired by the clock: no longer counts as held.
+        assert!(!f.held_by("agent-1", now_secs() + 30));
+        f.release("sp1-cr", &l.token);
+        assert!(!f.held_by("agent-1", now_secs()));
     }
 
     #[test]

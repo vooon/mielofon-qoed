@@ -141,7 +141,10 @@ The fence is owned entirely by the controller scheduler. A lease has a TTL and
 token, is keyed by directed link, and the controller releases it when the
 corresponding reply arrives (or at once, when the command could not be
 queued). The agent itself runs one throughput test at a time per node and
-skips the test while the link carries traffic above `quiet_max_mbps`.
+skips the test while the link carries traffic above `quiet_max_mbps`, so the
+scheduler issues at most one throughput probe per agent at a time: a link
+whose agent still holds a lease on another link stays due and is issued on
+the tick after that lease is released.
 
 > Known limitation: the fence lives per controller process (in-memory) and
 > per directed link. The two halves of a tunnel, owned by agents registered
