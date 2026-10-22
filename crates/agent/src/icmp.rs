@@ -249,7 +249,9 @@ fn open_socket(link: &Link) -> io::Result<AsyncFd<Socket>> {
         );
     }
 
-    AsyncFd::new(sock)
+    // SAFETY: `sock` owns its descriptor for the whole life of the AsyncFd
+    // (I/O safety contract of `register`).
+    unsafe { AsyncFd::register(sock) }.map_err(|e| e.into_parts().1)
 }
 
 /// Read one datagram; returns its length and the kernel RX stamp (ns).
