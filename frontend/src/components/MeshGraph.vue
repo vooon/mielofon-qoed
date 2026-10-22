@@ -48,7 +48,9 @@ function edgeOpts(l, hubs) {
 		id: key,
 		from: l.from,
 		to: l.to,
-		label: showLabels.value || key === selectedKey ? l.interface : undefined,
+		// An empty string clears a label on update; `undefined` would be
+		// ignored by the DataSet merge and leave the old one in place.
+		label: showLabels.value || key === selectedKey ? l.interface : '',
 		hidden: leaf && !showLeaves.value,
 		width: leaf ? Math.max(1, qualityWidth(l.quality) * 0.6) : qualityWidth(l.quality),
 		// Show the from→to direction the record encodes.
