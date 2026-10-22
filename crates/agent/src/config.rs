@@ -49,6 +49,9 @@ pub struct Config {
     /// Prometheus textfile output (empty disables).
     pub prometheus_textfile: Option<String>,
     pub prometheus_interval: Duration,
+    /// Link re-discovery cadence (`bird status` + netifd over ubus, and the
+    /// applied-cost drift check that rides on the same snapshot).
+    pub refresh_interval: Duration,
     /// Syslog-style level: debug, info, notice, warning, err.
     pub log_level: String,
 }
@@ -118,6 +121,7 @@ impl Config {
             prometheus_interval: Duration::from_secs(
                 num(main, "prometheus_interval", 20_u64).max(1),
             ),
+            refresh_interval: Duration::from_secs(num(main, "refresh_interval", 60_u64).max(10)),
             log_level: opt(main, "log_level").unwrap_or("notice").to_string(),
         })
     }
@@ -171,6 +175,7 @@ mod tests {
         assert_eq!(c.agent, "node-0", "hostname is the default identity");
         assert_eq!(c.controller_url, "https://203.0.113.1:9552");
         assert_eq!(c.ping_interval, Duration::from_millis(500));
+        assert_eq!(c.refresh_interval, Duration::from_secs(60), "default");
         assert_eq!(c.quiet_max_mbps, 15.0, "malformed number falls back");
         assert_eq!(c.tcp_duration, Duration::from_secs(6));
         assert_eq!(c.ospf_protocol, "mesh_v3");
