@@ -10,40 +10,15 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
+use std::sync::atomic::{AtomicU64, Ordering};
+use tracing::warn;
+
+pub use mielofon_proto::{AgentReply, CommandReq};
 
 // ── Request/response types ────────────────────────────────────────────────
 
-#[derive(Debug, Deserialize)]
-pub struct AcquireReq {
-    pub agent: String,
-    pub link: String,
-    #[serde(default = "default_ttl")]
-    pub ttl_secs: u64,
-}
-
-fn default_ttl() -> u64 {
-    120
-}
-
-#[derive(Debug, Serialize)]
-pub struct AcquireResp {
-    pub ok: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub token: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub ttl: Option<u64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub holder: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub reason: Option<&'static str>,
-}
-
-#[derive(Debug, Deserialize)]
-pub struct ReleaseReq {
-    pub link: String,
-    pub token: String,
-}
-
+/// `POST /v1/quality`: a bare measurement without a command to answer (used
+/// by tooling and the e2e harness; agents answer commands on `/v1/agent/reply`).
 #[derive(Debug, Deserialize)]
 pub struct QualityReq {
     pub link: LinkKey,
@@ -83,6 +58,8 @@ pub struct StatusResp {
     pub members: Vec<String>,
     /// Per-member liveness reported by gossip (name -> health).
     pub peers: Vec<(String, crate::state::PeerHealthEntry)>,
+    /// Agents currently registered with this node.
+    pub agents: Vec<String>,
 }
 
 /// Query filter for `GET /v1/policy` and `GET /v1/quality`.
@@ -112,55 +89,15 @@ pub struct TsQuery {
     pub until: Option<u64>,
 }
 
-// ── Members+clients handlers (mTLS) ───────────────────────────────────────
-
-pub async fn fence_acquire(
-    State(state): State<AppState>,
-    Json(req): Json<AcquireReq>,
-) -> Json<AcquireResp> {
-    if req.agent.is_empty() || req.link.is_empty() {
-        return Json(AcquireResp {
-            ok: false,
-            token: None,
-            ttl: None,
-            holder: None,
-            reason: Some("invalid"),
-        });
-    }
-    match state
-        .fence
-        .acquire(&req.agent, &req.link, req.ttl_secs.max(1))
-    {
-        Ok(l) => Json(AcquireResp {
-            ok: true,
-            token: Some(l.token),
-            ttl: Some(l.ttl_secs),
-            holder: None,
-            reason: None,
-        }),
-        Err(l) => Json(AcquireResp {
-            ok: false,
-            token: None,
-            ttl: None,
-            holder: Some(l.holder),
-            reason: Some("held"),
-        }),
-    }
+fn not_found(msg: &str) -> Response {
+    (
+        StatusCode::NOT_FOUND,
+        Json(serde_json::json!({ "error": msg })),
+    )
+        .into_response()
 }
 
-pub async fn fence_release(
-    State(state): State<AppState>,
-    Json(req): Json<ReleaseReq>,
-) -> Json<AcquireResp> {
-    let ok = state.fence.release(&req.link, &req.token);
-    Json(AcquireResp {
-        ok,
-        token: None,
-        ttl: None,
-        holder: None,
-        reason: if ok { None } else { Some("notheld") },
-    })
-}
+// ── Measurement ingest (clients listener) ─────────────────────────────────
 
 pub async fn post_quality(
     State(state): State<AppState>,
@@ -205,7 +142,7 @@ struct Measure {
 /// stale dimension in the *sample* instead of resurrecting it (e.g. a 100%-loss
 /// ping must not keep an old rtt); the derived live record reflects the window.
 fn ingest_quality(state: &AppState, m: Measure) {
-    let ts = m.ts.unwrap_or_else(crate::tsdb::now_secs);
+    let ts = m.ts.unwrap_or_else(crate::clock::now_secs);
 
     state.tsdb.append(
         &m.link,
@@ -220,7 +157,7 @@ fn ingest_quality(state: &AppState, m: Measure) {
         ),
     );
 
-    bump_reports();
+    REPORTS.fetch_add(1, Ordering::Relaxed);
 
     // A gated throughput report carries the fence token — release the lease.
     if let Some(t) = m.token {
@@ -244,76 +181,56 @@ pub async fn register_agent(
     }
     state.workers.register(&req.agent, req.links, req.loopback);
 
-    // Seed current policy for the agent's links.
+    // Seed current policy for the agent's links. `register` forgot every
+    // cost previously sent, so each known cost is re-issued.
     let mut commands = Vec::new();
-    for (agent, link) in state.workers.owned_links() {
-        if agent != req.agent {
-            continue;
-        }
+    for link in state.workers.links_of(&req.agent) {
         if let Some(cost) = state.kv.get(&link).and_then(|r| r.ospf_cost) {
-            if state.workers.applied_sent(&agent, &link) != Some(cost) {
-                state.workers.set_applied_sent(&agent, &link, cost);
-                commands.push(crate::worker::WorkCmd::ApplyCost {
-                    id: uuid::Uuid::new_v4().to_string(),
-                    link: link.clone(),
-                    cost,
-                    traceparent: None,
-                });
-            }
+            state.workers.set_applied_sent(&req.agent, &link, cost);
+            commands.push(crate::worker::WorkCmd::ApplyCost {
+                id: crate::scheduler::cmd_id(),
+                link,
+                cost,
+                traceparent: None,
+            });
         }
     }
     Json(crate::worker::RegisterResp { ok: true, commands })
 }
 
-/// Pull (and drain) pending commands for an agent.
-pub async fn work_pull(
-    State(state): State<AppState>,
-    Json(req): Json<crate::worker::WorkReq>,
-) -> Json<crate::worker::WorkResp> {
-    let commands = state.workers.drain(&req.agent);
-    Json(crate::worker::WorkResp { commands })
-}
-
-/// Acknowledge an applied OSPF cost.
-pub async fn apply_ack(
-    State(state): State<AppState>,
-    Json(req): Json<crate::worker::ApplyAckReq>,
-) -> Json<serde_json::Value> {
-    state
-        .workers
-        .set_applied_sent(&req.agent, &req.link, req.cost);
-    Json(serde_json::json!({"ok": true}))
-}
-
-pub use mielofon_proto::{AgentReply, CommandReq};
-
 /// Long-polled work fetch: returns queued commands immediately, otherwise
 /// holds the request until a command is queued (scheduler `notify`) or the
-/// timeout expires. `timeout_ms == 0` behaves like the plain drain endpoint.
+/// timeout expires. `timeout_ms == 0` drains without waiting. An agent this
+/// node does not know (never registered, evicted, or the controller
+/// restarted) gets `404` so it re-registers instead of polling into the void.
 pub async fn command_long_poll(
     State(state): State<AppState>,
     Json(req): Json<CommandReq>,
-) -> Json<crate::worker::WorkResp> {
+) -> Response {
     let timeout = std::time::Duration::from_millis(req.timeout_ms.min(120_000));
-    if timeout.is_zero() {
-        return Json(crate::worker::WorkResp {
-            commands: state.workers.drain(&req.agent),
-        });
-    }
-    let notify = state.workers.notify(&req.agent);
     let deadline = tokio::time::Instant::now() + timeout;
+    let mut notify = None;
     loop {
-        let commands = state.workers.drain(&req.agent);
-        if !commands.is_empty() {
-            return Json(crate::worker::WorkResp { commands });
+        match state.workers.drain(&req.agent) {
+            None => return not_found("agent not registered"),
+            Some(commands) if !commands.is_empty() => {
+                return Json(crate::worker::WorkResp { commands }).into_response();
+            }
+            Some(_) => {}
         }
+        if timeout.is_zero() {
+            break;
+        }
+        let notify = notify.get_or_insert_with(|| state.workers.notify(&req.agent));
         tokio::select! {
             _ = notify.notified() => continue,
-            _ = tokio::time::sleep_until(deadline) => {
-                return Json(crate::worker::WorkResp { commands: Vec::new() });
-            }
+            _ = tokio::time::sleep_until(deadline) => break,
         }
     }
+    Json(crate::worker::WorkResp {
+        commands: Vec::new(),
+    })
+    .into_response()
 }
 
 /// Run `f` inside a span whose W3C parent is `traceparent`, when present.
@@ -334,7 +251,7 @@ pub async fn agent_reply(
 ) -> Json<serde_json::Value> {
     match reply {
         AgentReply::Probe {
-            agent: _,
+            agent,
             id,
             link,
             ts,
@@ -345,9 +262,14 @@ pub async fn agent_reply(
             util_mbps,
             state: probe_state,
             token,
+            note,
             traceparent,
         } => {
             with_traceparent(traceparent.as_deref(), || {
+                if let Some(note) = &note {
+                    PROBE_FAILURES.fetch_add(1, Ordering::Relaxed);
+                    warn!(agent, link = %link.id(), id, "probe failed: {note}");
+                }
                 ingest_quality(
                     &state,
                     Measure {
@@ -370,11 +292,17 @@ pub async fn agent_reply(
             id,
             link,
             cost,
-            note: _,
+            note,
             traceparent,
         } => {
-            with_traceparent(traceparent.as_deref(), || {
-                state.workers.set_applied_sent(&agent, &link, cost);
+            with_traceparent(traceparent.as_deref(), || match note {
+                None => state.workers.set_applied_sent(&agent, &link, cost),
+                Some(note) => {
+                    warn!(agent, link = %link.id(), cost, id, "apply_cost failed: {note}");
+                    state
+                        .workers
+                        .note_apply_failed(&agent, &link, crate::clock::now_secs());
+                }
             });
             Json(serde_json::json!({"ok": true, "id": id}))
         }
@@ -414,11 +342,7 @@ pub async fn frontend(State(state): State<AppState>, path: Option<Path<String>>)
     let rel = path.map(|Path(p)| p).unwrap_or_default();
     match crate::assets::get(root, &rel) {
         Some(r) => r,
-        None => (
-            StatusCode::NOT_FOUND,
-            Json(serde_json::json!({"error": "not found"})),
-        )
-            .into_response(),
+        None => not_found("not found"),
     }
 }
 
@@ -436,46 +360,72 @@ pub async fn frontend_graph(State(state): State<AppState>) -> Json<serde_json::V
 
 // ── Admin handlers (plain HTTP on loopback) ───────────────────────────────
 
-pub async fn metrics(State(state): State<AppState>) -> impl IntoResponse {
-    let mut body = String::new();
-    body.push_str(&format!(
-        "# HELP mielofon_quality_reports_total quality reports accepted\n# TYPE mielofon_quality_reports_total counter\nmielofon_quality_reports_total {}\n",
-        reports_total()
-    ));
-    body.push_str("# HELP mielofon_links number of known links\n# TYPE mielofon_links gauge\n");
-    body.push_str(&format!("mielofon_links {}\n", state.kv.len()));
+/// Escape a Prometheus label value (backslash, double quote, newline).
+fn prom_label(s: &str) -> String {
+    s.replace('\\', "\\\\")
+        .replace('"', "\\\"")
+        .replace('\n', "\\n")
+}
 
-    body.push_str("# HELP mielofon_build_info build and version information\n# TYPE mielofon_build_info gauge\n");
-    body.push_str(&format!(
-        "mielofon_build_info{{version=\"{}\",revision=\"{}\",rustc=\"{}\"}} 1\n",
+pub async fn metrics(State(state): State<AppState>) -> impl IntoResponse {
+    use std::fmt::Write as _;
+    let mut body = String::new();
+    let _ = writeln!(
+        body,
+        "# HELP mielofon_quality_reports_total quality reports accepted\n# TYPE mielofon_quality_reports_total counter\nmielofon_quality_reports_total {}",
+        REPORTS.load(Ordering::Relaxed)
+    );
+    let _ = writeln!(
+        body,
+        "# HELP mielofon_probe_failures_total probe replies that carried a failure note\n# TYPE mielofon_probe_failures_total counter\nmielofon_probe_failures_total {}",
+        PROBE_FAILURES.load(Ordering::Relaxed)
+    );
+    let _ = writeln!(
+        body,
+        "# HELP mielofon_links number of known links\n# TYPE mielofon_links gauge\nmielofon_links {}",
+        state.kv.len()
+    );
+    let _ = writeln!(
+        body,
+        "# HELP mielofon_agents number of registered agents\n# TYPE mielofon_agents gauge\nmielofon_agents {}",
+        state.workers.len()
+    );
+    let _ = writeln!(
+        body,
+        "# HELP mielofon_build_info build and version information\n# TYPE mielofon_build_info gauge\nmielofon_build_info{{version=\"{}\",revision=\"{}\",rustc=\"{}\"}} 1",
         env!("MIELOFON_VERSION"),
         env!("MIELOFON_GIT_REV"),
-        env!("MIELOFON_RUSTC"),
-    ));
+        prom_label(env!("MIELOFON_RUSTC")),
+    );
 
-    for (key, rec) in state.kv.all() {
-        let labels = format!(
-            "from=\"{}\",to=\"{}\",iface=\"{}\"",
-            key.from, key.to, key.interface
-        );
-        body.push_str(&format!(
-            "mielofon_link_rtt_ms{{{labels}}} {}\n",
-            rec.rtt_ms.unwrap_or(-1.0)
-        ));
-        body.push_str(&format!(
-            "mielofon_link_loss_pct{{{labels}}} {}\n",
-            rec.loss_pct.unwrap_or(-1.0)
-        ));
-        let quality = rec
-            .quality
-            .map(|q| format!("{:?}", q).to_lowercase())
-            .unwrap_or_else(|| "unknown".to_string());
-        body.push_str(&format!(
-            "mielofon_link_quality{{{labels}}} {}\n",
-            quality_label_value(&quality)
-        ));
-        if let Some(cost) = rec.ospf_cost {
-            body.push_str(&format!("mielofon_link_ospf_cost{{{labels}}} {cost}\n"));
+    // Per-link gauges. An unmeasured dimension is simply absent — never a
+    // sentinel value that a dashboard could mistake for a measurement.
+    type Dim = fn(&QualityRecord) -> Option<f64>;
+    let records = state.kv.all();
+    let series: [(&str, &str, Dim); 6] = [
+        ("mielofon_link_rtt_ms", "gauge", |r| r.rtt_ms),
+        ("mielofon_link_loss_pct", "gauge", |r| r.loss_pct),
+        ("mielofon_link_jitter_ms", "gauge", |r| r.jitter_ms),
+        ("mielofon_link_tcp_mbps", "gauge", |r| r.tcp_mbps),
+        ("mielofon_link_quality", "gauge", |r| {
+            r.quality.map(|q| quality_label_value(q) as f64)
+        }),
+        ("mielofon_link_ospf_cost", "gauge", |r| {
+            r.ospf_cost.map(f64::from)
+        }),
+    ];
+    for (name, kind, get) in series {
+        let _ = writeln!(body, "# TYPE {name} {kind}");
+        for (key, rec) in &records {
+            if let Some(v) = get(rec) {
+                let _ = writeln!(
+                    body,
+                    "{name}{{from=\"{}\",to=\"{}\",iface=\"{}\"}} {v}",
+                    prom_label(&key.from),
+                    prom_label(&key.to),
+                    prom_label(&key.interface)
+                );
+            }
         }
     }
 
@@ -486,13 +436,13 @@ pub async fn metrics(State(state): State<AppState>) -> impl IntoResponse {
     response
 }
 
-fn quality_label_value(q: &str) -> u8 {
+fn quality_label_value(q: crate::model::Quality) -> u8 {
+    use crate::model::Quality;
     match q {
-        "good" => 0,
-        "acceptable" => 1,
-        "poor" => 2,
-        "bad" => 3,
-        _ => 99,
+        Quality::Good => 0,
+        Quality::Acceptable => 1,
+        Quality::Poor => 2,
+        Quality::Bad => 3,
     }
 }
 
@@ -516,11 +466,7 @@ pub async fn get_quality(State(state): State<AppState>, Query(q): Query<LinkQuer
     let key = LinkKey::new(q.from, q.to, q.interface);
     match state.kv.get(&key) {
         Some(rec) => (StatusCode::OK, Json(rec)).into_response(),
-        None => (
-            StatusCode::NOT_FOUND,
-            Json(serde_json::json!({"error": "not found"})),
-        )
-            .into_response(),
+        None => not_found("not found"),
     }
 }
 
@@ -534,11 +480,7 @@ pub async fn get_policy(State(state): State<AppState>, Query(q): Query<LinkQuery
             "ts": rec.ts,
         }))
         .into_response(),
-        None => (
-            StatusCode::NOT_FOUND,
-            Json(serde_json::json!({"error": "not found"})),
-        )
-            .into_response(),
+        None => not_found("not found"),
     }
 }
 
@@ -552,6 +494,7 @@ pub async fn get_status(State(state): State<AppState>) -> Json<StatusResp> {
         leases: state.fence.leases(),
         members: state.cfg.members.keys().cloned().collect(),
         peers: state.peers.snapshot(),
+        agents: state.workers.agents(),
     })
 }
 
@@ -581,7 +524,7 @@ pub async fn get_trace(State(state): State<AppState>, Query(q): Query<TraceQuery
 /// until)` (defaults: last hour). `since > until` is rejected.
 pub async fn get_ts(State(state): State<AppState>, Query(q): Query<TsQuery>) -> Response {
     let key = crate::model::LinkKey::new(q.from, q.to, q.interface);
-    let now = crate::tsdb::now_secs();
+    let now = crate::clock::now_secs();
     let until = q.until.unwrap_or(now);
     let since = q.since.unwrap_or_else(|| until.saturating_sub(3600));
     if since > until {
@@ -641,13 +584,9 @@ pub fn cluster_router() -> Router<AppState> {
 pub fn client_router() -> Router<AppState> {
     Router::new()
         .route("/v1/quality", post(post_quality))
-        .route("/v1/fence/acquire", post(fence_acquire))
-        .route("/v1/fence/release", post(fence_release))
         .route("/v1/agent/register", post(register_agent))
-        .route("/v1/agent/work", post(work_pull))
         .route("/v1/agent/command", post(command_long_poll))
         .route("/v1/agent/reply", post(agent_reply))
-        .route("/v1/apply/ack", post(apply_ack))
         .layer(axum::middleware::from_fn(|req, next| {
             access_log("client", req, next)
         }))
@@ -674,14 +613,150 @@ pub fn admin_router() -> Router<AppState> {
 
 // ── Prometheus counters ────────────────────────────────────────────────────
 
-fn bump_reports() {
-    use std::sync::atomic::{AtomicU64, Ordering};
-    static C: AtomicU64 = AtomicU64::new(0);
-    C.fetch_add(1, Ordering::Relaxed);
-}
+/// Quality reports accepted since start (probe replies + `POST /v1/quality`).
+static REPORTS: AtomicU64 = AtomicU64::new(0);
+/// Probe replies that carried a failure note (e.g. iperf3 could not run).
+static PROBE_FAILURES: AtomicU64 = AtomicU64::new(0);
 
-fn reports_total() -> u64 {
-    use std::sync::atomic::{AtomicU64, Ordering};
-    static C: AtomicU64 = AtomicU64::new(0);
-    C.load(Ordering::Relaxed)
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::Config;
+    use axum::body::Body;
+    use axum::http::Request;
+    use http_body_util::BodyExt;
+    use tower::ServiceExt;
+
+    async fn call(
+        state: &AppState,
+        path: &str,
+        body: serde_json::Value,
+    ) -> (StatusCode, serde_json::Value) {
+        let app = client_router().with_state(state.clone());
+        let req = Request::builder()
+            .method("POST")
+            .uri(path)
+            .header("content-type", "application/json")
+            .body(Body::from(body.to_string()))
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        let status = resp.status();
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        (
+            status,
+            serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null),
+        )
+    }
+
+    #[tokio::test]
+    async fn unknown_agent_poll_is_404() {
+        let state = AppState::new(Config::default());
+        let (status, body) = call(
+            &state,
+            "/v1/agent/command",
+            serde_json::json!({ "agent": "spoke-1", "timeout_ms": 0 }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(body["error"], "agent not registered");
+
+        let (status, _) = call(
+            &state,
+            "/v1/agent/register",
+            serde_json::json!({ "agent": "spoke-1", "links": [] }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let (status, body) = call(
+            &state,
+            "/v1/agent/command",
+            serde_json::json!({ "agent": "spoke-1", "timeout_ms": 0 }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["commands"], serde_json::json!([]));
+    }
+
+    #[tokio::test]
+    async fn long_poll_wakes_on_push_before_wait() {
+        // A command queued between the poll's drain and its wait must still
+        // wake the poll (Notify permit semantics), not sit for the full timeout.
+        let state = AppState::new(Config::default());
+        let link = LinkKey::new("spoke-1", "hub-a", "awg_hub_a");
+        state.workers.register("spoke-1", vec![link.clone()], None);
+        let pusher = {
+            let state = state.clone();
+            tokio::spawn(async move {
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                state.workers.push(
+                    "spoke-1",
+                    crate::worker::WorkCmd::Probe {
+                        id: "x".into(),
+                        tier: crate::worker::Tier::Always,
+                        token: None,
+                        link,
+                        traceparent: None,
+                    },
+                );
+            })
+        };
+        let started = std::time::Instant::now();
+        let (status, body) = call(
+            &state,
+            "/v1/agent/command",
+            serde_json::json!({ "agent": "spoke-1", "timeout_ms": 10_000 }),
+        )
+        .await;
+        pusher.await.unwrap();
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["commands"].as_array().unwrap().len(), 1);
+        assert!(started.elapsed() < std::time::Duration::from_secs(5));
+    }
+
+    #[tokio::test]
+    async fn failed_apply_is_not_treated_as_applied() {
+        let state = AppState::new(Config::default());
+        let link = LinkKey::new("spoke-1", "hub-a", "awg_hub_a");
+        state.workers.register("spoke-1", vec![link.clone()], None);
+        state.workers.set_applied_sent("spoke-1", &link, 50);
+        let (status, _) = call(
+            &state,
+            "/v1/agent/reply",
+            serde_json::json!({
+                "kind": "applied", "agent": "spoke-1", "id": "apply/1",
+                "link": link, "cost": 50, "note": "bird returned code 3"
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(state.workers.applied_sent("spoke-1", &link), None);
+    }
+
+    #[tokio::test]
+    async fn register_reseeds_known_costs() {
+        let state = AppState::new(Config::default());
+        let link = LinkKey::new("spoke-1", "hub-a", "awg_hub_a");
+        let mut rec = QualityRecord::new(
+            Some(10.0),
+            Some(0.0),
+            Some(1.0),
+            None,
+            None,
+            0.0,
+            ProbeState::Quiet,
+        );
+        rec.ospf_cost = Some(20);
+        state.kv.put(link.clone(), rec);
+        for _ in 0..2 {
+            // Every registration re-seeds, even a repeat with no change.
+            let (_, body) = call(
+                &state,
+                "/v1/agent/register",
+                serde_json::json!({ "agent": "spoke-1", "links": [link] }),
+            )
+            .await;
+            assert_eq!(body["commands"][0]["type"], "apply_cost");
+            assert_eq!(body["commands"][0]["cost"], 20);
+        }
+    }
 }

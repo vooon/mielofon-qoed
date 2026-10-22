@@ -15,7 +15,9 @@
 //!
 //! Each directed link has exactly one producer (the probing agent), so per-link
 //! timestamps are monotonic and gossip `merge_delta` skips anything older than
-//! the last ts it saw for a link (idempotent resends are harmless).
+//! the last ts it saw for a link (idempotent resends are harmless). Two
+//! reports landing in the same second (an always probe and a throughput
+//! result) are merged dimension-wise rather than the second one being lost.
 
 use crate::config::TsConfig;
 use crate::model::{LinkKey, ProbeState};
@@ -25,8 +27,9 @@ use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
-use std::time::{SystemTime, UNIX_EPOCH};
 use tracing::warn;
+
+pub use crate::clock::now_secs;
 
 /// Length of a per-link aggregate bucket, in seconds.
 pub const BUCKET_SECS: u64 = 60;
@@ -47,7 +50,7 @@ fn state_code(s: ProbeState) -> u8 {
 }
 
 /// One ingested measurement. Timestamps are whole seconds.
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Default, Serialize, Deserialize)]
 pub struct RawSample {
     pub ts: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -65,6 +68,21 @@ pub struct RawSample {
 }
 
 impl RawSample {
+    /// Fold a same-second sample into this one: every dimension `other`
+    /// measured replaces ours, utilisation takes the larger reading and the
+    /// state the more severe one (quiet < busy < conflict).
+    fn merged_with(&self, other: &RawSample) -> RawSample {
+        RawSample {
+            ts: self.ts,
+            rtt_ms: other.rtt_ms.or(self.rtt_ms),
+            loss_pct: other.loss_pct.or(self.loss_pct),
+            jitter_ms: other.jitter_ms.or(self.jitter_ms),
+            tcp_mbps: other.tcp_mbps.or(self.tcp_mbps),
+            util_mbps: self.util_mbps.max(other.util_mbps),
+            state: self.state.max(other.state),
+        }
+    }
+
     pub fn from_dims(
         state: ProbeState,
         ts: u64,
@@ -143,19 +161,25 @@ impl Bucket {
     fn add(&mut self, s: &RawSample) {
         self.bucket = s.ts - s.ts % BUCKET_SECS;
         self.n += 1;
-        if let Some(v) = s.rtt_ms {
+        self.add_dims(s, &RawSample::default());
+        self.util.merge(s.util_mbps);
+    }
+
+    /// Fold in the dimensions `s` has that `already` (the previously counted
+    /// version of the same sample) did not — a same-second merge.
+    fn add_dims(&mut self, s: &RawSample, already: &RawSample) {
+        if let (Some(v), None) = (s.rtt_ms, already.rtt_ms) {
             self.rtt.merge(v);
         }
-        if let Some(v) = s.loss_pct {
+        if let (Some(v), None) = (s.loss_pct, already.loss_pct) {
             self.loss.merge(v);
         }
-        if let Some(v) = s.jitter_ms {
+        if let (Some(v), None) = (s.jitter_ms, already.jitter_ms) {
             self.jitter.merge(v);
         }
-        if let Some(v) = s.tcp_mbps {
+        if let (Some(v), None) = (s.tcp_mbps, already.tcp_mbps) {
             self.tcp.merge(v);
         }
-        self.util.merge(s.util_mbps);
     }
 }
 
@@ -232,23 +256,38 @@ impl Tsdb {
 
     /// Append a locally-ingested sample (probe reply or POST /v1/quality).
     pub fn append(&self, link: &LinkKey, s: RawSample) {
-        let _ = self.ingest(link, s);
+        let _ = self.ingest(link, s, true);
     }
 
     /// Core ingest: dedup against the per-link window and return true when the
-    /// sample was new (not already seen at this ts).
-    fn ingest(&self, link: &LinkKey, s: RawSample) -> bool {
+    /// sample changed the ring (new ts, or new dimensions on the same second).
+    /// `persist` queues the sample for the redb flush; hydration from redb
+    /// passes false so history is not rewritten.
+    fn ingest(&self, link: &LinkKey, mut s: RawSample, persist: bool) -> bool {
+        // The previously stored version of a same-second sample, so the
+        // bucket only counts the dimensions that are new.
+        let mut merged_from: Option<RawSample> = None;
         {
             let mut map = self.by_link.write().expect("tsdb by_link write");
             let ring = map.entry(link.clone()).or_default();
-            if ring.back().is_some_and(|b| b.ts >= s.ts) {
-                // Duplicate (resend) or out-of-order — drop, keep newest.
-                return false;
-            }
-            let pos = ring.partition_point(|x| x.ts < s.ts);
-            ring.insert(pos, s);
-            if ring.len() > RAW_RING_CAP {
-                ring.pop_front();
+            match ring.back_mut() {
+                // Out-of-order (older than the newest) — drop, keep newest.
+                Some(back) if back.ts > s.ts => return false,
+                Some(back) if back.ts == s.ts => {
+                    let merged = back.merged_with(&s);
+                    if merged == *back {
+                        return false; // exact resend
+                    }
+                    merged_from = Some(*back);
+                    *back = merged;
+                    s = merged;
+                }
+                _ => {
+                    ring.push_back(s);
+                    if ring.len() > RAW_RING_CAP {
+                        ring.pop_front();
+                    }
+                }
             }
         }
 
@@ -261,6 +300,8 @@ impl Tsdb {
                 let mut b = Bucket::default();
                 b.add(&s);
                 ring.insert(pos, b);
+            } else if let Some(prev) = &merged_from {
+                ring[pos].add_dims(&s, prev);
             } else {
                 ring[pos].add(&s);
             }
@@ -276,13 +317,12 @@ impl Tsdb {
             recent.push_back((seq, link.clone(), s));
         }
 
-        if self.cfg.path.is_empty() {
-            return true;
+        if persist && !self.cfg.path.is_empty() {
+            self.pending
+                .lock()
+                .expect("tsdb pending lock")
+                .push((link.clone(), s));
         }
-        self.pending
-            .lock()
-            .expect("tsdb pending lock")
-            .push((link.clone(), s));
         true
     }
 
@@ -291,7 +331,7 @@ impl Tsdb {
     pub fn merge_delta(&self, samples: &[(LinkKey, RawSample)]) {
         let mut accepted = 0;
         for (link, s) in samples {
-            if self.ingest(link, *s) {
+            if self.ingest(link, *s, true) {
                 accepted += 1;
             }
         }
@@ -551,7 +591,7 @@ impl Tsdb {
                             let (link, _ts) = item.0.value();
                             if let Ok(s) = serde_json::from_slice(&item.1.value()) {
                                 let key = parse_link_id(link);
-                                let _ = self.ingest(&key, s);
+                                let _ = self.ingest(&key, s, false);
                             }
                         }
                     }
@@ -700,13 +740,8 @@ fn code_to_state(code: u8) -> ProbeState {
     }
 }
 
-fn info_loaded(_path: &str) {}
-
-pub fn now_secs() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs()
+fn info_loaded(path: &str) {
+    tracing::info!(path, "tsdb: history loaded from redb");
 }
 
 /// Background durability + retention loop.
@@ -838,6 +873,33 @@ mod tests {
         tsdb.append(&a, sample(100, 5.0));
         tsdb.append(&a, sample(100, 5.0)); // resend
         assert_eq!(tsdb.query(&a, 0, 1000).samples.len(), 1);
+        // Nothing new to gossip for the resend.
+        assert_eq!(tsdb.take_delta(0, 10).0.len(), 1);
+    }
+
+    #[test]
+    fn same_second_samples_merge_dimensions() {
+        // An always probe and a throughput result landing in the same second
+        // must not lose the throughput dimension for the next 300s.
+        let tsdb = Tsdb::new(TsConfig::default());
+        let (a, _) = links();
+        tsdb.append(&a, sample(120, 5.0));
+        tsdb.append(
+            &a,
+            RawSample::from_dims(ProbeState::Busy, 120, None, None, None, Some(42.0), 3.0),
+        );
+        let r = tsdb.query(&a, 0, 1000);
+        assert_eq!(r.samples.len(), 1);
+        let s = r.samples[0];
+        assert_eq!(
+            (s.rtt_ms, s.tcp_mbps, s.util_mbps, s.state),
+            (Some(5.0), Some(42.0), 3.0, 1)
+        );
+        // The bucket counted one sample, with the tcp dimension folded in.
+        assert_eq!(r.buckets[0].n, 1);
+        assert_eq!(r.buckets[0].tcp.as_ref().map(|t| t.n), Some(1));
+        // The merged sample is gossiped as a new delta entry.
+        assert_eq!(tsdb.take_delta(0, 10).0.len(), 2);
     }
 
     #[test]

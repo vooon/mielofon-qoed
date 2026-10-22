@@ -35,18 +35,24 @@ impl PeerHealth {
 
     /// Record a successful round-trip with `peer`.
     pub fn mark_ok(&self, peer: &str, rtt_ms: u64) {
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs();
         let mut map = self.inner.write().unwrap_or_else(|e| e.into_inner());
         map.insert(
             peer.to_string(),
             PeerHealthEntry {
-                last_ok_ts: Some(now),
+                last_ok_ts: Some(crate::clock::now_secs()),
                 rtt_ms: Some(rtt_ms),
             },
         );
+    }
+
+    /// Record that `peer` reached us (inbound push); keeps the last rtt.
+    pub fn mark_seen(&self, peer: &str) {
+        let mut map = self.inner.write().unwrap_or_else(|e| e.into_inner());
+        let e = map.entry(peer.to_string()).or_insert(PeerHealthEntry {
+            last_ok_ts: None,
+            rtt_ms: None,
+        });
+        e.last_ok_ts = Some(crate::clock::now_secs());
     }
 
     /// All known peer entries (name -> health).

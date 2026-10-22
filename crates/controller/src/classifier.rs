@@ -14,10 +14,17 @@
 //! classifier stops touching it (the underlay owns hard outages).
 //!
 //! Hysteresis: a link's class only changes once a new class has been observed
-//! for `hysteresis_passes` consecutive classifier passes. This stops a single
-//! noisy sample — or a metric wobbling across a threshold — from flipping the
-//! class and re-routing OSPF cost. The first classification of a link applies
-//! immediately.
+//! on `hysteresis_passes` consecutive *fresh samples* (a pass that sees the
+//! same newest sample as the previous pass does not count). This stops a
+//! single noisy sample — or a metric wobbling across a threshold — from
+//! flipping the class and re-routing OSPF cost. The first classification of a
+//! link applies immediately.
+//!
+//! Ownership: a node derives policy only for links of agents registered with
+//! it — the links its scheduler can act on. Every member replicates the raw
+//! samples, so the reverse half of a tunnel owned elsewhere is still available
+//! for pairing, while the derived record for a link has exactly one writer
+//! cluster-wide and the LWW gossip merge cannot flap between members.
 //!
 //! Pairing: the two directed halves of one tunnel (`A→B`, `B→A`) are
 //! classified from a merged view (`classifier.pair_cost`, see
@@ -25,14 +32,14 @@
 //! drift the two OSPF costs apart. The derived record still carries each
 //! half's own measurements.
 
+use crate::clock::now_secs;
 use crate::config::PairCost;
 use crate::model::{LinkKey, ProbeState, Quality, QualityRecord};
 use crate::quality;
 use crate::state::AppState;
 use crate::store::{WindowSpec, WindowView};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::RwLock;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Per-link last-derived policy, used to hold a cost while a link is busy and
 /// as the reference class for hysteresis.
@@ -42,11 +49,14 @@ struct LastPolicy {
     ospf_cost: u32,
 }
 
-/// A candidate class being confirmed across consecutive passes.
+/// A candidate class being confirmed across consecutive fresh samples.
 #[derive(Clone, Copy)]
 struct Pending {
     quality: Quality,
+    /// Fresh samples (distinct newest-sample timestamps) that agreed so far.
     passes: u32,
+    /// Timestamp of the newest sample counted last.
+    last_ts: u64,
 }
 
 pub struct ClassifierState {
@@ -67,13 +77,6 @@ impl Default for ClassifierState {
     fn default() -> Self {
         Self::new()
     }
-}
-
-fn now_secs() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs()
 }
 
 /// Map each link to its reverse half (`from`/`to` swapped). A link is paired
@@ -138,7 +141,7 @@ pub fn merge_pair(own: &WindowView, rev: &WindowView, mode: PairCost) -> WindowV
     v
 }
 
-/// One classification pass over all links with recent samples.
+/// One classification pass over the links owned by this node's agents.
 pub fn classify_once(state: &AppState) {
     let cfg = &state.cfg;
     let spec = WindowSpec {
@@ -158,8 +161,17 @@ pub fn classify_once(state: &AppState) {
     } else {
         pair_links(&links)
     };
+    let owned: HashSet<LinkKey> = state
+        .workers
+        .owned_links()
+        .into_iter()
+        .map(|(_, l)| l)
+        .collect();
 
     for link in links {
+        if !owned.contains(&link) {
+            continue;
+        }
         let Some(view) = views.get(&link) else {
             continue;
         };
@@ -183,8 +195,8 @@ pub fn classify_once(state: &AppState) {
         }
 
         // Fresh data: classify from the window, then apply hysteresis — a new
-        // class only takes effect after `hysteresis_passes` consecutive passes
-        // agree. The first classification of a link applies immediately.
+        // class only takes effect after `hysteresis_passes` consecutive fresh
+        // samples agree. The first classification of a link applies immediately.
         let class_view = match pairs.get(&link).and_then(|rev| views.get(rev)) {
             Some(rev) => merge_pair(view, rev, cfg.classifier.pair_cost),
             None => view.clone(),
@@ -207,28 +219,32 @@ pub fn classify_once(state: &AppState) {
                     .remove(&link);
                 candidate
             }
-            // Candidate differs: require hysteresis_passes consecutive passes.
-            Some(_) => {
+            // Candidate differs: require hysteresis_passes consecutive fresh
+            // samples (a pass re-reading the same sample does not count).
+            Some(last) => {
                 let mut pending = state.classifier.pending.write().expect("classifier lock");
                 let entry = pending.entry(link.clone()).or_insert(Pending {
                     quality: candidate,
                     passes: 0,
+                    last_ts: 0,
                 });
-                if entry.quality == candidate {
-                    entry.passes += 1;
-                    if entry.passes >= cfg.classifier.hysteresis_passes.max(1) {
-                        pending.remove(&link);
-                        candidate
-                    } else {
-                        current.unwrap().quality
-                    }
-                } else {
+                if entry.quality != candidate {
                     // A different candidate interrupted the confirmation.
                     *entry = Pending {
                         quality: candidate,
-                        passes: 1,
+                        passes: 0,
+                        last_ts: 0,
                     };
-                    current.unwrap().quality
+                }
+                if entry.last_ts != view.ts {
+                    entry.passes += 1;
+                    entry.last_ts = view.ts;
+                }
+                if entry.passes >= cfg.classifier.hysteresis_passes.max(1) {
+                    pending.remove(&link);
+                    candidate
+                } else {
+                    last.quality
                 }
             }
         };
@@ -299,6 +315,18 @@ mod tests {
         state_with_hyst(fresh, carry, 1)
     }
 
+    /// Register every link's `from` node as an agent owning it, so the
+    /// classifier (which only derives policy for owned links) handles it.
+    fn own(state: &AppState, links: &[&LinkKey]) {
+        let mut by_agent: HashMap<&str, Vec<LinkKey>> = HashMap::new();
+        for l in links {
+            by_agent.entry(&l.from).or_default().push((*l).clone());
+        }
+        for (agent, links) in by_agent {
+            state.workers.register(agent, links, None);
+        }
+    }
+
     fn state_with_hyst(fresh: u64, carry: u64, hysteresis_passes: u32) -> AppState {
         let cfg = Config {
             classifier: Classifier {
@@ -341,7 +369,8 @@ mod tests {
     fn derives_policy_from_window_and_writes_kv() {
         let state = state_with(1200, 3600);
         let link = LinkKey::new("spoke-1", "hub-a", "awg_hub_a");
-        let base = crate::tsdb::now_secs();
+        own(&state, &[&link]);
+        let base = crate::clock::now_secs();
         // Old throughput sample (throttled) + fresh always probes.
         state.tsdb.append(
             &link,
@@ -371,7 +400,8 @@ mod tests {
     fn busy_link_holds_last_cost() {
         let state = state_with(1200, 3600);
         let link = LinkKey::new("spoke-1", "hub-a", "awg_hub_a");
-        let base = crate::tsdb::now_secs();
+        own(&state, &[&link]);
+        let base = crate::clock::now_secs();
         // First a good healthy link -> Good cost.
         state.tsdb.append(
             &link,
@@ -403,8 +433,9 @@ mod tests {
     fn no_recent_data_means_no_derived_record() {
         let state = state_with(1200, 3600);
         let link = LinkKey::new("spoke-1", "hub-a", "awg_hub_a");
+        own(&state, &[&link]);
         // Beyond the carry horizon: window() yields None, KV stays empty.
-        let old_ts = crate::tsdb::now_secs() - 7200;
+        let old_ts = crate::clock::now_secs() - 7200;
         state.tsdb.append(
             &link,
             RawSample::from_dims(
@@ -425,7 +456,8 @@ mod tests {
     fn busy_from_start_link_stays_on_map_unclassified() {
         let state = state_with(1200, 3600);
         let link = LinkKey::new("spoke-1", "hub-a", "awg_hub_a");
-        let base = crate::tsdb::now_secs();
+        own(&state, &[&link]);
+        let base = crate::clock::now_secs();
         // A link that was busy on its very first report: no held cost exists.
         append_busy(&state, &link, base);
         classify_once(&state);
@@ -442,7 +474,8 @@ mod tests {
         // cannot flip the cost.
         let state = state_with_hyst(1200, 3600, 3);
         let link = LinkKey::new("spoke-1", "hub-a", "awg_hub_a");
-        let mut ts = crate::tsdb::now_secs();
+        own(&state, &[&link]);
+        let mut ts = crate::clock::now_secs();
 
         // Establish a good link (low rtt, low jitter, healthy throughput).
         state.tsdb.append(
@@ -492,6 +525,51 @@ mod tests {
             }
         }
         assert!(got_bad, "sustained degradation must eventually apply");
+    }
+
+    #[test]
+    fn hysteresis_counts_fresh_samples_not_passes() {
+        let state = state_with_hyst(1200, 3600, 3);
+        let link = LinkKey::new("spoke-1", "hub-a", "awg_hub_a");
+        own(&state, &[&link]);
+        let ts = crate::clock::now_secs();
+        append_dims(&state, &link, ts, 10.0, Some(90.0));
+        classify_once(&state);
+        assert_eq!(state.kv.get(&link).unwrap().quality, Some(Quality::Good));
+
+        // One degraded sample, re-read by many passes: must never flip.
+        append_dims(&state, &link, ts + 5, 600.0, Some(90.0));
+        for _ in 0..10 {
+            classify_once(&state);
+            assert_eq!(state.kv.get(&link).unwrap().quality, Some(Quality::Good));
+        }
+        // Two more fresh degraded samples complete the confirmation.
+        append_dims(&state, &link, ts + 10, 600.0, Some(90.0));
+        classify_once(&state);
+        assert_eq!(state.kv.get(&link).unwrap().quality, Some(Quality::Good));
+        append_dims(&state, &link, ts + 15, 600.0, Some(90.0));
+        classify_once(&state);
+        assert_eq!(state.kv.get(&link).unwrap().quality, Some(Quality::Bad));
+    }
+
+    #[test]
+    fn only_owned_links_get_a_derived_record() {
+        // The reverse half is replicated from another member: it feeds the
+        // pairing but is not written here (its owner derives it).
+        let ab = LinkKey::new("node-0", "hub-a", "awg_hub_a");
+        let ba = LinkKey::new("hub-a", "node-0", "awg_node_0");
+        let now = crate::clock::now_secs();
+        let state = state_with_pair(PairCost::Directional);
+        own(&state, &[&ab]);
+        append_dims(&state, &ab, now, 15.0, None);
+        append_dims(&state, &ba, now, 120.0, None);
+        classify_once(&state);
+        assert_eq!(
+            cost(&state, &ab),
+            Some(50),
+            "paired with the replicated half"
+        );
+        assert!(state.kv.get(&ba).is_none(), "not owned here");
     }
 
     fn state_with_pair(mode: PairCost) -> AppState {
@@ -560,9 +638,10 @@ mod tests {
         // side saw congestion): without pairing the costs drift apart.
         let ab = LinkKey::new("node-0", "hub-a", "awg_hub_a");
         let ba = LinkKey::new("hub-a", "node-0", "awg_node_0");
-        let now = crate::tsdb::now_secs();
+        let now = crate::clock::now_secs();
 
         let state = state_with_pair(PairCost::Directional);
+        own(&state, &[&ab, &ba]);
         append_dims(&state, &ab, now, 15.0, None);
         append_dims(&state, &ba, now, 120.0, None);
         classify_once(&state);
@@ -576,6 +655,7 @@ mod tests {
         assert_eq!(state.kv.get(&ab).unwrap().rtt_ms, Some(15.0));
 
         let off = state_with_pair(PairCost::Off);
+        own(&off, &[&ab, &ba]);
         append_dims(&off, &ab, now, 15.0, None);
         append_dims(&off, &ba, now, 120.0, None);
         classify_once(&off);
@@ -589,9 +669,10 @@ mod tests {
         // direction is healthy; rtt is good both ways.
         let ab = LinkKey::new("node-0", "hub-a", "awg_hub_a");
         let ba = LinkKey::new("hub-a", "node-0", "awg_node_0");
-        let now = crate::tsdb::now_secs();
+        let now = crate::clock::now_secs();
 
         let dir = state_with_pair(PairCost::Directional);
+        own(&dir, &[&ab, &ba]);
         append_dims(&dir, &ab, now, 15.0, Some(1.5));
         append_dims(&dir, &ba, now, 15.0, Some(80.0));
         classify_once(&dir);
@@ -603,6 +684,7 @@ mod tests {
         );
 
         let sym = state_with_pair(PairCost::Symmetric);
+        own(&sym, &[&ab, &ba]);
         append_dims(&sym, &ab, now, 15.0, Some(1.5));
         append_dims(&sym, &ba, now, 15.0, Some(80.0));
         classify_once(&sym);

@@ -23,6 +23,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Mutex;
 use std::time::Instant;
 use tokio::sync::oneshot;
+use tracing::Instrument;
 
 const HOP_CAP: usize = 24;
 const HOP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
@@ -246,9 +247,9 @@ pub async fn run_trace(state: &AppState, req: TraceRequest) -> Result<TraceResul
     }
 
     let span = tracing::info_span!("trace.walk", from = %req.from, target = %prefix);
-    let _g = span.enter();
-    let result = walk(state, &req.from, req.to.clone(), &prefix).await;
-    drop(_g);
+    let result = walk(state, &req.from, req.to.clone(), &prefix)
+        .instrument(span)
+        .await;
 
     state.trace.cache_put(&req.from, &result);
     Ok(result)
@@ -345,7 +346,7 @@ async fn walk(state: &AppState, from: &str, to: Option<String>, prefix: &str) ->
         from: from.to_string(),
         to,
         prefix: prefix.to_string(),
-        ts: now_secs(),
+        ts: crate::clock::now_secs(),
         complete,
         cap_hit,
         edges,
@@ -407,8 +408,7 @@ async fn dispatch_hop(
     }
 
     let span = tracing::info_span!("trace.hop", agent = %agent, target = %target);
-    let _g = span.enter();
-    match tokio::time::timeout(HOP_TIMEOUT, rx).await {
+    match tokio::time::timeout(HOP_TIMEOUT, rx).instrument(span).await {
         Ok(Ok(reply)) => {
             tracing::info!(
                 agent = %agent,
@@ -430,15 +430,14 @@ async fn dispatch_hop(
 fn peer_for_egress(state: &AppState, node: &str, iface: &str) -> Option<String> {
     state
         .workers
-        .owned_links()
+        .links_of(node)
         .into_iter()
-        .find(|(agent, l)| agent == node && l.interface == iface)
-        .map(|(_, l)| l.to)
+        .find(|l| l.interface == iface)
+        .map(|l| l.to)
 }
 
 /// Controller-side KV metrics for the edge `node --iface--> peer`, plus whether
 /// the edge counts as broken (conflict / bad / missing quality / no record).
-/// Controller-side KV metrics for one edge, plus whether it counts as broken.
 struct EdgeMetrics {
     broken: bool,
     reason: Option<String>,
@@ -495,13 +494,6 @@ fn edge_metrics(
             ospf_cost: None,
         },
     }
-}
-
-fn now_secs() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs()
 }
 
 #[cfg(test)]
@@ -570,7 +562,7 @@ mod tests {
                 .workers
                 .agents()
                 .into_iter()
-                .map(|n| (n.clone(), state.workers.drain(&n)))
+                .map(|n| (n.clone(), state.workers.drain(&n).unwrap_or_default()))
                 .filter(|(_, c)| !c.is_empty())
                 .collect();
 

@@ -17,9 +17,8 @@
 //! The controller never writes a "dead/broken" state/cost — hard outages are
 //! owned by the underlay's dead-interval.
 
-/// Classification quality config + record types.
 use crate::config::Quality as QualityCfg;
-use crate::model::{ProbeState, Quality, QualityRecord};
+use crate::model::Quality;
 use crate::store::WindowView;
 
 /// OSPF cost for `q`, taken from the configured class.
@@ -32,87 +31,31 @@ pub fn cost_for_quality(cfg: &QualityCfg, q: Quality) -> u32 {
     }
 }
 
-/// Classify a measurement, honouring a busy/conflict probe state (a busy link
-/// must never be reported degraded — skip classification).
-pub fn classify(cfg: &QualityCfg, rec: &QualityRecord) -> Option<Quality> {
-    if rec.state == ProbeState::Busy {
-        return None; // no measurement of real quality while busy
-    }
-    Some(classify_best_effort(cfg, rec))
-}
-
 /// Classify a measurement collapsed from a TSDB window. Dimensions that fell
 /// outside their freshness/carry horizon are `None` and simply do not
 /// constrain; a carried `tcp_mbps` (older but within the carry window) still
 /// participates, which is the point of decoupling classification from the
 /// latest datapoint.
 pub fn classify_window(cfg: &QualityCfg, view: &WindowView) -> Quality {
-    let rec = QualityRecord {
-        ts: view.ts,
-        rtt_ms: view.rtt_ms,
-        loss_pct: view.loss_pct,
-        jitter_ms: view.jitter_ms,
-        tcp_mbps: view.tcp_mbps,
-        udp_mbps: None,
-        util_mbps: view.util_mbps,
-        state: view.state,
-        quality: None,
-        ospf_cost: None,
-    };
-    classify_best_effort(cfg, &rec)
-}
-
-fn classify_best_effort(cfg: &QualityCfg, rec: &QualityRecord) -> Quality {
-    let rtt_score = rec.rtt_ms.map(|m| {
-        score_upper(
-            m,
-            [
-                cfg.good.rtt_ms,
-                cfg.acceptable.rtt_ms,
-                cfg.poor.rtt_ms,
-                cfg.bad.rtt_ms,
-            ],
-        )
-    });
-    let loss_score = rec.loss_pct.map(|m| {
-        score_upper(
-            m,
-            [
-                cfg.good.loss_pct,
-                cfg.acceptable.loss_pct,
-                cfg.poor.loss_pct,
-                cfg.bad.loss_pct,
-            ],
-        )
-    });
-    let jitter_score = rec.jitter_ms.map(|m| {
-        score_upper(
-            m,
-            [
-                cfg.good.jitter_ms,
-                cfg.acceptable.jitter_ms,
-                cfg.poor.jitter_ms,
-                cfg.bad.jitter_ms,
-            ],
-        )
-    });
-    let tcp_score = rec.tcp_mbps.map(|m| {
-        score_lower(
-            m,
-            [
-                cfg.good.tcp_mbps,
-                cfg.acceptable.tcp_mbps,
-                cfg.poor.tcp_mbps,
-                cfg.bad.tcp_mbps,
-            ],
-        )
-    });
+    let classes = [&cfg.good, &cfg.acceptable, &cfg.poor, &cfg.bad];
+    let rtt = view
+        .rtt_ms
+        .map(|m| score_upper(m, classes.map(|c| c.rtt_ms)));
+    let loss = view
+        .loss_pct
+        .map(|m| score_upper(m, classes.map(|c| c.loss_pct)));
+    let jitter = view
+        .jitter_ms
+        .map(|m| score_upper(m, classes.map(|c| c.jitter_ms)));
+    let tcp = view
+        .tcp_mbps
+        .map(|m| score_lower(m, classes.map(|c| c.tcp_mbps)));
 
     worst([
-        rtt_score.unwrap_or(0),
-        loss_score.unwrap_or(0),
-        jitter_score.unwrap_or(0),
-        tcp_score.unwrap_or(0),
+        rtt.unwrap_or(0),
+        loss.unwrap_or(0),
+        jitter.unwrap_or(0),
+        tcp.unwrap_or(0),
     ])
 }
 
@@ -154,23 +97,32 @@ fn worst(scores: [u8; 4]) -> Quality {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{ProbeState, QualityRecord};
 
-    fn rec(
+    fn view(
         rtt: Option<f64>,
         loss: Option<f64>,
         jitter: Option<f64>,
         tcp: Option<f64>,
-    ) -> QualityRecord {
-        QualityRecord::new(rtt, loss, jitter, tcp, None, 0.0, ProbeState::Quiet)
+    ) -> WindowView {
+        WindowView {
+            rtt_ms: rtt,
+            loss_pct: loss,
+            jitter_ms: jitter,
+            tcp_mbps: tcp,
+            ..Default::default()
+        }
+    }
+
+    fn classify(cfg: &QualityCfg, v: &WindowView) -> Quality {
+        classify_window(cfg, v)
     }
 
     #[test]
     fn good_link_classifies_good() {
         let cfg = QualityCfg::default();
         assert_eq!(
-            classify(&cfg, &rec(Some(15.0), Some(0.0), Some(2.0), Some(80.0))),
-            Some(Quality::Good)
+            classify(&cfg, &view(Some(15.0), Some(0.0), Some(2.0), Some(80.0))),
+            Quality::Good
         );
     }
 
@@ -180,33 +132,25 @@ mod tests {
         // Low RTT + low jitter but only 1.5 Mbps through (the key failure
         // mode): tcp crosses good/acceptable/poor thresholds → Bad.
         assert_eq!(
-            classify(&cfg, &rec(Some(15.0), Some(0.0), Some(2.0), Some(1.5))),
-            Some(Quality::Bad)
+            classify(&cfg, &view(Some(15.0), Some(0.0), Some(2.0), Some(1.5))),
+            Quality::Bad
         );
-    }
-
-    #[test]
-    fn busy_link_not_classified() {
-        let cfg = QualityCfg::default();
-        let mut r = rec(Some(1000.0), Some(99.0), Some(500.0), Some(0.1));
-        r.state = ProbeState::Busy;
-        assert_eq!(classify(&cfg, &r), None);
     }
 
     #[test]
     fn worse_rtt_escalates_class() {
         let cfg = QualityCfg::default();
         assert_eq!(
-            classify(&cfg, &rec(Some(60.0), Some(0.0), Some(2.0), Some(80.0))),
-            Some(Quality::Acceptable)
+            classify(&cfg, &view(Some(60.0), Some(0.0), Some(2.0), Some(80.0))),
+            Quality::Acceptable
         );
         assert_eq!(
-            classify(&cfg, &rec(Some(120.0), Some(0.0), Some(2.0), Some(80.0))),
-            Some(Quality::Poor)
+            classify(&cfg, &view(Some(120.0), Some(0.0), Some(2.0), Some(80.0))),
+            Quality::Poor
         );
         assert_eq!(
-            classify(&cfg, &rec(Some(400.0), Some(0.0), Some(2.0), Some(80.0))),
-            Some(Quality::Bad)
+            classify(&cfg, &view(Some(400.0), Some(0.0), Some(2.0), Some(80.0))),
+            Quality::Bad
         );
     }
 
@@ -228,18 +172,18 @@ mod tests {
         };
         // Terrible loss/jitter/tcp but in-norm rtt → still acceptable.
         assert_eq!(
-            classify(&cfg, &rec(Some(200.0), Some(99.0), Some(500.0), Some(0.1))),
-            Some(Quality::Acceptable)
+            classify(&cfg, &view(Some(200.0), Some(99.0), Some(500.0), Some(0.1))),
+            Quality::Acceptable
         );
         // rtt over the bad line wins.
         assert_eq!(
-            classify(&cfg, &rec(Some(400.0), Some(0.0), Some(2.0), Some(80.0))),
-            Some(Quality::Bad)
+            classify(&cfg, &view(Some(400.0), Some(0.0), Some(2.0), Some(80.0))),
+            Quality::Bad
         );
         // below good line stays good despite awful tcp.
         assert_eq!(
-            classify(&cfg, &rec(Some(100.0), Some(0.0), Some(2.0), Some(0.1))),
-            Some(Quality::Good)
+            classify(&cfg, &view(Some(100.0), Some(0.0), Some(2.0), Some(0.1))),
+            Quality::Good
         );
     }
 
@@ -249,14 +193,14 @@ mod tests {
         // Jitter is the congestion cross-check. A healthy 50ms path with low
         // jitter (2ms) classifies by rtt only → acceptable (50 > 40 good).
         assert_eq!(
-            classify(&cfg, &rec(Some(50.0), Some(0.0), Some(2.0), Some(80.0))),
-            Some(Quality::Acceptable)
+            classify(&cfg, &view(Some(50.0), Some(0.0), Some(2.0), Some(80.0))),
+            Quality::Acceptable
         );
         // A long-but-healthy hub link (125ms, low jitter) is poor by rtt — not
         // dragged to bad by a jitter value that is physically normal for it.
         assert_eq!(
-            classify(&cfg, &rec(Some(125.0), Some(0.0), Some(4.0), Some(80.0))),
-            Some(Quality::Poor)
+            classify(&cfg, &view(Some(125.0), Some(0.0), Some(4.0), Some(80.0))),
+            Quality::Poor
         );
     }
 
@@ -266,14 +210,14 @@ mod tests {
         // Bufferbloat/queueing on a healthy-rtt path: jitter far above the
         // good/acceptable cutoffs drags it to bad even though rtt/tcp are fine.
         assert_eq!(
-            classify(&cfg, &rec(Some(50.0), Some(0.0), Some(60.0), Some(80.0))),
-            Some(Quality::Bad)
+            classify(&cfg, &view(Some(50.0), Some(0.0), Some(60.0), Some(80.0))),
+            Quality::Bad
         );
         // Jitter just past good (5) but within acceptable (15) → acceptable,
         // alongside an acceptable rtt.
         assert_eq!(
-            classify(&cfg, &rec(Some(50.0), Some(0.0), Some(8.0), Some(80.0))),
-            Some(Quality::Acceptable)
+            classify(&cfg, &view(Some(50.0), Some(0.0), Some(8.0), Some(80.0))),
+            Quality::Acceptable
         );
     }
 
@@ -282,21 +226,6 @@ mod tests {
         let cfg = QualityCfg::default();
         assert_eq!(cost_for_quality(&cfg, Quality::Good), 10);
         assert_eq!(cost_for_quality(&cfg, Quality::Bad), 100);
-    }
-
-    fn view(
-        rtt: Option<f64>,
-        loss: Option<f64>,
-        jitter: Option<f64>,
-        tcp: Option<f64>,
-    ) -> WindowView {
-        WindowView {
-            rtt_ms: rtt,
-            loss_pct: loss,
-            jitter_ms: jitter,
-            tcp_mbps: tcp,
-            ..Default::default()
-        }
     }
 
     #[test]

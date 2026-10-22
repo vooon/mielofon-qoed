@@ -4,6 +4,7 @@ pub mod api;
 pub mod assets;
 pub mod cert;
 pub mod classifier;
+pub mod clock;
 pub mod config;
 pub mod fence;
 pub mod gossip;
