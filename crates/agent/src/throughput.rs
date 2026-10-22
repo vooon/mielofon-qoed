@@ -24,6 +24,9 @@ pub struct Outcome {
     pub util_mbps: f64,
     /// Measured upload; `None` when skipped or failed (never a fake 0).
     pub tcp_mbps: Option<f64>,
+    /// Why the test produced no number (iperf3 failed), reported to the
+    /// controller as the probe's note so a dead peer server is visible there.
+    pub error: Option<String>,
 }
 
 pub struct Throughput {
@@ -78,6 +81,7 @@ impl Throughput {
                 busy: true,
                 util_mbps: util,
                 tcp_mbps: None,
+                error: None,
             };
         }
 
@@ -85,19 +89,24 @@ impl Throughput {
         let res = self.iperf(link).await;
         self.gate.end(self.grace);
 
-        let tcp = match res {
-            Ok(v) => Some(v),
+        match res {
+            Ok(v) => Outcome {
+                busy: false,
+                util_mbps: util,
+                tcp_mbps: Some(v),
+                error: None,
+            },
             Err(e) => {
                 warn!("throughput {}: {e:#}", link.interface);
-                None
+                // No number: the dimension stays unmeasured (never constrains
+                // classification); the reason travels with the reply.
+                Outcome {
+                    busy: false,
+                    util_mbps: util,
+                    tcp_mbps: None,
+                    error: Some(format!("{e:#}")),
+                }
             }
-        };
-        Outcome {
-            // A run that produced no number is reported busy, so the
-            // controller never classifies it as degraded.
-            busy: tcp.is_none(),
-            util_mbps: util,
-            tcp_mbps: tcp,
         }
     }
 
@@ -136,7 +145,8 @@ pub fn parse_iperf(js: &Value) -> Result<f64> {
     Ok(bps / 1e6)
 }
 
-fn read_bytes(iface: &str) -> Result<u64> {
+/// rx+tx byte counter of an interface.
+pub fn read_bytes(iface: &str) -> Result<u64> {
     let mut total = 0;
     for dir in ["rx_bytes", "tx_bytes"] {
         let p = format!("/sys/class/net/{iface}/statistics/{dir}");
@@ -155,7 +165,7 @@ pub async fn util_mbps(iface: &str, span: Duration) -> Result<f64> {
     Ok(rate_mbps(a, b, t.elapsed()))
 }
 
-fn rate_mbps(before: u64, after: u64, span: Duration) -> f64 {
+pub fn rate_mbps(before: u64, after: u64, span: Duration) -> f64 {
     let secs = span.as_secs_f64();
     if secs <= 0.0 {
         return 0.0;
@@ -225,7 +235,8 @@ mod tests {
         let second = t.run(&link).await;
         assert!(second.busy && second.tcp_mbps.is_none());
         let first = first.await.unwrap();
-        assert!(first.busy, "a run without a number is reported busy");
+        assert!(!first.busy, "a failed test is not a busy link");
+        assert!(first.tcp_mbps.is_none() && first.error.is_some());
         assert!(gate.paused(), "grace period after the test");
     }
 }

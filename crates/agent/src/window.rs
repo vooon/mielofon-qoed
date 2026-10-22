@@ -1,6 +1,11 @@
 //! Rolling ping statistics per link: rtt (mean), jitter (population stddev of
 //! the RTT window — the classifier's thresholds are tuned to this definition)
 //! and loss (share of timed-out pings). Pure math, no I/O.
+//!
+//! One window holds the outcome of the last `size` pings, a reply with its
+//! rtt or a timeout, so an rtt ages out exactly like the loss it belongs to:
+//! a link that has answered nothing for a whole window reports no rtt, not
+//! the rtt it had before it went dark.
 
 use std::collections::VecDeque;
 use std::time::Duration;
@@ -8,9 +13,8 @@ use std::time::Duration;
 #[derive(Debug, Clone)]
 pub struct Window {
     size: usize,
-    rtts: VecDeque<f64>,
-    /// `true` = reply, `false` = timeout; newest last.
-    outcomes: VecDeque<bool>,
+    /// `Some(rtt_ms)` = reply, `None` = timeout; newest last.
+    outcomes: VecDeque<Option<f64>>,
     pub sent: u64,
     pub received: u64,
     pub lost: u64,
@@ -28,7 +32,6 @@ impl Window {
     pub fn new(size: usize) -> Self {
         Window {
             size: size.max(2),
-            rtts: VecDeque::new(),
             outcomes: VecDeque::new(),
             sent: 0,
             received: 0,
@@ -36,35 +39,35 @@ impl Window {
         }
     }
 
-    fn push<T>(q: &mut VecDeque<T>, v: T, size: usize) {
-        q.push_back(v);
-        while q.len() > size {
-            q.pop_front();
+    fn push(&mut self, outcome: Option<f64>) {
+        self.outcomes.push_back(outcome);
+        while self.outcomes.len() > self.size {
+            self.outcomes.pop_front();
         }
     }
 
     pub fn record_reply(&mut self, rtt_ms: f64) {
         self.received += 1;
-        Self::push(&mut self.rtts, rtt_ms, self.size);
-        Self::push(&mut self.outcomes, true, self.size);
+        self.push(Some(rtt_ms));
     }
 
     pub fn record_timeout(&mut self) {
         self.lost += 1;
-        Self::push(&mut self.outcomes, false, self.size);
+        self.push(None);
     }
 
     pub fn snapshot(&self) -> Snapshot {
-        let n = self.rtts.len() as f64;
-        let mean = (n > 0.0).then(|| self.rtts.iter().sum::<f64>() / n);
+        let rtts: Vec<f64> = self.outcomes.iter().flatten().copied().collect();
+        let n = rtts.len() as f64;
+        let mean = (n > 0.0).then(|| rtts.iter().sum::<f64>() / n);
         let jitter = match mean {
-            Some(m) if self.rtts.len() >= 2 => {
-                Some((self.rtts.iter().map(|r| (r - m).powi(2)).sum::<f64>() / n).sqrt())
+            Some(m) if rtts.len() >= 2 => {
+                Some((rtts.iter().map(|r| (r - m).powi(2)).sum::<f64>() / n).sqrt())
             }
             _ => None,
         };
         let loss = (!self.outcomes.is_empty()).then(|| {
-            let lost = self.outcomes.iter().filter(|ok| !**ok).count();
+            let lost = self.outcomes.iter().filter(|o| o.is_none()).count();
             100.0 * lost as f64 / self.outcomes.len() as f64
         });
         Snapshot {
@@ -126,6 +129,26 @@ mod tests {
         lost.record_timeout();
         assert_eq!(lost.snapshot().rtt_ms, None);
         assert_eq!(lost.snapshot().loss_pct, Some(100.0));
+    }
+
+    #[test]
+    fn rtt_ages_out_with_the_window() {
+        // A link that went dark must not keep reporting its old rtt next to
+        // 100% loss: the stale replies leave the window with the outcomes.
+        let mut w = Window::new(4);
+        w.record_reply(20.0);
+        w.record_reply(22.0);
+        for _ in 0..3 {
+            w.record_timeout();
+        }
+        let s = w.snapshot();
+        assert_eq!(s.rtt_ms, Some(22.0), "one reply still inside the window");
+        assert_eq!(s.loss_pct, Some(75.0));
+        w.record_timeout();
+        let s = w.snapshot();
+        assert_eq!(s.rtt_ms, None);
+        assert_eq!(s.jitter_ms, None);
+        assert_eq!(s.loss_pct, Some(100.0));
     }
 
     #[test]
