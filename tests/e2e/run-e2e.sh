@@ -79,16 +79,22 @@ log "all nodes ready with ${PEER_COUNT} members"
 # other two nodes. The report is pushed over the mTLS clients listener using
 # mielofon-0's own node identity. The `ts` is the ingest time (matching live
 # agents) so the classifier derives a live policy record from the replicated
-# sample set.
+# sample set. A node derives policy only for links of agents registered with
+# it, so the link's owner (`spoke-1`) registers on mielofon-0 first; the
+# derived record then reaches the other nodes through gossip, and the raw
+# sample travels on its own.
 TS="$(date +%s)"
-PAYLOAD="{\"link\":{\"from\":\"spoke-1\",\"to\":\"hub-a\",\"interface\":\"awg0\"},\"ts\":${TS},\"rtt_ms\":21,\"loss_pct\":0.7,\"rr_tps\":88,\"tcp_mbps\":7,\"util_mbps\":3,\"state\":\"quiet\"}"
+LINK='{"from":"spoke-1","to":"hub-a","interface":"awg0"}'
+REGISTER="{\"agent\":\"spoke-1\",\"links\":[${LINK}]}"
+PAYLOAD="{\"link\":${LINK},\"ts\":${TS},\"rtt_ms\":21,\"loss_pct\":0.7,\"tcp_mbps\":7,\"util_mbps\":3,\"state\":\"quiet\"}"
 
-ingest() {
-	local pod="$1"
+# POST a JSON body to a pod's own mTLS clients listener (its node identity).
+client_post() {
+	local pod="$1" path="$2" body="$3"
 	local ip
 	ip="$(kubectl exec "${pod}" -n "${NAMESPACE}" -- hostname -i 2>/dev/null | tr -d '[:space:]' || true)"
-	# Fall back to mTLS to the clients listener on the headless service address
-	# if hostname -i empties; normally the pod IP matches the node cert SAN.
+	# Fall back to the pod IP if hostname -i empties; normally it matches the
+	# node cert SAN.
 	if [ -z "${ip}" ]; then
 		ip="$(kubectl get pod "${pod}" -n "${NAMESPACE}" -o jsonpath='{.status.podIP}')"
 	fi
@@ -98,16 +104,27 @@ ingest() {
 		--cert /etc/mielofon/node.crt \
 		--key /etc/mielofon/node.key \
 		-H 'Content-Type: application/json' \
-		-d "${PAYLOAD}" \
-		"https://${ip}:9552/v1/quality"
+		-d "${body}" \
+		"https://${ip}:9552${path}"
 }
 
+ingest() {
+	client_post "$1" /v1/agent/register "${REGISTER}"
+	echo
+	client_post "$1" /v1/quality "${PAYLOAD}"
+}
+
+# Both replication paths: the owner's derived record (KV, LWW gossip) and the
+# raw sample itself (time-series delta).
 wait_until_replicated() {
 	local container="$1"
 	for i in $(seq 1 30); do
 		body="$(kubectl exec "${container}" -n "${NAMESPACE}" -- \
 			curl -sf 'http://127.0.0.1:9553/v1/quality?from=spoke-1&to=hub-a&interface=awg0' 2>/dev/null || true)"
-		if [ -n "${body}" ]; then
+		samples="$(kubectl exec "${container}" -n "${NAMESPACE}" -- \
+			curl -sf "http://127.0.0.1:9553/v1/ts?from=spoke-1&to=hub-a&interface=awg0&since=$((TS - 1))" 2>/dev/null |
+			python3 -c "import sys,json;print(len(json.load(sys.stdin)['samples']))" 2>/dev/null || echo 0)"
+		if [ -n "${body}" ] && [ "${samples}" -ge 1 ]; then
 			return 0
 		fi
 		sleep 2
@@ -126,5 +143,5 @@ for consumer in "${PODS[@]:1}"; do
 	}
 done
 
-log "e2e PASS: 3-node cluster formed; quality record replicated to all nodes"
+log "e2e PASS: 3-node cluster formed; derived record and raw sample replicated to all nodes"
 exit 0
