@@ -1,10 +1,9 @@
 //! Mielofon controller entrypoint. Runs three listeners:
-//!   cluster (9551/tcp, mTLS HTTP) — gossip between members
+//!   cluster (9551/udp, mTLS QUIC) — gossip sessions between members
 //!   client  (9552/udp, mTLS QUIC) — agent sessions (commands and replies)
 //!   admin   (9553/tcp, loopback)  — dashboard, /metrics, /healthz, /readyz, reads
 
 use anyhow::Context;
-use axum_server::tls_rustls::RustlsConfig;
 use std::net::TcpListener;
 use std::sync::Arc;
 use tracing::info;
@@ -72,10 +71,11 @@ async fn run_daemon(path: &str) -> anyhow::Result<()> {
         env!("CARGO_PKG_VERSION"),
     )?;
 
-    // TLS. Members+clients demand mTLS pinned to the same CA; gossip reuses the
-    // node client identity for outgoing anti-entropy pushes.
+    // TLS. Members+clients demand mTLS pinned to the same CA; gossip dials
+    // the other members with the node's own identity.
     let server_tls = mielofon_controller::tls::server_config(&cfg.tls, &[&cfg.tls.ca])?;
     let client_tls = mielofon_controller::tls::client_config(&cfg.tls, &[&cfg.tls.ca])?;
+    let fabric = Arc::new(mielofon_controller::gossip::Fabric::new(client_tls)?);
 
     let state = AppState::new(cfg.clone());
     state.set_ready(false);
@@ -84,15 +84,17 @@ async fn run_daemon(path: &str) -> anyhow::Result<()> {
     // or a bad bind address fails the start instead of a half-running daemon.
     let admin_bind = state.cfg.listeners.admin();
     let admin_listener = bind(admin_bind, "admin")?;
-    let cluster_listener = bind(state.cfg.listeners.cluster(), "cluster")?;
+    let cluster_bind = state.cfg.listeners.cluster();
+    let cluster_listener = mielofon_transport::Listener::bind(server_tls.clone(), cluster_bind)
+        .context("cluster listener")?;
     let client_bind = state.cfg.listeners.client();
-    let client_listener = mielofon_transport::Listener::bind(server_tls.clone(), client_bind)
-        .context("client listener")?;
+    let client_listener =
+        mielofon_transport::Listener::bind(server_tls, client_bind).context("client listener")?;
 
     // Background: gossip anti-entropy pushes + KV expiry pruning.
     tokio::spawn(mielofon_controller::gossip::gossip_loop(
         state.clone(),
-        client_tls.clone(),
+        fabric,
     ));
 
     // Probe/policy scheduler — the controller is the mesh decision-maker and
@@ -131,12 +133,9 @@ async fn run_daemon(path: &str) -> anyhow::Result<()> {
                 .into_make_service(),
         );
     let admin_handle = tokio::spawn(async move { admin_srv.await.context("admin listener") });
-    let cluster_handle = tokio::spawn(serve_mtls(
+    let cluster_handle = tokio::spawn(mielofon_controller::gossip::serve(
         state.clone(),
-        api::cluster_router(),
-        server_tls.clone(),
         cluster_listener,
-        "cluster",
     ));
     let client_handle = tokio::spawn(mielofon_controller::session::serve(
         state.clone(),
@@ -147,6 +146,7 @@ async fn run_daemon(path: &str) -> anyhow::Result<()> {
     info!(
         node = %state.cfg.node.name,
         admin = %admin_bind,
+        cluster = %format!("{cluster_bind}/udp"),
         client = %format!("{client_bind}/udp"),
         "mielofon-controller up and ready"
     );
@@ -205,20 +205,4 @@ fn bind(addr: std::net::SocketAddr, name: &str) -> anyhow::Result<TcpListener> {
         .set_nonblocking(true)
         .with_context(|| format!("set {name} listener nonblocking"))?;
     Ok(listener)
-}
-
-async fn serve_mtls(
-    state: AppState,
-    router: axum::Router<AppState>,
-    tls: Arc<rustls::ServerConfig>,
-    listener: TcpListener,
-    name: &'static str,
-) -> anyhow::Result<()> {
-    let cfg = RustlsConfig::from_config(tls);
-    let server = axum_server::from_tcp_rustls(listener, cfg)
-        .with_context(|| format!("{name} mTLS server init"))?;
-    server
-        .serve(router.with_state(state).into_make_service())
-        .await
-        .with_context(|| format!("{name} mTLS listener"))
 }

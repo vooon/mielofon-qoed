@@ -29,8 +29,9 @@ This is a **PUBLIC** repository describing software for a **private** production
   connects out; once the session is up the controller opens streams on it.
 - Wire types live in `crates/mielofon-proto`, shared by controller and agent:
   change the contract there, never in one side only. The carrier (frames,
-  sessions, QUIC) is `crates/mielofon-transport`; code above it only opens
-  and accepts streams, so a TCP carrier can be added later.
+  sessions, QUIC) is `crates/mielofon-transport`, shared by agent sessions
+  (client listener) and member gossip (cluster listener); code above it only
+  opens and accepts streams, so a TCP carrier can be added later.
 - Wire flow: agent stream `register` → controller streams `probe{always|throughput}`
   / `apply_cost` / `trace` (each with an `id`), reply on the same stream
   (`kind: probe` echoes the fence token for throughput; `kind: applied` acks

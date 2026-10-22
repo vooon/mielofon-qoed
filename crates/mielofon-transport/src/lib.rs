@@ -1,7 +1,7 @@
 //! Control-plane transport for mielofon.
 //!
-//! One **session** per agent↔controller (and, later, member↔member) pair,
-//! carried over mTLS QUIC. Either side can open a **bidirectional stream**
+//! One **session** per agent↔controller pair and per member→member
+//! direction, carried over mTLS QUIC. Either side can open a **bidirectional stream**
 //! on a session: the opener writes one request frame and closes its send
 //! side, the acceptor answers with one response frame and closes. A request
 //! is a stream, so correlation, cancellation and deadlines are the stream's

@@ -19,7 +19,7 @@ gossip_interval_secs = 5
 "hub-e" = "198.51.100.9"
 
 [listeners]
-# cluster = mTLS node-to-node gossip over HTTP (etcd-style cluster endpoint, default 9551/tcp)
+# cluster = mTLS QUIC node-to-node gossip      (etcd-style cluster endpoint, default 9551/udp)
 # client  = mTLS QUIC agent sessions         (etcd-style client endpoint,  default 9552/udp)
 # admin   = loopback dashboard + /metrics + /healthz + /readyz + tooling ingest (default 9553/tcp)
 

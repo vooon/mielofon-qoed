@@ -1,15 +1,15 @@
-//! HTTP API: the members listener (9551, mTLS) carries gossip; the admin
-//! listener (9553) is plain HTTP on loopback serving the dashboard, metrics,
-//! healthz, the read-only query endpoints and the tooling ingest. Agents do
-//! not speak HTTP: they hold a QUIC session on the client listener (9552,
-//! see `session.rs`).
+//! HTTP API: the admin listener (9553) is plain HTTP on loopback serving the
+//! dashboard, metrics, healthz, the read-only query endpoints and the tooling
+//! ingest. Neither agents nor members speak HTTP: agents hold a QUIC session
+//! on the client listener (9552, see `session.rs`), members on the cluster
+//! listener (9551, see `gossip.rs`).
 
 use crate::model::{LinkKey, ProbeState, QualityRecord};
 use crate::state::AppState;
 use axum::extract::{Path, Query, State};
 use axum::http::{header, StatusCode};
 use axum::response::{IntoResponse, Response};
-use axum::routing::{get, post};
+use axum::routing::get;
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -383,19 +383,9 @@ pub async fn get_ts(State(state): State<AppState>, Query(q): Query<TsQuery>) -> 
     (StatusCode::OK, Json(state.tsdb.query(&key, since, until))).into_response()
 }
 
-/// Members-listener liveness probe. Nodes ping each other over the mTLS
-/// members port; the gossip loop measures this round-trip for /v1/status.
-pub async fn ping(State(state): State<AppState>) -> Json<serde_json::Value> {
-    Json(serde_json::json!({
-        "node": state.cfg.node.name,
-        "ok": true,
-    }))
-}
-
 // ── Router assembly ───────────────────────────────────────────────────────
 
-/// One-line HTTP access log: listener label (cluster/client/admin), method,
-/// uri, status, duration. `/healthz` and `/readyz` are health-check hot paths
+/// One-line HTTP access log: method, uri, status, duration. `/healthz` and `/readyz` are health-check hot paths
 /// (proxies poll them constantly) and are downgraded to `debug` to avoid
 /// flooding the daemon log.
 async fn access_log(
@@ -416,15 +406,6 @@ async fn access_log(
         tracing::info!(server, %method, %uri, status, ms, "http");
     }
     resp
-}
-
-pub fn cluster_router() -> Router<AppState> {
-    Router::new()
-        .route("/v1/ping", get(ping))
-        .route("/v1/gossip/exchange", post(crate::gossip::exchange))
-        .layer(axum::middleware::from_fn(|req, next| {
-            access_log("cluster", req, next)
-        }))
 }
 
 pub fn admin_router() -> Router<AppState> {

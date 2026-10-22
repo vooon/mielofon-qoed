@@ -2,8 +2,8 @@
 
 Wiring between the controller, agents, and cluster members. Agents hold an
 mTLS **QUIC session** on the controller's **client** listener (`9552/udp`);
-every message on it is a JSON frame on a stream. Members gossip over mTLS
-HTTP on the **cluster** listener (`9551/tcp`); the read endpoints on the
+members hold one on each other's **cluster** listener (`9551/udp`). Every
+message on a session is a JSON frame on a stream. The read endpoints on the
 **admin** listener (`9553/tcp`) are loopback HTTP.
 
 ## Division of responsibilities
@@ -292,11 +292,19 @@ auto-refresh.
 Members exchange the full KV view. LWW merge keeps the newest `ts` per link;
 records older than `grace_ttl_secs` expire. Each member derives policy only
 for links of its own registered agents, so every derived record has one
-writer and the merge never flaps. Pushes to all members run concurrently,
-each bounded by a 10 s timeout.
+writer and the merge never flaps.
+
+Gossip rides the same transport as agent sessions: every member dials each
+other member's cluster listener (the address under `[members]`, verified as
+an IP SAN of the peer's certificate) and keeps that session across rounds,
+re-dialling it after a failed exchange. Each round opens one stream per
+member, concurrently, and the peer answers on the same stream; a push is
+bounded by 10 s including the dial. A pair of members therefore holds two
+sessions, one per direction, and nothing is negotiated on them: the CA pins
+the peer, the request names the sender.
 
 ```jsonc
-POST /v1/gossip/exchange          // members
-{ "node": "hub-a", "records": [[…]], "ts_samples": [[…]] }
-// -> { "node": "hub-b", "records": […] }   // merged by the pusher
+// stream opened by the pusher on its session to the member
+{ "type": "exchange", "node": "hub-a", "records": [[…]], "ts_samples": [[…]] }
+// -> { "type": "exchange", "node": "hub-b", "records": […] }   // merged by the pusher
 ```
