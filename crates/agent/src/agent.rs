@@ -20,6 +20,8 @@ use tracing::{info, warn};
 struct NodeState {
     links: Vec<Link>,
     loopback: Option<Ipv6Addr>,
+    /// This node's router id from `bird status`.
+    router_id: Option<String>,
     /// Interface byte counter at the previous always probe, for the
     /// utilisation reported with the next one.
     counters: HashMap<String, (u64, Instant)>,
@@ -102,7 +104,8 @@ impl<B: Bus> Agent<B> {
                 .map(|l| (l.interface.clone(), l.to.clone()))
                 .collect()
         };
-        let links = discover::discover(&self.bus, &self.cfg, &known).await;
+        let found = discover::discover(&self.bus, &self.cfg, &known).await;
+        let links = found.links;
         let loopback = discover::loopback(&self.bus, &self.cfg).await;
         self.prober.reconcile(&links);
         let drifted: Vec<(String, u32, u32)> = {
@@ -131,6 +134,7 @@ impl<B: Bus> Agent<B> {
                 .collect();
             st.links = links;
             st.loopback = loopback;
+            st.router_id = found.router_id;
             drifted
         };
         let c = &self.metrics.counters;
@@ -158,11 +162,17 @@ impl<B: Bus> Agent<B> {
     }
 
     pub fn register_req(&self) -> RegisterReq {
-        let loopback = self.state.lock().expect("agent state").loopback;
+        let st = self.state.lock().expect("agent state");
         RegisterReq {
             agent: self.cfg.agent.clone(),
-            links: self.link_keys(),
-            loopback: loopback.map(|a| a.to_string()),
+            router_id: st.router_id.clone(),
+            links: st.links.iter().map(|l| self.key(l)).collect(),
+            peer_rids: st
+                .links
+                .iter()
+                .filter_map(|l| Some((l.interface.clone(), l.peer_rid.clone()?)))
+                .collect(),
+            loopback: st.loopback.map(|a| a.to_string()),
         }
     }
 

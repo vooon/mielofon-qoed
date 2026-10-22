@@ -66,6 +66,8 @@ pub struct StatusResp {
     pub peers: Vec<(String, crate::state::PeerHealthEntry)>,
     /// Agents currently registered with this node.
     pub agents: Vec<String>,
+    /// Replicated node directory: router id → registered name.
+    pub nodes: Vec<(String, crate::model::NodeEntry)>,
 }
 
 /// Query filter for `GET /v1/policy` and `GET /v1/quality`.
@@ -341,6 +343,7 @@ pub async fn get_status(State(state): State<AppState>) -> Json<StatusResp> {
         members: state.cfg.members.keys().cloned().collect(),
         peers: state.peers.snapshot(),
         agents: state.workers.agents(),
+        nodes: state.kv.nodes(),
     })
 }
 

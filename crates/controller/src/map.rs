@@ -6,7 +6,7 @@
 //! appear even before their first measurement so spokes do not vanish while
 //! momentarily silent.
 
-use crate::model::{ProbeState, Quality};
+use crate::model::{LinkKey, ProbeState, Quality};
 use crate::state::AppState;
 use std::collections::BTreeMap;
 
@@ -44,6 +44,29 @@ pub struct GraphLink {
     pub ts: u64,
 }
 
+impl GraphLink {
+    /// A registered link nothing has measured yet: on the map as "no data".
+    fn unmeasured(key: LinkKey) -> Self {
+        GraphLink {
+            from: key.from,
+            to: key.to,
+            interface: key.interface,
+            rtt_ms: None,
+            loss_pct: None,
+            jitter_ms: None,
+            tcp_mbps: None,
+            udp_mbps: None,
+            udp_jitter_ms: None,
+            udp_loss_pct: None,
+            util_mbps: 0.0,
+            state: "quiet".into(),
+            quality: None,
+            ospf_cost: None,
+            ts: 0,
+        }
+    }
+}
+
 /// Build the graph: nodes = cluster members + every from/to seen in the KV;
 /// links = one per quality record.
 pub fn graph_part(state: &AppState) -> (Vec<GraphNode>, Vec<GraphLink>) {
@@ -60,8 +83,33 @@ pub fn graph_part(state: &AppState) -> (Vec<GraphNode>, Vec<GraphLink>) {
         );
     }
 
+    // Registered but not yet measured links come from the replicated node
+    // directory: the topology shows at once, as "no data" until the first
+    // sample lands.
     let mut links: Vec<GraphLink> = Vec::new();
-    for (key, rec) in state.kv.all() {
+    let records = state.kv.all();
+    let measured: std::collections::HashSet<LinkKey> =
+        records.iter().map(|(k, _)| k.clone()).collect();
+    for (_, entry) in state.kv.nodes() {
+        for key in entry.links {
+            if measured.contains(&key) {
+                continue;
+            }
+            for id in [&key.from, &key.to] {
+                nodes.entry(id.clone()).or_insert_with(|| GraphNode {
+                    id: id.clone(),
+                    label: id.clone(),
+                    group: if state.cfg.is_hub(id) {
+                        "hub".to_string()
+                    } else {
+                        "spoke".to_string()
+                    },
+                });
+            }
+            links.push(GraphLink::unmeasured(key));
+        }
+    }
+    for (key, rec) in records {
         for id in [&key.from, &key.to] {
             nodes.entry(id.clone()).or_insert_with(|| GraphNode {
                 id: id.clone(),

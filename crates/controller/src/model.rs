@@ -73,6 +73,19 @@ impl QualityRecord {
     }
 }
 
+/// A node known by router id: the name it registered under, LWW by `ts`.
+/// Replicated between members like the link records, so every hub can
+/// name the far end of a tunnel its agent only knows by router id.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NodeEntry {
+    pub name: String,
+    pub ts: u64,
+    /// The links the node registered (its side of every tunnel), so every
+    /// member knows the topology before a single sample arrived.
+    #[serde(default)]
+    pub links: Vec<LinkKey>,
+}
+
 /// User-facing quality report (metrics + controller-assigned class/cost).
 #[derive(Debug, Clone, Serialize)]
 pub struct QualityView {

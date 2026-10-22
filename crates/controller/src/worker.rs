@@ -51,6 +51,10 @@ pub fn track_key(cmd: &WorkCmd) -> Option<(LinkKey, Kind)> {
 #[derive(Default)]
 struct Worker {
     links: Vec<LinkKey>,
+    /// The node's own router id, the key of its directory entry.
+    router_id: Option<String>,
+    /// interface → router id of the neighbour, for naming `to` exactly.
+    peer_rids: HashMap<String, String>,
     loopback: Option<String>,
     /// The live session and its generation (bumps on every new connection).
     session: Option<(u64, Arc<dyn Session>)>,
@@ -99,7 +103,14 @@ impl WorkerRegistry {
     /// reports are forgotten and the "cost sent" memory is cleared so the
     /// policy snapshot is re-seeded — a re-registering agent may have
     /// rebooted and lost its applied costs. The session, if any, is kept.
-    pub fn register(&self, agent: &str, mut links: Vec<LinkKey>, loopback: Option<String>) -> bool {
+    pub fn register(
+        &self,
+        agent: &str,
+        mut links: Vec<LinkKey>,
+        router_id: Option<String>,
+        peer_rids: HashMap<String, String>,
+        loopback: Option<String>,
+    ) -> bool {
         let mut map = self.inner.lock().expect("workers lock poisoned");
         // Peer names come from BIRD protocol names, which cannot spell a
         // hyphen: `peer_node_0_example` decodes to `node.0.example` while that node
@@ -124,6 +135,8 @@ impl WorkerRegistry {
             }
         }
         let w = map.entry(agent.to_string()).or_default();
+        w.router_id = router_id;
+        w.peer_rids = peer_rids;
         w.loopback = loopback;
         w.applied_sent.clear();
         w.apply_retry_at.clear();
@@ -133,6 +146,54 @@ impl WorkerRegistry {
         w.in_flight.retain(|(id, _)| keep.contains(id));
         w.links = links;
         fresh
+    }
+
+    /// Name every link's far end by router id through `lookup` (the
+    /// replicated node directory): a hub's agent knows a spoke only by the
+    /// id OSPF shows it, the directory knows what that node registered as.
+    /// Returns the agents whose link set changed, with their router id,
+    /// so their directory entries can be republished.
+    pub fn resolve_peers(
+        &self,
+        lookup: impl Fn(&str) -> Option<String>,
+    ) -> Vec<(String, Option<String>, Vec<LinkKey>)> {
+        let mut map = self.inner.lock().expect("workers lock poisoned");
+        let mut renamed = Vec::new();
+        for (agent, w) in map.iter_mut() {
+            let mut changed = false;
+            for l in &mut w.links {
+                let Some(name) = w.peer_rids.get(&l.interface).and_then(|rid| lookup(rid)) else {
+                    continue;
+                };
+                if l.to != name {
+                    l.to = name;
+                    changed = true;
+                }
+            }
+            if changed {
+                renamed.push((agent.clone(), w.router_id.clone(), w.links.clone()));
+            }
+        }
+        renamed
+    }
+
+    /// Every agent with its router id and current links, for the directory.
+    pub fn entries(&self) -> Vec<(String, Option<String>, Vec<LinkKey>)> {
+        self.inner
+            .lock()
+            .expect("workers lock poisoned")
+            .iter()
+            .map(|(a, w)| (a.clone(), w.router_id.clone(), w.links.clone()))
+            .collect()
+    }
+
+    /// The router id `agent` registered with.
+    pub fn router_id_of(&self, agent: &str) -> Option<String> {
+        self.inner
+            .lock()
+            .expect("workers lock poisoned")
+            .get(agent)
+            .and_then(|w| w.router_id.clone())
     }
 
     /// The registered spelling of a peer name an agent reported (see
@@ -346,7 +407,7 @@ mod tests {
     #[test]
     fn register_adds_links_and_marks_owned() {
         let r = WorkerRegistry::new();
-        assert!(r.register("spoke-1", vec![link()], None));
+        assert!(r.register("spoke-1", vec![link()], None, HashMap::new(), None));
         assert_eq!(r.len(), 1);
         let owned = r.owned_links();
         assert_eq!(owned.len(), 1);
@@ -360,10 +421,12 @@ mod tests {
         // first, the link ends up on the name the spoke registers under.
         let r = WorkerRegistry::new();
         let hub_link = LinkKey::new("hub-a", "node.0.example", "awg_sp_node0");
-        r.register("hub-a", vec![hub_link], None);
+        r.register("hub-a", vec![hub_link], None, HashMap::new(), None);
         r.register(
             "node-0.example",
             vec![LinkKey::new("node-0.example", "hub-a", "awg_hub_a")],
+            None,
+            HashMap::new(),
             None,
         );
         assert_eq!(r.links_of("hub-a")[0].to, "node-0.example", "rewritten");
@@ -373,10 +436,14 @@ mod tests {
             "node-0.example",
             vec![LinkKey::new("node-0.example", "hub-a", "awg_hub_a")],
             None,
+            HashMap::new(),
+            None,
         );
         r.register(
             "hub-a",
             vec![LinkKey::new("hub-a", "node.0.example", "awg_sp_node0")],
+            None,
+            HashMap::new(),
             None,
         );
         assert_eq!(
@@ -391,27 +458,70 @@ mod tests {
     }
 
     #[test]
+    fn peers_are_named_by_router_id_through_the_directory() {
+        let r = WorkerRegistry::new();
+        let rids: HashMap<String, String> =
+            [("awg_sp_n0".to_string(), "192.0.2.9".to_string())].into();
+        r.register(
+            "hub-a",
+            vec![LinkKey::new("hub-a", "node.0.example", "awg_sp_n0")],
+            Some("192.0.2.1".into()),
+            rids,
+            None,
+        );
+        assert_eq!(r.router_id_of("hub-a").as_deref(), Some("192.0.2.1"));
+        let dir: HashMap<&str, &str> = [("192.0.2.9", "node-0.example")].into();
+        let renamed = r.resolve_peers(|rid| dir.get(rid).map(|s| s.to_string()));
+        assert_eq!(renamed.len(), 1);
+        assert_eq!(renamed[0].0, "hub-a");
+        assert_eq!(renamed[0].1.as_deref(), Some("192.0.2.1"));
+        assert_eq!(renamed[0].2[0].to, "node-0.example");
+        assert_eq!(r.links_of("hub-a")[0].to, "node-0.example");
+        assert!(
+            r.resolve_peers(|rid| dir.get(rid).map(|s| s.to_string()))
+                .is_empty(),
+            "idempotent"
+        );
+        assert!(
+            r.resolve_peers(|_| None).is_empty(),
+            "unknown rid: name kept"
+        );
+    }
+
+    #[test]
     fn register_replaces_the_link_set() {
         let r = WorkerRegistry::new();
         let gone = LinkKey::new("spoke-1", "hub-b", "awg_hub_b");
-        r.register("spoke-1", vec![link(), gone.clone()], None);
+        r.register(
+            "spoke-1",
+            vec![link(), gone.clone()],
+            None,
+            HashMap::new(),
+            None,
+        );
         r.mark_issued("spoke-1", &gone, Tier::Always, 1000);
         // The tunnel to hub-b disappeared: it must not be probed any more.
-        assert!(!r.register("spoke-1", vec![link()], None));
+        assert!(!r.register("spoke-1", vec![link()], None, HashMap::new(), None));
         assert_eq!(r.links_of("spoke-1"), vec![link()]);
         // It comes back later: due immediately again (stamp was dropped).
-        assert!(r.register("spoke-1", vec![link(), gone.clone()], None));
+        assert!(r.register(
+            "spoke-1",
+            vec![link(), gone.clone()],
+            None,
+            HashMap::new(),
+            None
+        ));
         assert!(r.probe_due("spoke-1", &gone, Tier::Always, 1001, 15));
     }
 
     #[test]
     fn register_forgets_sent_costs() {
         let r = WorkerRegistry::new();
-        r.register("spoke-1", vec![link()], None);
+        r.register("spoke-1", vec![link()], None, HashMap::new(), None);
         r.set_applied_sent("spoke-1", &link(), 50);
         assert!(!r.apply_due("spoke-1", &link(), 50, 0));
         // A rebooted node lost its applied costs: re-seed on re-register.
-        r.register("spoke-1", vec![link()], None);
+        r.register("spoke-1", vec![link()], None, HashMap::new(), None);
         assert_eq!(r.applied_sent("spoke-1", &link()), None);
         assert!(r.apply_due("spoke-1", &link(), 50, 0));
     }
@@ -419,7 +529,7 @@ mod tests {
     #[test]
     fn always_due_at_first_then_not_until_interval() {
         let r = WorkerRegistry::new();
-        r.register("spoke-1", vec![link()], None);
+        r.register("spoke-1", vec![link()], None, HashMap::new(), None);
         assert!(r.probe_due("spoke-1", &link(), Tier::Always, 1000, 15));
         r.mark_issued("spoke-1", &link(), Tier::Always, 1000);
         assert!(!r.probe_due("spoke-1", &link(), Tier::Always, 1010, 15));
@@ -429,7 +539,7 @@ mod tests {
     #[test]
     fn failed_apply_is_retried_after_backoff() {
         let r = WorkerRegistry::new();
-        r.register("spoke-1", vec![link()], None);
+        r.register("spoke-1", vec![link()], None, HashMap::new(), None);
         r.set_applied_sent("spoke-1", &link(), 50);
         r.note_apply_failed("spoke-1", &link(), 1000);
         assert!(!r.apply_due("spoke-1", &link(), 50, 1000 + APPLY_RETRY_SECS - 1));
@@ -444,7 +554,7 @@ mod tests {
     fn one_command_per_link_and_kind_in_flight() {
         let r = WorkerRegistry::new();
         assert!(!r.begin("spoke-1", &link(), Kind::Always), "unknown agent");
-        r.register("spoke-1", vec![link()], None);
+        r.register("spoke-1", vec![link()], None, HashMap::new(), None);
         assert!(r.begin("spoke-1", &link(), Kind::Always));
         assert!(
             !r.begin("spoke-1", &link(), Kind::Always),
@@ -458,7 +568,7 @@ mod tests {
     #[tokio::test]
     async fn sessions_supersede_and_detach_by_generation() {
         let r = WorkerRegistry::new();
-        r.register("spoke-1", vec![link()], None);
+        r.register("spoke-1", vec![link()], None, HashMap::new(), None);
         let first = FakeAgent::silent();
         let (g1, old) = r.attach("spoke-1", first.clone(), None);
         assert!(old.is_none());
@@ -484,11 +594,17 @@ mod tests {
         let r = WorkerRegistry::new();
         assert_eq!(r.loopback("spoke-1"), None);
         assert!(!r.has_agent("spoke-1"));
-        r.register("spoke-1", vec![link()], Some("fd00:0:0:1::1".into()));
+        r.register(
+            "spoke-1",
+            vec![link()],
+            None,
+            HashMap::new(),
+            Some("fd00:0:0:1::1".into()),
+        );
         assert_eq!(r.loopback("spoke-1"), Some("fd00:0:0:1::1".into()));
         assert!(r.has_agent("spoke-1"));
         // Re-register without a loopback drops it (agent cannot report it).
-        r.register("spoke-1", vec![link()], None);
+        r.register("spoke-1", vec![link()], None, HashMap::new(), None);
         assert_eq!(r.loopback("spoke-1"), None);
     }
 }
