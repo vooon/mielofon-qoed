@@ -10,6 +10,9 @@ name = "hub-a"           # placeholder node name; peers reach it via [members]
 [cluster]
 grace_ttl_secs = 300
 gossip_interval_secs = 5
+# Hubs of the mesh, for the hub->spoke cost offset (see [classifier]). A
+# hub need not run a controller; empty means "the [members]".
+hubs = ["hub-a", "hub-b", "hub-c", "hub-d", "hub-e"]
 
 [members]
 "hub-a" = "203.0.113.1"
@@ -89,8 +92,8 @@ ospf_cost = 100
 # worse throughput, so both halves always get the same cost; "off" classifies
 # each direction on its own.
 #
-# `hub_spoke_cost_offset` is added to the cost a hub ([members] entry)
-# advertises towards a non-member, so spokes never carry transit between
+# `hub_spoke_cost_offset` is added to the cost a hub ([cluster] hubs, else
+# the [members]) advertises towards a non-hub, so spokes never carry transit between
 # hubs: a hub->spoke->hub detour always loses to a direct hub<->hub link,
 # while the spoke keeps a finite, quality-ranked fallback. Spoke->hub and
 # hub<->hub links are costed by class alone.

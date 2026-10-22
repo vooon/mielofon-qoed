@@ -135,6 +135,21 @@ impl WorkerRegistry {
         fresh
     }
 
+    /// The registered spelling of a peer name an agent reported (see
+    /// `register`): `node.0.example` → `node-0.example` once that node is
+    /// known. Unknown names pass through.
+    pub fn canonical_peer(&self, name: &str) -> String {
+        let map = self.inner.lock().expect("workers lock poisoned");
+        if map.contains_key(name) {
+            return name.to_string();
+        }
+        let key = name_key(name);
+        map.keys()
+            .find(|k| name_key(k) == key)
+            .cloned()
+            .unwrap_or_else(|| name.to_string())
+    }
+
     /// Attach the session commands for `agent` are dispatched on. `own` is
     /// the generation this connection already holds, if it registered
     /// before (a link-set refresh): then nothing changes. Otherwise the
@@ -370,6 +385,9 @@ mod tests {
             "canonical at register"
         );
         assert_eq!(r.links_of("node-0.example")[0].to, "hub-a", "untouched");
+        assert_eq!(r.canonical_peer("node.0.example"), "node-0.example");
+        assert_eq!(r.canonical_peer("hub-a"), "hub-a");
+        assert_eq!(r.canonical_peer("nobody.example"), "nobody.example");
     }
 
     #[test]
