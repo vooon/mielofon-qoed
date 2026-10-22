@@ -39,8 +39,10 @@ config agent 'main'
 	#   list iface 'awg_int_*'
 	#   list iface 'awg_sp_*'
 	# The peer behind an interface is the BGP peer protocol whose
-	# neighbor_id is the OSPF neighbour's router id on it (`peer_<hostname>`,
-	# dots as underscores, never shortened). While the adjacency is down the
+	# neighbor_id is the OSPF neighbour's router id on it. Its node name is
+	# the protocol's `description` (set it to the hostname: a protocol name
+	# cannot spell a hyphen), else `peer_<hostname>` with dots as
+	# underscores, never shortened. While the adjacency is down the
 	# last resolution is kept; a never-seen interface falls back to the name
 	# token the glob's `*` matched against the peer's first host label
 	# (awg_hub1 -> hub1 -> hub1.example.com).

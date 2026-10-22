@@ -15,7 +15,9 @@
 //!
 //! The peer behind an interface is resolved by router id first: the OSPF
 //! neighbour's `rid` on that interface is the BGP peer's `neighbor_id`
-//! (one router, one id), so no naming convention is needed. While the
+//! (one router, one id), so no naming convention is needed. The peer's
+//! node name is its BGP protocol `description` when the config sets one
+//! (a protocol name cannot spell a hyphen), else decoded from the name. While the
 //! adjacency is down the previously resolved peer is kept, and as a last
 //! resort the interface name's token (what the glob's `*` matched) is
 //! looked up as a peer's first host label (`awg_hub1` → `hub1`).
@@ -53,6 +55,17 @@ pub struct Link {
 pub fn peer_hostname(name: &str) -> Option<String> {
     let host = name.strip_prefix("peer_")?;
     (!host.is_empty()).then(|| host.replace('_', "."))
+}
+
+/// The node name of a BGP peer protocol: its `description` when set
+/// (exact hostname, hyphens included), else the name decoded.
+pub fn peer_name(bgp: &Value) -> Option<String> {
+    if let Some(d) = bgp["description"].as_str().map(str::trim) {
+        if !d.is_empty() {
+            return Some(d.to_string());
+        }
+    }
+    bgp["name"].as_str().and_then(peer_hostname)
 }
 
 /// First dot-label of a hostname, the token tunnel interfaces are named by.
@@ -115,7 +128,7 @@ pub fn select_links(
         .into_iter()
         .flatten()
         .filter_map(|b| {
-            let host = b["name"].as_str().and_then(peer_hostname)?;
+            let host = peer_name(b)?;
             Some((host, b["neighbor_id"].as_str().map(str::to_string)))
         })
         .collect();
@@ -436,6 +449,31 @@ mod tests {
         assert!(
             select_links(&st, &cfg, &none()).is_empty(),
             "glob selects nothing"
+        );
+    }
+
+    #[test]
+    fn peer_description_names_the_node_exactly() {
+        let mut st = status();
+        // A hyphenated hostname: the protocol name spells it with
+        // underscores, the description with the real spelling.
+        st["bgp"].as_array_mut().unwrap().push(json!({
+            "name": "peer_node_0_example", "neighbor_id": "192.0.2.9",
+            "description": "node-0.example"
+        }));
+        st["ospf"][0]["interfaces"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!({ "interface": "awg_sp_n0", "type": "ptp", "cost": 1010 }));
+        st["ospf"][0]["neighbors"] = json!([
+            { "rid": "192.0.2.9", "state": "Full", "interface": "awg_sp_n0", "ip": "fe80::9" }
+        ]);
+        let links = select_links(&st, &cfg(), &none());
+        assert!(links.contains(&("awg_sp_n0".to_string(), "node-0.example".to_string())));
+        assert_eq!(
+            peer_name(&json!({ "name": "peer_hub1_example_com", "description": "  " })).as_deref(),
+            Some("hub1.example.com"),
+            "blank description: decode the name"
         );
     }
 
