@@ -88,6 +88,12 @@ ospf_cost = 100
 # costs when throughput really differs by direction; "symmetric" also takes the
 # worse throughput, so both halves always get the same cost; "off" classifies
 # each direction on its own.
+#
+# `hub_spoke_cost_offset` is added to the cost a hub ([members] entry)
+# advertises towards a non-member, so spokes never carry transit between
+# hubs: a hub->spoke->hub detour always loses to a direct hub<->hub link,
+# while the spoke keeps a finite, quality-ranked fallback. Spoke->hub and
+# hub<->hub links are costed by class alone.
 [classifier]
 interval_secs = 5
 always_fresh_secs = 60
@@ -96,6 +102,7 @@ tcp_carry_secs = 3600
 busy_hold_secs = 120
 hysteresis_passes = 3
 pair_cost = "directional"
+hub_spoke_cost_offset = 1000
 
 # Console logging. `level` sets the minimum tracing level emitted to the
 # console; `format` selects the console output (logfmt or JSON). Both are

@@ -74,6 +74,13 @@ impl Worker {
 }
 
 /// Thread-safe registry of agents.
+/// Matching key for node names: what a BIRD protocol name can carry
+/// (`peer_node_0_example`) and the hostname it stands for (`node-0.example`) agree
+/// on, once dots and hyphens are folded into underscores.
+fn name_key(name: &str) -> String {
+    name.to_ascii_lowercase().replace(['-', '.'], "_")
+}
+
 #[derive(Default)]
 pub struct WorkerRegistry {
     inner: Mutex<HashMap<String, Worker>>,
@@ -92,8 +99,30 @@ impl WorkerRegistry {
     /// reports are forgotten and the "cost sent" memory is cleared so the
     /// policy snapshot is re-seeded — a re-registering agent may have
     /// rebooted and lost its applied costs. The session, if any, is kept.
-    pub fn register(&self, agent: &str, links: Vec<LinkKey>, loopback: Option<String>) -> bool {
+    pub fn register(&self, agent: &str, mut links: Vec<LinkKey>, loopback: Option<String>) -> bool {
         let mut map = self.inner.lock().expect("workers lock poisoned");
+        // Peer names come from BIRD protocol names, which cannot spell a
+        // hyphen: `peer_node_0_example` decodes to `node.0.example` while that node
+        // registers as `node-0.example`. Settle every link on the name the
+        // peer registers under, in both directions of time.
+        let me = name_key(agent);
+        for l in &mut links {
+            if let Some(known) = map.keys().find(|k| name_key(k) == name_key(&l.to)) {
+                l.to = known.clone();
+            } else if name_key(&l.to) == me {
+                l.to = agent.to_string();
+            }
+        }
+        for (name, other) in map.iter_mut() {
+            if name == agent {
+                continue;
+            }
+            for l in &mut other.links {
+                if l.to != agent && name_key(&l.to) == me {
+                    l.to = agent.to_string();
+                }
+            }
+        }
         let w = map.entry(agent.to_string()).or_default();
         w.loopback = loopback;
         w.applied_sent.clear();
@@ -307,6 +336,40 @@ mod tests {
         let owned = r.owned_links();
         assert_eq!(owned.len(), 1);
         assert_eq!(owned[0].0, "spoke-1");
+    }
+
+    #[test]
+    fn peer_names_settle_on_the_registered_spelling() {
+        // A BIRD protocol name cannot spell the hyphen in `node-0`, so the
+        // hub decodes its peer as `node.0.example`. Whichever side comes
+        // first, the link ends up on the name the spoke registers under.
+        let r = WorkerRegistry::new();
+        let hub_link = LinkKey::new("hub-a", "node.0.example", "awg_sp_node0");
+        r.register("hub-a", vec![hub_link], None);
+        r.register(
+            "node-0.example",
+            vec![LinkKey::new("node-0.example", "hub-a", "awg_hub_a")],
+            None,
+        );
+        assert_eq!(r.links_of("hub-a")[0].to, "node-0.example", "rewritten");
+
+        let r = WorkerRegistry::new();
+        r.register(
+            "node-0.example",
+            vec![LinkKey::new("node-0.example", "hub-a", "awg_hub_a")],
+            None,
+        );
+        r.register(
+            "hub-a",
+            vec![LinkKey::new("hub-a", "node.0.example", "awg_sp_node0")],
+            None,
+        );
+        assert_eq!(
+            r.links_of("hub-a")[0].to,
+            "node-0.example",
+            "canonical at register"
+        );
+        assert_eq!(r.links_of("node-0.example")[0].to, "hub-a", "untouched");
     }
 
     #[test]

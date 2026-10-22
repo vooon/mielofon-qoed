@@ -12,13 +12,20 @@
 //!   address (`ip`), the preferred probe target. Pinged with the interface
 //!   scope it cannot leave the tunnel in either direction, whereas the global
 //!   /127 address is reached by whatever path OSPF currently prefers.
+//!
+//! The peer behind an interface is resolved by router id first: the OSPF
+//! neighbour's `rid` on that interface is the BGP peer's `neighbor_id`
+//! (one router, one id), so no naming convention is needed. While the
+//! adjacency is down the previously resolved peer is kept, and as a last
+//! resort the interface name's token (what the glob's `*` matched) is
+//! looked up as a peer's first host label (`awg_hub1` → `hub1`).
 
 use crate::bus::Bus;
 use crate::config::Config;
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::net::Ipv6Addr;
-use tracing::warn;
+use tracing::{debug, warn};
 
 /// A discovered outgoing link.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -53,13 +60,49 @@ pub fn peer_short_label(host: &str) -> &str {
     host.split('.').next().unwrap_or(host)
 }
 
-/// Interface token by the prefix convention (`awg_hub1` → `hub1`).
-pub fn iface_token<'a>(iface: &'a str, prefix: &str) -> &'a str {
-    iface.strip_prefix(prefix).unwrap_or(iface)
+/// Shell-style match of `name` against `pattern` (`*` any run, `?` one
+/// char; nothing else is special).
+pub fn glob_match(pattern: &str, name: &str) -> bool {
+    fn go(p: &[u8], n: &[u8]) -> bool {
+        match p.first() {
+            None => n.is_empty(),
+            Some(b'*') => (0..=n.len()).any(|k| go(&p[1..], &n[k..])),
+            Some(b'?') => !n.is_empty() && go(&p[1..], &n[1..]),
+            Some(c) => n.first() == Some(c) && go(&p[1..], &n[1..]),
+        }
+    }
+    go(pattern.as_bytes(), name.as_bytes())
 }
 
-/// Candidate `(interface, peer hostname)` pairs from `bird status`.
-pub fn select_links(status: &Value, cfg: &Config) -> Vec<(String, String)> {
+/// What the single `*` of `pattern` matched in `name`: the peer token of a
+/// conventionally named interface (`awg_*` on `awg_hub1` → `hub1`). None
+/// when the pattern has no or several wildcards, or does not match.
+pub fn glob_token<'a>(pattern: &str, name: &'a str) -> Option<&'a str> {
+    let (pre, suf) = pattern.split_once('*')?;
+    if suf.contains('*') || pre.contains('?') || suf.contains('?') {
+        return None;
+    }
+    let mid = name.strip_prefix(pre)?.strip_suffix(suf)?;
+    (!mid.is_empty()).then_some(mid)
+}
+
+/// The interface's peer token under the first glob that matches it.
+pub fn iface_token<'a>(iface: &'a str, globs: &[String]) -> Option<&'a str> {
+    globs
+        .iter()
+        .find(|g| glob_match(g, iface))
+        .and_then(|g| glob_token(g, iface))
+}
+
+/// Candidate `(interface, peer hostname)` pairs from `bird status`: the
+/// mesh protocol's point-to-point interfaces selected by the configured
+/// globs, each resolved to its peer by router id, then by what it resolved
+/// to last time (`known`), then by the interface name's token.
+pub fn select_links(
+    status: &Value,
+    cfg: &Config,
+    known: &HashMap<String, String>,
+) -> Vec<(String, String)> {
     let Some(ospf) = status["ospf"].as_array().and_then(|a| {
         a.iter()
             .find(|o| o["protocol"] == cfg.ospf_protocol.as_str())
@@ -67,12 +110,28 @@ pub fn select_links(status: &Value, cfg: &Config) -> Vec<(String, String)> {
         return Vec::new();
     };
 
-    let nodes: HashMap<String, String> = status["bgp"]
+    let peers: Vec<(String, Option<String>)> = status["bgp"]
         .as_array()
         .into_iter()
         .flatten()
-        .filter_map(|b| b["name"].as_str().and_then(peer_hostname))
-        .map(|h| (peer_short_label(&h).to_string(), h))
+        .filter_map(|b| {
+            let host = b["name"].as_str().and_then(peer_hostname)?;
+            Some((host, b["neighbor_id"].as_str().map(str::to_string)))
+        })
+        .collect();
+    let by_label: HashMap<&str, &str> = peers
+        .iter()
+        .map(|(h, _)| (peer_short_label(h), h.as_str()))
+        .collect();
+    let by_rid: HashMap<&str, &str> = peers
+        .iter()
+        .filter_map(|(h, rid)| Some((rid.as_deref()?, h.as_str())))
+        .collect();
+    let rid_of: HashMap<&str, &str> = ospf["neighbors"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|n| Some((n["interface"].as_str()?, n["rid"].as_str()?)))
         .collect();
 
     let mut out = Vec::new();
@@ -81,17 +140,31 @@ pub fn select_links(status: &Value, cfg: &Config) -> Vec<(String, String)> {
             continue;
         };
         // rpcd-mod-bird >= 0.4.0 reports `type`; older snapshots rely on the
-        // BGP peer match alone.
+        // peer match alone.
         if let Some(t) = i["type"].as_str() {
             if t != "ptp" {
                 continue;
             }
         }
+        if !cfg.ifaces.iter().any(|g| glob_match(g, iface)) {
+            continue;
+        }
         if cfg.excludes.iter().any(|e| e == iface) {
             continue;
         }
-        if let Some(host) = nodes.get(iface_token(iface, &cfg.iface_prefix)) {
-            out.push((iface.to_string(), host.clone()));
+        let peer = rid_of
+            .get(iface)
+            .and_then(|rid| by_rid.get(rid))
+            .map(|h| h.to_string())
+            .or_else(|| known.get(iface).cloned())
+            .or_else(|| {
+                iface_token(iface, &cfg.ifaces)
+                    .and_then(|t| by_label.get(t))
+                    .map(|h| h.to_string())
+            });
+        match peer {
+            Some(host) => out.push((iface.to_string(), host)),
+            None => debug!("link discovery: {iface}: no peer resolvable, skipped"),
         }
     }
     out
@@ -178,7 +251,7 @@ pub fn loopback_address(iface_status: &Value) -> Option<Ipv6Addr> {
 /// Discover the managed links. Interfaces without a usable address are
 /// skipped with a warning; a failed `bird status` yields an empty set (the
 /// next refresh retries).
-pub async fn discover(bus: &impl Bus, cfg: &Config) -> Vec<Link> {
+pub async fn discover(bus: &impl Bus, cfg: &Config, known: &HashMap<String, String>) -> Vec<Link> {
     let status = match bus.call("bird", "status", json!({})).await {
         Ok(v) => v,
         Err(e) => {
@@ -190,7 +263,7 @@ pub async fn discover(bus: &impl Bus, cfg: &Config) -> Vec<Link> {
     let neighbors = neighbor_addrs(&status, cfg);
     let costs = interface_costs(&status, cfg);
     let mut links = Vec::new();
-    for (interface, to) in select_links(&status, cfg) {
+    for (interface, to) in select_links(&status, cfg, known) {
         let object = format!("network.interface.{interface}");
         let addr = match bus.call(&object, "status", json!({})).await {
             Ok(st) => derive_address(&st),
@@ -259,11 +332,15 @@ mod tests {
                 ]}
             ],
             "bgp": [
-                { "name": "peer_hub1_example_com" },
-                { "name": "peer_hub2_example_com" },
-                { "name": "peer_hub3_example_com" }
+                { "name": "peer_hub1_example_com", "neighbor_id": "192.0.2.1" },
+                { "name": "peer_hub2_example_com", "neighbor_id": "192.0.2.2" },
+                { "name": "peer_hub3_example_com", "neighbor_id": "192.0.2.3" }
             ]
         })
+    }
+
+    fn none() -> HashMap<String, String> {
+        HashMap::new()
     }
 
     #[test]
@@ -295,7 +372,7 @@ mod tests {
 
     #[test]
     fn selects_mesh_ptp_links_matched_to_bgp_peers() {
-        let links = select_links(&status(), &cfg());
+        let links = select_links(&status(), &cfg(), &none());
         assert_eq!(
             links,
             vec![
@@ -307,6 +384,62 @@ mod tests {
     }
 
     #[test]
+    fn peer_resolves_by_router_id_then_memory_then_name_token() {
+        // A hub: its tunnel towards a spoke is named by role, not by the
+        // peer's host label, so only the router id can resolve it.
+        let mut st = status();
+        st["ospf"][0]["interfaces"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!({ "interface": "awg_sp_x1", "type": "ptp", "cost": 1010 }));
+        st["bgp"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!({ "name": "peer_x1spoke_example_com", "neighbor_id": "192.0.2.9" }));
+        let mut v = json!({ "main": {
+            "endpoint": "203.0.113.1:9552", "cacert": "ca", "cert": "c", "key": "k",
+            "iface": ["awg_*", "awg_sp_*"]
+        }});
+        let cfg = Config::from_uci(&v, "hub-a").unwrap();
+
+        // Adjacency down, never seen: the name token "x1" matches no label.
+        let links = select_links(&st, &cfg, &none());
+        assert!(
+            !links.iter().any(|(i, _)| i == "awg_sp_x1"),
+            "unresolvable without an adjacency: {links:?}"
+        );
+
+        // Adjacency up: router id resolves it.
+        st["ospf"][0]["neighbors"] = json!([
+            { "rid": "192.0.2.9", "state": "Full", "interface": "awg_sp_x1", "ip": "fe80::9" }
+        ]);
+        let links = select_links(&st, &cfg, &none());
+        assert!(links.contains(&("awg_sp_x1".to_string(), "x1spoke.example.com".to_string())));
+
+        // Adjacency down again: the last resolution is kept.
+        st["ospf"][0]["neighbors"] = json!([]);
+        let known: HashMap<String, String> =
+            [("awg_sp_x1".to_string(), "x1spoke.example.com".to_string())].into();
+        let links = select_links(&st, &cfg, &known);
+        assert!(links.contains(&("awg_sp_x1".to_string(), "x1spoke.example.com".to_string())));
+
+        // Router id wins over a stale memory and over the name token.
+        st["ospf"][0]["neighbors"] = json!([
+            { "rid": "192.0.2.3", "state": "Full", "interface": "awg_hub1", "ip": "fe80::3" }
+        ]);
+        let stale: HashMap<String, String> =
+            [("awg_hub1".to_string(), "old.example.com".to_string())].into();
+        let links = select_links(&st, &cfg, &stale);
+        assert!(links.contains(&("awg_hub1".to_string(), "hub3.example.com".to_string())));
+        v["main"]["iface"] = json!("eth*");
+        let cfg = Config::from_uci(&v, "hub-a").unwrap();
+        assert!(
+            select_links(&st, &cfg, &none()).is_empty(),
+            "glob selects nothing"
+        );
+    }
+
+    #[test]
     fn untyped_interfaces_fall_back_to_peer_match() {
         let st = json!({
             "ospf": [{ "protocol": "mesh_v3", "interfaces": [
@@ -314,7 +447,7 @@ mod tests {
             ]}],
             "bgp": [{ "name": "peer_hub1_example_com" }]
         });
-        assert_eq!(select_links(&st, &cfg()).len(), 1);
+        assert_eq!(select_links(&st, &cfg(), &none()).len(), 1);
     }
 
     #[test]
@@ -328,8 +461,22 @@ mod tests {
         assert_eq!(peer_hostname("peer_"), None);
         assert_eq!(peer_short_label("hub1.example.com"), "hub1");
         assert_eq!(peer_short_label("nr"), "nr");
-        assert_eq!(iface_token("awg_hub1", "awg_"), "hub1");
-        assert_eq!(iface_token("eth0", "awg_"), "eth0");
+        let hub = vec!["awg_int_*".to_string(), "awg_sp_*".to_string()];
+        assert_eq!(
+            iface_token("awg_hub1", &["awg_*".to_string()]),
+            Some("hub1")
+        );
+        assert_eq!(iface_token("eth0", &["awg_*".to_string()]), None);
+        assert_eq!(iface_token("awg_int_hub2", &hub), Some("hub2"));
+        assert_eq!(iface_token("awg_sp_node0", &hub), Some("node0"));
+        assert_eq!(iface_token("awg_hub1", &hub), None, "no glob matched");
+        assert!(glob_match("awg_*", "awg_"));
+        assert!(glob_match("*_tun", "hub1_tun"));
+        assert!(glob_match("awg_??", "awg_h1"));
+        assert!(!glob_match("awg_?", "awg_h1"));
+        assert!(!glob_match("awg_*", "wg_hub1"));
+        assert_eq!(glob_token("*_tun", "hub1_tun"), Some("hub1"));
+        assert_eq!(glob_token("a*b*", "axbx"), None, "two wildcards: no token");
     }
 
     #[test]
@@ -378,13 +525,13 @@ mod tests {
             "network.interface.awg_hub2.status",
             Ok(json!({ "ipv6-address": [{ "address": "fe80::1", "mask": 64 }]})),
         );
-        let links = discover(&bus, &cfg()).await;
+        let links = discover(&bus, &cfg(), &none()).await;
         assert_eq!(links.len(), 1);
         assert_eq!(links[0].to, "hub1.example.com");
         assert_eq!(links[0].target, ip("fd00:0:0:1::40:0"));
         assert_eq!(links[0].peer_ll, Some(ip("fe80::1")));
 
         let dead = FakeBus::default();
-        assert!(discover(&dead, &cfg()).await.is_empty());
+        assert!(discover(&dead, &cfg(), &none()).await.is_empty());
     }
 }

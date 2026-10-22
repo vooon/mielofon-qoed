@@ -257,6 +257,12 @@ pub struct Classifier {
     /// How the two directions of one tunnel (`A→B` on A, `B→A` on B) are
     /// combined before classification. See [`PairCost`].
     pub pair_cost: PairCost,
+    /// Added to the derived cost of every link a hub (a `[members]` entry)
+    /// advertises towards a non-member. Spokes must never carry transit
+    /// between hubs: with the offset a hub→spoke→hub path always loses to
+    /// any direct hub↔hub link, while the spoke still gets a finite,
+    /// quality-ranked fallback. Spoke→hub and hub↔hub links are unaffected.
+    pub hub_spoke_cost_offset: u32,
 }
 
 /// Pairing of a tunnel's two directed links.
@@ -297,6 +303,7 @@ impl Default for Classifier {
             busy_hold_secs: 120,
             hysteresis_passes: 3,
             pair_cost: PairCost::Directional,
+            hub_spoke_cost_offset: 1000,
         }
     }
 }

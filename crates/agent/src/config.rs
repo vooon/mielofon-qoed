@@ -27,7 +27,10 @@ pub struct Config {
     /// OSPF protocol whose ptp interfaces are the managed links.
     pub ospf_protocol: String,
     /// Tunnel interface prefix (`awg_hub1` minus `awg_` = `hub1`).
-    pub iface_prefix: String,
+    /// Shell globs (`*`, `?`) selecting the managed tunnel interfaces among
+    /// the mesh OSPF protocol's point-to-point ones: `awg_*` on a spoke,
+    /// `awg_int_*` plus `awg_sp_*` on a hub.
+    pub ifaces: Vec<String>,
     /// Interface carrying the mesh loopback reported at register.
     pub loopback_iface: String,
     /// Discovered interfaces never to manage.
@@ -77,6 +80,30 @@ fn list<'a>(sec: &'a Map<String, Value>, name: &str) -> Vec<&'a str> {
         Some(Value::String(s)) => vec![s.as_str()],
         _ => Vec::new(),
     }
+}
+
+/// `list iface` globs (or one `option`, space-separated). The pre-glob
+/// `iface_prefix` is honoured as `<prefix>*` when no glob is set. Empty
+/// config keeps the historical `awg_*`.
+fn iface_globs(main: &Map<String, Value>) -> Vec<String> {
+    let mut out: Vec<String> = list(main, "iface")
+        .iter()
+        .flat_map(|e| e.split_whitespace())
+        .map(str::to_string)
+        .collect();
+    if out.is_empty() {
+        out = list(main, "iface_prefix")
+            .iter()
+            .flat_map(|e| e.split_whitespace())
+            .map(|p| format!("{p}*"))
+            .collect();
+    }
+    out.sort();
+    out.dedup();
+    if out.is_empty() {
+        out.push("awg_*".to_string());
+    }
+    out
 }
 
 /// `list endpoint`, or the pre-QUIC `controller_url` with its scheme and
@@ -142,7 +169,7 @@ impl Config {
             cert: required("cert")?,
             key: required("key")?,
             ospf_protocol: opt(main, "ospf_protocol").unwrap_or("mesh_v3").to_string(),
-            iface_prefix: opt(main, "iface_prefix").unwrap_or("awg_").to_string(),
+            ifaces: iface_globs(main),
             loopback_iface: opt(main, "loopback_iface")
                 .unwrap_or("dummy_awg")
                 .to_string(),
@@ -229,6 +256,7 @@ mod tests {
         assert_eq!(c.quiet_max_mbps, 15.0, "malformed number falls back");
         assert_eq!(c.tcp_duration, Duration::from_secs(6));
         assert_eq!(c.ospf_protocol, "mesh_v3");
+        assert_eq!(c.ifaces, vec!["awg_*".to_string()], "default glob");
         assert_eq!(c.excludes, vec!["awg_legacy".to_string()]);
         assert!(c.prometheus_textfile.is_none());
         assert_eq!((c.udp_port, c.udp_rate_mbps), (0, 20.0));
@@ -248,6 +276,29 @@ mod tests {
         v["main"].as_object_mut().unwrap().remove("controller_url");
         let err = Config::from_uci(&v, "node-0").unwrap_err();
         assert!(err.to_string().contains("endpoint"));
+    }
+
+    #[test]
+    fn iface_globs_come_as_a_list_or_one_option_or_the_legacy_prefix() {
+        let mut v = values();
+        v["main"]["iface"] = json!(["awg_sp_*", "awg_int_*"]);
+        let c = Config::from_uci(&v, "node-0").unwrap();
+        assert_eq!(
+            c.ifaces,
+            vec!["awg_int_*".to_string(), "awg_sp_*".to_string()]
+        );
+
+        v["main"]["iface"] = json!("awg_int_* awg_sp_* awg_sp_*");
+        let c = Config::from_uci(&v, "node-0").unwrap();
+        assert_eq!(
+            c.ifaces,
+            vec!["awg_int_*".to_string(), "awg_sp_*".to_string()]
+        );
+
+        v["main"].as_object_mut().unwrap().remove("iface");
+        v["main"]["iface_prefix"] = json!("awg_int_");
+        let c = Config::from_uci(&v, "node-0").unwrap();
+        assert_eq!(c.ifaces, vec!["awg_int_*".to_string()], "legacy prefix");
     }
 
     #[test]

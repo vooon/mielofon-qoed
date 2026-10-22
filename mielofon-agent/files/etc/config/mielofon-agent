@@ -33,13 +33,18 @@ config agent 'main'
 	# OSPF protocol whose point-to-point interfaces are managed links.
 	# Nodes may run unrelated OSPF instances; they are ignored.
 	option ospf_protocol 'mesh_v3'
-	# The peer node identifier comes straight from the BGP peer protocol name
-	# (peer_<hostname>, dots as underscores) — never shortened. An interface
-	# is matched to a peer by its short label: the first dot-label of the
-	# peer hostname (awg_hub1 <-> hub1.example.com), so only the prefix
-	# convention is configured here:
-	#   awg_hub1 minus "awg_" -> "hub1" (matches the peer hostname's first label)
-	option iface_prefix 'awg_'
+	# Managed tunnels: shell globs over the mesh OSPF protocol's point-to-
+	# point interfaces (`*`, `?`). A spoke names every tunnel `awg_<hub>`,
+	# a hub names them by role, so a hub lists both:
+	#   list iface 'awg_int_*'
+	#   list iface 'awg_sp_*'
+	# The peer behind an interface is the BGP peer protocol whose
+	# neighbor_id is the OSPF neighbour's router id on it (`peer_<hostname>`,
+	# dots as underscores, never shortened). While the adjacency is down the
+	# last resolution is kept; a never-seen interface falls back to the name
+	# token the glob's `*` matched against the peer's first host label
+	# (awg_hub1 -> hub1 -> hub1.example.com).
+	list iface 'awg_*'
 	# Interface holding the mesh loopback, reported for the trace walker.
 	option loopback_iface 'dummy_awg'
 	# Continuous ICMP cadence per managed link (seconds, fractional allowed)

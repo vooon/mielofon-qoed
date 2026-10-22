@@ -95,7 +95,14 @@ impl<B: Bus> Agent<B> {
     /// Re-discover links and the mesh loopback, reconcile the probes, and
     /// re-apply any cost BIRD has drifted from.
     pub async fn refresh(&self) {
-        let links = discover::discover(&self.bus, &self.cfg).await;
+        let known: HashMap<String, String> = {
+            let st = self.state.lock().expect("agent state");
+            st.links
+                .iter()
+                .map(|l| (l.interface.clone(), l.to.clone()))
+                .collect()
+        };
+        let links = discover::discover(&self.bus, &self.cfg, &known).await;
         let loopback = discover::loopback(&self.bus, &self.cfg).await;
         self.prober.reconcile(&links);
         let drifted: Vec<(String, u32, u32)> = {
