@@ -93,7 +93,7 @@ rpcd.
 | field | source | notes |
 |---|---|---|
 | `interface` | `status.ospf[]` iface of `cfg.ospf_protocol`, `type==ptp` | `dummy`/broadcast + unrelated OSPF excluded by protocol/type |
-| `to` (peer) | BGP peer protocol name (`peer_<hostname>`, dots as underscores) | decode `peer_<hostname>` → the peer's FULL hostname (`peer_hub1_example_com` → `hub1.example.com`). The interface is matched to its peer by **router id**: `ospf[].neighbors[].rid` on the interface equals the BGP peer's `neighbor_id`. While the adjacency is down the last resolution is kept; a never-seen interface falls back to the name token (what the glob's `*` matched) against the peer's first host label (`awg_hub1` ↔ `hub1.example.com`). No suffix stripping / shortening: `to` names the exact same node the peer registers as `from` |
+| `to` (peer) | BGP peer protocol `description` (the hostname verbatim), else the protocol name (`peer_<hostname>`, dots as underscores) | a protocol name cannot spell a hyphen, so `description "node-0.example"` on the peer protocol is the exact source; without one, decode `peer_<hostname>` → the peer's FULL hostname (`peer_hub1_example_com` → `hub1.example.com`). The interface is matched to its peer by **router id**: `ospf[].neighbors[].rid` on the interface equals the BGP peer's `neighbor_id`. While the adjacency is down the last resolution is kept; a never-seen interface falls back to the name token (what the glob's `*` matched) against the peer's first host label (`awg_hub1` ↔ `hub1.example.com`). No suffix stripping / shortening: `to` names the exact same node the peer registers as `from` |
 | `from` | `[main] agent_name` (the node's full hostname) | |
 | `source` | `network.interface.<iface>` `ipv6-address[]` | first global addr; no `ip`/shell |
 | `target` | far side of the `/127` | flip last address bit of `source` |
@@ -158,8 +158,10 @@ config exclude
 - **Node identifier = full hostname**: the `to` of every link is the peer's
   full hostname, decoded from `peer_<hostname>` (never shortened), so `from`/
   `to` stay symmetric and each hub is one node on the map, not a shortened
-  name plus a full-hostname one. The operator must name BIRD/BGP peers
-  `peer_<hostname>`; tunnel interface names are free as long as a `list
+  name plus a full-hostname one. The operator sets `description
+  "<hostname>"` on each BGP peer protocol (rpcd-mod-bird exposes it as
+  `bgp[].description`), or names them `peer_<hostname>` where the name has
+  no hyphen; tunnel interface names are free as long as a `list
   iface` glob selects them (the `awg_<first-label>` convention only matters
   for an interface whose adjacency has never been seen).
 - **Discovery cadence**: startup + `reload_service` + every register retry;
