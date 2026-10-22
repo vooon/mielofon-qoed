@@ -259,7 +259,7 @@ pub fn classify_once(state: &AppState) {
         };
         drop(held);
 
-        let effective_cost = quality::cost_for_quality(&cfg.quality, effective);
+        let effective_cost = policy_cost(cfg, &link, effective);
         state
             .classifier
             .last
@@ -273,6 +273,18 @@ pub fn classify_once(state: &AppState) {
                 },
             );
         write_derived(state, &link, view, Some(effective), Some(effective_cost));
+    }
+}
+
+/// The cost a link advertises for a quality class: the class cost, plus the
+/// hub→spoke offset when a member advertises towards a non-member.
+pub fn policy_cost(cfg: &crate::config::Config, link: &LinkKey, q: Quality) -> u32 {
+    let base = quality::cost_for_quality(&cfg.quality, q);
+    let hub_to_spoke = cfg.members.contains_key(&link.from) && !cfg.members.contains_key(&link.to);
+    if hub_to_spoke {
+        base.saturating_add(cfg.classifier.hub_spoke_cost_offset)
+    } else {
+        base
     }
 }
 
@@ -362,6 +374,7 @@ mod tests {
                 busy_hold_secs: 120,
                 hysteresis_passes,
                 pair_cost: PairCost::Directional,
+                hub_spoke_cost_offset: 0,
             },
             ..Config::default()
         };
@@ -639,6 +652,45 @@ mod tests {
         append_dims(&state, &link, ts + 15, 600.0, Some(90.0));
         classify_once(&state);
         assert_eq!(state.kv.get(&link).unwrap().quality, Some(Quality::Bad));
+    }
+
+    #[test]
+    fn hub_to_spoke_links_carry_the_transit_offset() {
+        // hub-a and hub-b are members; node-0 is a spoke. Same quality on
+        // every link: only the hub→spoke direction is pushed out of transit.
+        let mut cfg = Config {
+            classifier: Classifier {
+                hysteresis_passes: 1,
+                ..Classifier::default()
+            },
+            ..Config::default()
+        };
+        cfg.members
+            .insert("hub-a".into(), "203.0.113.1".parse().unwrap());
+        cfg.members
+            .insert("hub-b".into(), "203.0.113.2".parse().unwrap());
+        let state = AppState::new(cfg);
+        let hub_spoke = LinkKey::new("hub-a", "node-0", "awg_sp_node_0");
+        let spoke_hub = LinkKey::new("node-0", "hub-a", "awg_hub_a");
+        let hub_hub = LinkKey::new("hub-a", "hub-b", "awg_int_hub_b");
+        own(&state, &[&hub_spoke, &spoke_hub, &hub_hub]);
+        let now = crate::clock::now_secs();
+        for l in [&hub_spoke, &spoke_hub, &hub_hub] {
+            append_dims(&state, l, now, 15.0, None);
+        }
+        classify_once(&state);
+        assert_eq!(cost(&state, &spoke_hub), Some(10), "spoke→hub: class cost");
+        assert_eq!(cost(&state, &hub_hub), Some(10), "hub↔hub: class cost");
+        assert_eq!(
+            cost(&state, &hub_spoke),
+            Some(1010),
+            "hub→spoke: offset added"
+        );
+        assert_eq!(
+            state.kv.get(&hub_spoke).unwrap().quality,
+            Some(Quality::Good),
+            "quality itself is untouched"
+        );
     }
 
     #[test]

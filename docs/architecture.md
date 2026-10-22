@@ -196,6 +196,14 @@ one-way shaping; `symmetric` uses the worse of both so the costs are always
 equal. Halves are matched by swapped node names, so only when exactly one
 tunnel exists between two nodes; anything else is classified on its own.
 
+Spokes never carry transit between hubs. A link a member (hub) advertises
+towards a non-member gets `[classifier] hub_spoke_cost_offset` (default
+1000) added to its class cost, so a hub→spoke→hub detour always loses to any
+direct hub↔hub link while the spoke keeps a finite, quality-ranked fallback.
+Spoke→hub and hub↔hub links are costed by class alone. This is what lets hub
+agents manage their spoke tunnels (`list iface` globs on the agent) without
+the derived cost undoing the transit protection.
+
 ### Lockdown rules
 
 - mTLS on the cluster and client listeners, verified against a dedicated CA;
