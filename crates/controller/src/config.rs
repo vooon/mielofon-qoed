@@ -328,7 +328,7 @@ impl Default for TsConfig {
 /// [log]
 /// level = "info"
 /// [ts]
-/// path = "/etc/mielofon/tsdb.redb"
+/// path = "/var/lib/mielofon/tsdb.redb"
 /// [frontend]
 /// root_dir = "/usr/share/mielofon/dashboard"
 /// [otel]
