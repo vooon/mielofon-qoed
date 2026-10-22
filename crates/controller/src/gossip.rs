@@ -18,7 +18,7 @@
 //! monotonic), so resends are harmless. The exchange response carries the
 //! responder's KV view, which the pusher merges as well.
 
-use crate::model::{LinkKey, QualityRecord};
+use crate::model::{LinkKey, NodeEntry, QualityRecord};
 use crate::state::AppState;
 use crate::tsdb::{RawSample, DELTA_LIMIT};
 use mielofon_transport::{request, respond, Dialer, Listener, QuicSession, Session};
@@ -58,6 +58,9 @@ pub struct ExchangeReq {
     pub records: Vec<(LinkKey, QualityRecord)>,
     #[serde(default)]
     pub ts_samples: Vec<(LinkKey, RawSample)>,
+    /// The node directory (router id → registered name), LWW-merged.
+    #[serde(default)]
+    pub nodes: Vec<(String, NodeEntry)>,
 }
 
 /// The responder's KV view.
@@ -65,6 +68,8 @@ pub struct ExchangeReq {
 pub struct ExchangeResp {
     pub node: String,
     pub records: Vec<(LinkKey, QualityRecord)>,
+    #[serde(default)]
+    pub nodes: Vec<(String, NodeEntry)>,
 }
 
 /// Merge a peer's view into our store and reply with our own view.
@@ -73,6 +78,7 @@ pub fn exchange(state: &AppState, req: ExchangeReq) -> ExchangeResp {
     if !req.ts_samples.is_empty() {
         state.tsdb.merge_delta(&req.ts_samples);
     }
+    learn_nodes(state, &req.nodes);
     // Inbound push proves reachability from this peer (not a round-trip we
     // timed, so the measured rtt from our own pushes is kept).
     state.peers.mark_seen(&req.node);
@@ -81,6 +87,14 @@ pub fn exchange(state: &AppState, req: ExchangeReq) -> ExchangeResp {
     ExchangeResp {
         node: state.cfg.node.name.clone(),
         records: state.kv.all(),
+        nodes: state.kv.nodes(),
+    }
+}
+
+/// Merge a peer's node directory and name our agents' links by it.
+fn learn_nodes(state: &AppState, nodes: &[(String, NodeEntry)]) {
+    if !nodes.is_empty() && state.kv.merge_nodes(nodes) {
+        crate::session::sync_directory(state);
     }
 }
 
@@ -261,6 +275,7 @@ async fn push_one(
         node: state.cfg.node.name.clone(),
         records: records.as_ref().clone(),
         ts_samples,
+        nodes: state.kv.nodes(),
     });
     let addr = SocketAddr::new(addr, state.cfg.listeners.cluster_port);
     let started = std::time::Instant::now();
@@ -272,6 +287,7 @@ async fn push_one(
                 .peers
                 .mark_ok(&name, started.elapsed().as_millis() as u64);
             state.kv.merge(&view.records);
+            learn_nodes(&state, &view.nodes);
         }
         // Tolerate a flapping fabric: the next interval retries (the
         // watermark is untouched, so everything is re-sent).
@@ -323,6 +339,16 @@ mod tests {
         let link_b = LinkKey::new("node-1", "hub-b", "awg0");
         a.kv.merge(&[(link_a.clone(), record(10))]);
         b.kv.merge(&[(link_b.clone(), record(20))]);
+        // b learned a spoke's name from its own agent; a's hub only knows
+        // the router id and must get the name through gossip.
+        b.kv.set_node("192.0.2.9", "node-0.example", vec![], 5);
+        a.workers.register(
+            "hub-a",
+            vec![LinkKey::new("hub-a", "node.0.example", "awg_sp_n0")],
+            Some("192.0.2.1".into()),
+            [("awg_sp_n0".to_string(), "192.0.2.9".to_string())].into(),
+            None,
+        );
         a.tsdb.append(
             &link_a,
             RawSample::from_dims(
@@ -366,6 +392,16 @@ mod tests {
             .iter()
             .any(|(n, h)| n == "hub-a" && h.last_ok_ts.is_some()));
         assert_eq!(a.tsdb.sent_watermark("hub-b"), 1, "watermark advanced");
+        assert_eq!(
+            a.workers.links_of("hub-a")[0].to,
+            "node-0.example",
+            "name learned through the exchange reply"
+        );
+        assert_eq!(
+            a.kv.node("192.0.2.1").unwrap().links[0].to,
+            "node-0.example",
+            "hub-a's entry republished after the rename"
+        );
 
         // The session is reused across rounds...
         let first = fabric

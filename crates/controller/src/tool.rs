@@ -82,6 +82,8 @@ async fn hello(args: HelloArgs) -> Result<()> {
         .await
         .context("dial")?;
     let req = AgentRequest::Register(RegisterReq {
+        router_id: None,
+        peer_rids: Default::default(),
         agent: args.agent.clone(),
         links,
         loopback: args.loopback.clone(),

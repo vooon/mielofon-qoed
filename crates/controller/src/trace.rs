@@ -463,9 +463,13 @@ mod tests {
     fn stub_state(agents: &[(&str, Option<&str>, &[LinkKey])]) -> AppState {
         let state = AppState::new(Config::default());
         for (name, lb, links) in agents {
-            state
-                .workers
-                .register(name, links.to_vec(), lb.map(str::to_string));
+            state.workers.register(
+                name,
+                links.to_vec(),
+                None,
+                std::collections::HashMap::new(),
+                lb.map(str::to_string),
+            );
         }
         state
     }
@@ -474,7 +478,9 @@ mod tests {
     fn chain_state(agents: Vec<(String, Option<String>, Vec<LinkKey>)>) -> AppState {
         let state = AppState::new(Config::default());
         for (name, lb, links) in agents {
-            state.workers.register(&name, links, lb);
+            state
+                .workers
+                .register(&name, links, None, std::collections::HashMap::new(), lb);
         }
         state
     }

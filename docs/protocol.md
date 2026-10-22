@@ -98,8 +98,9 @@ live session whenever the agent's link set changes.
 
 ```jsonc
 // agent → controller, one stream
-{ "type": "register", "agent": "spoke-1",
+{ "type": "register", "agent": "spoke-1", "router_id": "192.0.2.10",
   "links": [ {"from":"spoke-1","to":"hub-a","interface":"awg_hub_a"} ],
+  "peer_rids": { "awg_hub_a": "192.0.2.1" },   // OSPF neighbour per interface
   "loopback": "fd00:0:0:1::1" }   // mesh loopback (dummy_awg), for /v1/trace
 // ← { "ok": true }                // or { "ok": false, "error": "…" }
 ```
@@ -107,6 +108,15 @@ live session whenever the agent's link set changes.
 `loopback` is the agent's global IPv6 on `dummy_awg` (the mesh loopback). The
 controller stores it per node and uses it to resolve a destination *node name*
 into the prefix the trace walker asks each hop's BIRD to resolve.
+
+`router_id` and `peer_rids` feed the **node directory**: a replicated map
+`router id → { name, links }` written at every registration and gossiped
+like the link records (never expired, LWW by registration time). An agent
+only knows the far end of a tunnel by the router id OSPF shows it and by a
+BGP protocol name that cannot spell a hyphen; the controller renames each
+link's `to` to what that node registered under, on every member, as soon as
+either side is known. Entries carry the node's link set too, so the map
+shows a registered link before its first sample.
 
 Every `register` replaces the agent's link set and forgets which costs were
 sent: the controller then opens an `apply_cost` stream for every link with a
@@ -305,6 +315,7 @@ the peer, the request names the sender.
 
 ```jsonc
 // stream opened by the pusher on its session to the member
-{ "type": "exchange", "node": "hub-a", "records": [[…]], "ts_samples": [[…]] }
-// -> { "type": "exchange", "node": "hub-b", "records": […] }   // merged by the pusher
+{ "type": "exchange", "node": "hub-a", "records": [[…]], "ts_samples": [[…]],
+  "nodes": [["192.0.2.10", {"name": "spoke-1", "ts": 1747000000, "links": […]}]] }
+// -> { "type": "exchange", "node": "hub-b", "records": […], "nodes": […] }   // merged by the pusher
 ```

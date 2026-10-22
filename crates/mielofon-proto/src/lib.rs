@@ -7,6 +7,7 @@
 //! for a [`WorkCmd`] and reads the [`AgentReply`]. See `docs/protocol.md`.
 
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 
 /// Identifies a directed link: `from`'s tunnel `interface` towards `to`.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -100,8 +101,17 @@ pub enum AgentRequest {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RegisterReq {
     pub agent: String,
+    /// The node's router id (OSPF/BGP), the key its neighbours know it by.
+    /// The controller publishes `router_id → agent` cluster-wide so every
+    /// hub can name the far end of a tunnel exactly.
+    #[serde(default)]
+    pub router_id: Option<String>,
     #[serde(default)]
     pub links: Vec<LinkKey>,
+    /// Per interface, the router id of the OSPF neighbour the link's peer
+    /// was resolved from (absent while the adjacency has never been up).
+    #[serde(default)]
+    pub peer_rids: BTreeMap<String, String>,
     /// Mesh loopback address (IPv6) the agent reported, used by the trace
     /// walker to resolve a destination node name into a routable target.
     #[serde(default)]

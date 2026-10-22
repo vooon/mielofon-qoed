@@ -196,6 +196,13 @@ one-way shaping; `symmetric` uses the worse of both so the costs are always
 equal. Halves are matched by swapped node names, so only when exactly one
 tunnel exists between two nodes; anything else is classified on its own.
 
+Node names are settled through the **node directory**: every agent registers
+with its router id and the router id of each neighbour; the controllers
+replicate `router id → { name, links }` through gossip and rename each link's
+far end to the name that node registered under. An agent-less node keeps the
+name decoded from its BGP protocol (or its `description`, see
+`docs/link-autodiscovery.md`).
+
 Spokes never carry transit between hubs. A link a hub (`[cluster] hubs`,
 or the members when that list is empty: a hub need not run a controller)
 advertises towards a non-hub gets `[classifier] hub_spoke_cost_offset`

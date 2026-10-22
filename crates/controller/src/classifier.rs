@@ -360,7 +360,9 @@ mod tests {
             by_agent.entry(&l.from).or_default().push((*l).clone());
         }
         for (agent, links) in by_agent {
-            state.workers.register(agent, links, None);
+            state
+                .workers
+                .register(agent, links, None, HashMap::new(), None);
         }
     }
 

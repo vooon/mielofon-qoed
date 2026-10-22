@@ -46,6 +46,17 @@ pub struct Link {
     /// snapshot does not report it), so an applied cost that a BIRD config
     /// redeploy reset can be noticed and re-applied.
     pub cost: Option<u32>,
+    /// Router id of the OSPF neighbour on this interface, the key the
+    /// controller names the peer by when that node runs an agent.
+    pub peer_rid: Option<String>,
+}
+
+/// What one `bird status` snapshot yields: the managed links and this
+/// node's own router id.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Discovered {
+    pub links: Vec<Link>,
+    pub router_id: Option<String>,
 }
 
 /// The peer's full hostname from its BGP protocol name: `peer_<hostname>`
@@ -223,6 +234,27 @@ pub fn interface_costs(status: &Value, cfg: &Config) -> HashMap<String, u32> {
         .collect()
 }
 
+/// Router id of the OSPF neighbour per interface of the mesh protocol.
+pub fn neighbor_rids(status: &Value, cfg: &Config) -> HashMap<String, String> {
+    let Some(ospf) = status["ospf"].as_array().and_then(|a| {
+        a.iter()
+            .find(|o| o["protocol"] == cfg.ospf_protocol.as_str())
+    }) else {
+        return HashMap::new();
+    };
+    ospf["neighbors"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|n| {
+            Some((
+                n["interface"].as_str()?.to_string(),
+                n["rid"].as_str()?.to_string(),
+            ))
+        })
+        .collect()
+}
+
 /// Link-local address of the OSPF neighbour per interface, from the mesh
 /// protocol's `neighbors[]` rows (BIRD prints the OSPFv3 neighbour's
 /// link-local as its IP). Older rpcd-mod-bird snapshots have no rows.
@@ -264,16 +296,21 @@ pub fn loopback_address(iface_status: &Value) -> Option<Ipv6Addr> {
 /// Discover the managed links. Interfaces without a usable address are
 /// skipped with a warning; a failed `bird status` yields an empty set (the
 /// next refresh retries).
-pub async fn discover(bus: &impl Bus, cfg: &Config, known: &HashMap<String, String>) -> Vec<Link> {
+pub async fn discover(bus: &impl Bus, cfg: &Config, known: &HashMap<String, String>) -> Discovered {
     let status = match bus.call("bird", "status", json!({})).await {
         Ok(v) => v,
         Err(e) => {
             warn!("link discovery: {e:#}");
-            return Vec::new();
+            return Discovered::default();
         }
     };
 
+    let router_id = status["status"]["router_id"]
+        .as_str()
+        .filter(|s| !s.is_empty())
+        .map(str::to_string);
     let neighbors = neighbor_addrs(&status, cfg);
+    let rids = neighbor_rids(&status, cfg);
     let costs = interface_costs(&status, cfg);
     let mut links = Vec::new();
     for (interface, to) in select_links(&status, cfg, known) {
@@ -289,6 +326,7 @@ pub async fn discover(bus: &impl Bus, cfg: &Config, known: &HashMap<String, Stri
             Some((source, target)) => links.push(Link {
                 peer_ll: neighbors.get(&interface).copied(),
                 cost: costs.get(&interface).copied(),
+                peer_rid: rids.get(&interface).cloned(),
                 interface,
                 to,
                 source,
@@ -298,7 +336,7 @@ pub async fn discover(bus: &impl Bus, cfg: &Config, known: &HashMap<String, Stri
         }
     }
     links.sort_by(|a, b| a.interface.cmp(&b.interface));
-    links
+    Discovered { links, router_id }
 }
 
 /// The mesh loopback of this node, if its interface is up.
@@ -563,13 +601,14 @@ mod tests {
             "network.interface.awg_hub2.status",
             Ok(json!({ "ipv6-address": [{ "address": "fe80::1", "mask": 64 }]})),
         );
-        let links = discover(&bus, &cfg(), &none()).await;
+        let found = discover(&bus, &cfg(), &none()).await;
+        let links = found.links;
         assert_eq!(links.len(), 1);
         assert_eq!(links[0].to, "hub1.example.com");
         assert_eq!(links[0].target, ip("fd00:0:0:1::40:0"));
         assert_eq!(links[0].peer_ll, Some(ip("fe80::1")));
 
         let dead = FakeBus::default();
-        assert!(discover(&dead, &cfg(), &none()).await.is_empty());
+        assert!(discover(&dead, &cfg(), &none()).await.links.is_empty());
     }
 }

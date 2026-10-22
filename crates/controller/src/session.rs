@@ -152,9 +152,25 @@ fn register(
         }
     }
     let own = identity.map(|(_, g)| *g);
-    state
-        .workers
-        .register(&req.agent, req.links.clone(), req.loopback);
+    let router_id = req.router_id.clone().filter(|r| !r.is_empty());
+    state.workers.register(
+        &req.agent,
+        req.links.clone(),
+        router_id.clone(),
+        req.peer_rids.clone().into_iter().collect(),
+        req.loopback,
+    );
+    // Publish this node, then name its peers and itself on everyone else's
+    // links through the directory; every changed link set is republished.
+    if let Some(rid) = &router_id {
+        state.kv.set_node(
+            rid,
+            &req.agent,
+            state.workers.links_of(&req.agent),
+            crate::clock::now_secs(),
+        );
+    }
+    sync_directory(state);
     let (generation, old) = state.workers.attach(&req.agent, session.clone(), own);
     if let Some(old) = old {
         info!(agent = req.agent, "new session supersedes the previous one");
@@ -189,6 +205,33 @@ fn register(
         },
         Some((req.agent, generation)),
     )
+}
+
+/// Name every agent's peers through the directory, then republish the
+/// entry of every agent whose link set no longer matches it (renamed by the
+/// directory or by the name folding in `register`), so the other members
+/// see the same link set.
+pub fn sync_directory(state: &AppState) {
+    let renamed = state.workers.resolve_peers(|rid| state.kv.node_name(rid));
+    for (agent, _, links) in &renamed {
+        debug!(
+            agent,
+            links = links.len(),
+            "links renamed through the node directory"
+        );
+    }
+    for (agent, rid, links) in state.workers.entries() {
+        let Some(rid) = rid else { continue };
+        if state
+            .kv
+            .node(&rid)
+            .is_none_or(|e| e.name != agent || e.links != links)
+        {
+            state
+                .kv
+                .set_node(&rid, &agent, links, crate::clock::now_secs());
+        }
+    }
 }
 
 /// Dispatch a command to an agent on its session: claims the (link, kind)
@@ -387,6 +430,7 @@ pub async fn request_trace(
 pub mod testing {
     use super::*;
     use mielofon_transport::{read_frame, write_frame, BiStream, BoxFuture};
+    use std::collections::HashMap;
     use std::net::SocketAddr;
     use std::sync::Mutex;
     use tokio::io::AsyncWriteExt;
@@ -488,9 +532,13 @@ pub mod testing {
         handler: impl Fn(&WorkCmd) -> Answer + Send + Sync + 'static,
     ) -> Arc<FakeAgent> {
         let fake = FakeAgent::new(handler);
-        state
-            .workers
-            .register(agent, links, loopback.map(str::to_string));
+        state.workers.register(
+            agent,
+            links,
+            None,
+            HashMap::new(),
+            loopback.map(str::to_string),
+        );
         let (_, old) = state.workers.attach(agent, fake.clone(), None);
         assert!(old.is_none());
         fake
@@ -507,20 +555,79 @@ pub mod testing {
 
 #[cfg(test)]
 mod tests {
-    use super::testing::{connect, settle, Answer};
+    use super::testing::{connect, settle, Answer, FakeAgent};
     use super::*;
     use crate::config::Config;
     use crate::model::{LinkKey, ProbeState, QualityRecord};
     use crate::worker::Kind;
+    use std::collections::HashMap;
 
     fn link() -> LinkKey {
         LinkKey::new("spoke-1", "hub-a", "awg_hub_a")
     }
 
     #[tokio::test]
+    async fn registering_with_a_router_id_names_the_links_pointing_at_it() {
+        let state = AppState::new(Config::default());
+        let hub = FakeAgent::silent();
+        let hub_session: Arc<dyn Session> = hub.clone();
+        let (resp, _) = register(
+            &state,
+            &hub_session,
+            None,
+            mielofon_proto::RegisterReq {
+                agent: "hub-a".into(),
+                router_id: Some("192.0.2.1".into()),
+                links: vec![LinkKey::new("hub-a", "node.0.example", "awg_sp_n0")],
+                peer_rids: [("awg_sp_n0".to_string(), "192.0.2.9".to_string())].into(),
+                loopback: None,
+            },
+        );
+        assert!(resp.ok);
+        assert_eq!(
+            state.workers.links_of("hub-a")[0].to,
+            "node.0.example",
+            "unknown yet"
+        );
+
+        let spoke = FakeAgent::silent();
+        let spoke_session: Arc<dyn Session> = spoke.clone();
+        let (resp, _) = register(
+            &state,
+            &spoke_session,
+            None,
+            mielofon_proto::RegisterReq {
+                agent: "node-0.example".into(),
+                router_id: Some("192.0.2.9".into()),
+                links: vec![LinkKey::new("node-0.example", "hub-a", "awg_hub_a")],
+                peer_rids: [("awg_hub_a".to_string(), "192.0.2.1".to_string())].into(),
+                loopback: None,
+            },
+        );
+        assert!(resp.ok);
+        assert_eq!(
+            state.workers.links_of("hub-a")[0].to,
+            "node-0.example",
+            "renamed"
+        );
+        assert_eq!(
+            state.kv.node_name("192.0.2.9").as_deref(),
+            Some("node-0.example")
+        );
+        assert_eq!(state.kv.node_name("192.0.2.1").as_deref(), Some("hub-a"));
+        assert_eq!(
+            state.kv.node("192.0.2.1").unwrap().links[0].to,
+            "node-0.example",
+            "hub's entry republished with the renamed link"
+        );
+    }
+
+    #[tokio::test]
     async fn failed_apply_is_not_treated_as_applied() {
         let state = AppState::new(Config::default());
-        state.workers.register("spoke-1", vec![link()], None);
+        state
+            .workers
+            .register("spoke-1", vec![link()], None, HashMap::new(), None);
         state.workers.set_applied_sent("spoke-1", &link(), 50);
         handle_reply(
             &state,
@@ -569,6 +676,8 @@ mod tests {
             &session,
             identity,
             mielofon_proto::RegisterReq {
+                router_id: None,
+                peer_rids: Default::default(),
                 agent: "spoke-1".into(),
                 links: vec![link()],
                 loopback: None,
@@ -590,6 +699,8 @@ mod tests {
             &session,
             Some(&(name, generation)),
             mielofon_proto::RegisterReq {
+                router_id: None,
+                peer_rids: Default::default(),
                 agent: "spoke-1".into(),
                 links: vec![link()],
                 loopback: None,
@@ -653,6 +764,8 @@ mod tests {
         let resp: RegisterResp = request(
             &client,
             &AgentRequest::Register(RegisterReq {
+                router_id: None,
+                peer_rids: Default::default(),
                 agent: "spoke-1".into(),
                 links: vec![link()],
                 loopback: Some("fd00:0:0:1::1".into()),
@@ -707,6 +820,8 @@ mod tests {
         let resp: RegisterResp = request(
             &second,
             &AgentRequest::Register(RegisterReq {
+                router_id: None,
+                peer_rids: Default::default(),
                 agent: "spoke-1".into(),
                 links: vec![link()],
                 loopback: None,
