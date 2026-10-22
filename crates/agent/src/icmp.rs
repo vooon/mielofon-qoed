@@ -1,10 +1,14 @@
 //! Continuous ICMPv6 echo probing, one task per managed link.
 //!
-//! Each link gets a raw ICMPv6 socket bound to its tunnel source and connected
-//! to the far side of the /127, so the kernel only hands it that peer's
-//! packets. One echo per `ping_interval`; a reply that has not arrived by the
-//! next tick is a loss. RTT comes from the kernel receive timestamp
-//! (`SO_TIMESTAMPNS`), falling back to the monotonic clock.
+//! Each link gets a raw ICMPv6 socket pinned to its tunnel interface
+//! (`SO_BINDTODEVICE`) and connected to the OSPF neighbour's link-local
+//! address with the interface scope, so neither the echo nor the reply can
+//! take the path OSPF prefers to the peer's global address — the probe
+//! measures this tunnel and nothing else. Without a neighbour row (adjacency
+//! down, older rpcd-mod-bird) it falls back to the global /127 pair, still
+//! pinned to the interface. One echo per `ping_interval`; a reply that has
+//! not arrived by the next tick is a loss. RTT comes from the kernel receive
+//! timestamp (`SO_TIMESTAMPNS`), falling back to the monotonic clock.
 //!
 //! While a throughput test runs (and a short grace after it) pings are paused:
 //! the test loads the node's uplink, and its self-inflicted queueing must be
@@ -93,22 +97,35 @@ impl Prober {
         }
     }
 
-    /// Start probing new links, stop removed ones, restart changed ones.
+    /// Start probing new links, stop removed ones, restart changed ones. A
+    /// changed link (the neighbour's address came or went) keeps its window,
+    /// so an adjacency flap does not wipe the loss it caused.
     pub fn reconcile(&self, links: &[Link]) {
         let mut map = self.links.lock().expect("prober lock");
-        map.retain(|iface, e| {
-            let keep = links.iter().any(|l| l == &e.link);
-            if !keep {
-                info!("probe {iface}: stopped");
-                e.task.abort();
-            }
-            keep
-        });
+        let mut windows: HashMap<String, Arc<Mutex<Window>>> = HashMap::new();
+        map.retain(
+            |iface, e| match links.iter().find(|l| &l.interface == iface) {
+                Some(l) if l == &e.link => true,
+                Some(_) => {
+                    info!("probe {iface}: restarting (link changed)");
+                    e.task.abort();
+                    windows.insert(iface.clone(), e.window.clone());
+                    false
+                }
+                None => {
+                    info!("probe {iface}: stopped");
+                    e.task.abort();
+                    false
+                }
+            },
+        );
         for l in links {
             if map.contains_key(&l.interface) {
                 continue;
             }
-            let window = Arc::new(Mutex::new(Window::new(self.window_size)));
+            let window = windows
+                .remove(&l.interface)
+                .unwrap_or_else(|| Arc::new(Mutex::new(Window::new(self.window_size))));
             let id = self.next_id.fetch_add(1, Ordering::Relaxed);
             let task = tokio::spawn(ping_loop(
                 l.clone(),
@@ -117,7 +134,13 @@ impl Prober {
                 self.interval,
                 id,
             ));
-            info!("probe {}: {} -> {}", l.interface, l.source, l.target);
+            match l.peer_ll {
+                Some(ll) => info!(
+                    "probe {}: -> {ll}%{} (link-local)",
+                    l.interface, l.interface
+                ),
+                None => info!("probe {}: {} -> {}", l.interface, l.source, l.target),
+            }
             map.insert(
                 l.interface.clone(),
                 Entry {
@@ -162,11 +185,35 @@ fn realtime_ns() -> i128 {
         .unwrap_or(0)
 }
 
+fn if_index(name: &str) -> io::Result<u32> {
+    let c = std::ffi::CString::new(name)
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "interface name"))?;
+    // SAFETY: `c` is a valid NUL-terminated string for the duration of the call.
+    match unsafe { libc::if_nametoindex(c.as_ptr()) } {
+        0 => Err(io::Error::last_os_error()),
+        idx => Ok(idx),
+    }
+}
+
 fn open_socket(link: &Link) -> io::Result<AsyncFd<Socket>> {
     let sock = Socket::new(Domain::IPV6, Type::RAW, Some(Protocol::ICMPV6))?;
     sock.set_nonblocking(true)?;
-    sock.bind(&SockAddr::from(SocketAddrV6::new(link.source, 0, 0, 0)))?;
-    sock.connect(&SockAddr::from(SocketAddrV6::new(link.target, 0, 0, 0)))?;
+    // Egress pinned to the tunnel: the probe measures this link, never the
+    // route OSPF currently prefers to the peer's address.
+    sock.bind_device(Some(link.interface.as_bytes()))?;
+    match link.peer_ll {
+        // Link-local target with the interface scope: the reply is link-local
+        // too, so it cannot come back any other way. The kernel picks our
+        // link-local on the interface as the source.
+        Some(ll) => {
+            let scope = if_index(&link.interface)?;
+            sock.connect(&SockAddr::from(SocketAddrV6::new(ll, 0, 0, scope)))?;
+        }
+        None => {
+            sock.bind(&SockAddr::from(SocketAddrV6::new(link.source, 0, 0, 0)))?;
+            sock.connect(&SockAddr::from(SocketAddrV6::new(link.target, 0, 0, 0)))?;
+        }
+    }
 
     let fd = sock.as_raw_fd();
     let on: libc::c_int = 1;
@@ -381,14 +428,28 @@ mod tests {
             to: "self".into(),
             source: Ipv6Addr::LOCALHOST,
             target: Ipv6Addr::LOCALHOST,
+            peer_ll: None,
         };
         let p = Prober::new(Duration::from_millis(100), 60, Arc::new(Gate::default()));
-        p.reconcile(&[link]);
+        p.reconcile(std::slice::from_ref(&link));
         tokio::time::sleep(Duration::from_millis(1100)).await;
         let s = p.stats("lo").unwrap();
         assert!(s.received >= 5, "{s:?}");
         assert!(s.snapshot.rtt_ms.unwrap() < 5.0);
         assert_eq!(s.snapshot.loss_pct, Some(0.0));
+
+        // The scoped-target path (neighbour address known): the socket is
+        // connected with the interface index and the kernel picks the source.
+        // A changed link restarts the task on the same window.
+        let scoped = Link {
+            peer_ll: Some(Ipv6Addr::LOCALHOST),
+            ..link
+        };
+        p.reconcile(&[scoped]);
+        tokio::time::sleep(Duration::from_millis(1100)).await;
+        let s2 = p.stats("lo").unwrap();
+        assert!(s2.received > s.received + 5, "{s2:?} after {s:?}");
+        assert_eq!(s2.snapshot.loss_pct, Some(0.0));
     }
 
     /// Needs CAP_NET_RAW (see `pings_loopback`): the reply carries a kernel
@@ -401,6 +462,7 @@ mod tests {
             to: "self".into(),
             source: Ipv6Addr::LOCALHOST,
             target: Ipv6Addr::LOCALHOST,
+            peer_ll: None,
         };
         let sock = open_socket(&link).unwrap();
         let mut pkt = [0u8; 16];

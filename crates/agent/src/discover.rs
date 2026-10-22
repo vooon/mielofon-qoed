@@ -7,7 +7,11 @@
 //!   interfaces, and BGP peer protocols `peer_<hostname>` that name the node
 //!   at the other end;
 //! - `network.interface.<iface> status` (netifd): the interface's own global
-//!   IPv6 is the probe source, the far side of its /127 the probe target.
+//!   IPv6 is the probe source, the far side of its /127 the probe target;
+//! - `ospf[].neighbors[]` of the same snapshot: the adjacency's link-local
+//!   address (`ip`), the preferred probe target. Pinged with the interface
+//!   scope it cannot leave the tunnel in either direction, whereas the global
+//!   /127 address is reached by whatever path OSPF currently prefers.
 
 use crate::bus::Bus;
 use crate::config::Config;
@@ -24,8 +28,11 @@ pub struct Link {
     pub to: String,
     /// Our address on the tunnel (probe source).
     pub source: Ipv6Addr,
-    /// The peer's address on the tunnel (probe target).
+    /// The peer's address on the tunnel (probe target when `peer_ll` is unset).
     pub target: Ipv6Addr,
+    /// The OSPF neighbour's link-local address on this interface while the
+    /// adjacency is up: the probe target that stays on the tunnel.
+    pub peer_ll: Option<Ipv6Addr>,
 }
 
 /// The peer's full hostname from its BGP protocol name: `peer_<hostname>`
@@ -97,9 +104,34 @@ fn ipv6_addresses(iface_status: &Value) -> impl Iterator<Item = (Ipv6Addr, Optio
         })
 }
 
+fn is_link_local(a: &Ipv6Addr) -> bool {
+    a.segments()[0] & 0xffc0 == 0xfe80
+}
+
 fn is_global(a: &Ipv6Addr) -> bool {
-    // Not link-local (fe80::/10).
-    a.segments()[0] & 0xffc0 != 0xfe80
+    !is_link_local(a)
+}
+
+/// Link-local address of the OSPF neighbour per interface, from the mesh
+/// protocol's `neighbors[]` rows (BIRD prints the OSPFv3 neighbour's
+/// link-local as its IP). Older rpcd-mod-bird snapshots have no rows.
+pub fn neighbor_addrs(status: &Value, cfg: &Config) -> HashMap<String, Ipv6Addr> {
+    let Some(ospf) = status["ospf"].as_array().and_then(|a| {
+        a.iter()
+            .find(|o| o["protocol"] == cfg.ospf_protocol.as_str())
+    }) else {
+        return HashMap::new();
+    };
+    ospf["neighbors"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|n| {
+            let iface = n["interface"].as_str()?;
+            let ip = n["ip"].as_str()?.parse::<Ipv6Addr>().ok()?;
+            is_link_local(&ip).then(|| (iface.to_string(), ip))
+        })
+        .collect()
 }
 
 /// `(source, target)` for a tunnel: our global /127 address (else any global
@@ -130,6 +162,7 @@ pub async fn discover(bus: &impl Bus, cfg: &Config) -> Vec<Link> {
         }
     };
 
+    let neighbors = neighbor_addrs(&status, cfg);
     let mut links = Vec::new();
     for (interface, to) in select_links(&status, cfg) {
         let object = format!("network.interface.{interface}");
@@ -142,6 +175,7 @@ pub async fn discover(bus: &impl Bus, cfg: &Config) -> Vec<Link> {
         };
         match addr {
             Some((source, target)) => links.push(Link {
+                peer_ll: neighbors.get(&interface).copied(),
                 interface,
                 to,
                 source,
@@ -203,6 +237,25 @@ mod tests {
                 { "name": "peer_hub3_example_com" }
             ]
         })
+    }
+
+    #[test]
+    fn neighbor_link_locals_per_interface() {
+        let mut st = status();
+        st["ospf"][0]["neighbors"] = json!([
+            { "rid": "192.0.2.1", "priority": 1, "state": "Full", "position": "PtP",
+              "interface": "awg_hub1", "ip": "fe80::1" },
+            // A global address here is not an on-link target.
+            { "rid": "192.0.2.2", "priority": 1, "state": "Full", "position": "PtP",
+              "interface": "awg_hub2", "ip": "fd00:0:0:1::2" }
+        ]);
+        let n = neighbor_addrs(&st, &cfg());
+        assert_eq!(n.get("awg_hub1"), Some(&ip("fe80::1")));
+        assert!(!n.contains_key("awg_hub2"));
+        assert!(
+            neighbor_addrs(&status(), &cfg()).is_empty(),
+            "no rows: empty"
+        );
     }
 
     #[test]
@@ -275,7 +328,12 @@ mod tests {
     #[tokio::test]
     async fn discover_end_to_end() {
         let bus = FakeBus::default();
-        bus.on("bird.status", Ok(status()));
+        let mut st = status();
+        st["ospf"][0]["neighbors"] = json!([
+            { "rid": "192.0.2.1", "priority": 1, "state": "Full", "position": "PtP",
+              "interface": "awg_hub1", "ip": "fe80::1" }
+        ]);
+        bus.on("bird.status", Ok(st));
         bus.on(
             "network.interface.awg_hub1.status",
             Ok(json!({ "ipv6-address": [{ "address": "fd00:0:0:1::40:1", "mask": 127 }]})),
@@ -289,6 +347,7 @@ mod tests {
         assert_eq!(links.len(), 1);
         assert_eq!(links[0].to, "hub1.example.com");
         assert_eq!(links[0].target, ip("fd00:0:0:1::40:0"));
+        assert_eq!(links[0].peer_ll, Some(ip("fe80::1")));
 
         let dead = FakeBus::default();
         assert!(discover(&dead, &cfg()).await.is_empty());

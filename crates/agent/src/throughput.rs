@@ -1,9 +1,12 @@
 //! Gated TCP throughput test: `iperf3 -J` against the peer's iperf3 server.
 //!
 //! Each side measures its own upload (client → server), which is the
-//! direction its OSPF cost governs. The test is skipped (`busy`) while the
-//! link already carries traffic above `quiet_max_mbps`, and only one test runs
-//! at a time per node; pings pause around it (see `icmp::Gate`).
+//! direction its OSPF cost governs. Like the pings, the test targets the OSPF
+//! neighbour's link-local address with the interface scope when it is known,
+//! so the stream runs over this tunnel rather than the route OSPF prefers to
+//! the peer's global address. The test is skipped (`busy`) while the link
+//! already carries traffic above `quiet_max_mbps`, and only one test runs at
+//! a time per node; pings pause around it (see `icmp::Gate`).
 
 use crate::discover::Link;
 use crate::icmp::Gate;
@@ -113,11 +116,19 @@ impl Throughput {
     async fn iperf(&self, link: &Link) -> Result<f64> {
         let secs = self.duration.as_secs().max(1);
         let mut cmd = Command::new(&self.iperf_bin);
-        cmd.args(["-J", "-6", "-c"])
-            .arg(link.target.to_string())
-            .args(["-B"])
-            .arg(link.source.to_string())
-            .args(["-p", &self.port.to_string(), "-t", &secs.to_string()])
+        cmd.args(["-J", "-6", "-c"]);
+        match link.peer_ll {
+            // Scoped link-local: the kernel sources it from this interface.
+            Some(ll) => {
+                cmd.arg(format!("{ll}%{}", link.interface));
+            }
+            None => {
+                cmd.arg(link.target.to_string())
+                    .arg("-B")
+                    .arg(link.source.to_string());
+            }
+        }
+        cmd.args(["-p", &self.port.to_string(), "-t", &secs.to_string()])
             .kill_on_drop(true);
 
         let out = tokio::time::timeout(self.duration + Duration::from_secs(20), cmd.output())
@@ -228,6 +239,7 @@ mod tests {
             to: "self".into(),
             source: "::1".parse().unwrap(),
             target: "::1".parse().unwrap(),
+            peer_ll: None,
         };
         let (l1, t1) = (link.clone(), t.clone());
         let first = tokio::spawn(async move { t1.run(&l1).await });

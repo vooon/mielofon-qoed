@@ -97,9 +97,14 @@ rpcd.
 | `target` | far side of the `/127` | flip last address bit of `source` |
 | `cost` | `bird set_ospf_cost {interface, cost}` | no raw BIRD command in UCI; falls back to `cost_command` only on older rpcd |
 
-Matching note: OSPF neighbor rows give `fe80::` link-locals, not the mesh
-global probe target — so `target` is derived from the interface's own `/127`,
-never from the OSPF neighbor `ip` field.
+Probe target note: the OSPF neighbor row for the interface gives the peer's
+`fe80::` link-local (`ospf[].neighbors[].ip`). That is the **preferred** probe
+target (`peer_ll`): pinged with the interface scope, request and reply stay on
+the tunnel, whereas the global `/127` address is reached by whatever path OSPF
+prefers at that moment (on a link costed 100 that is a detour via another hub,
+measured as that hub's RTT plus the detour's loss). The `/127` `target` is the
+fallback while the adjacency is down or the rpcd snapshot has no neighbor rows;
+the socket is pinned to the interface either way.
 
 ## Config shape (after)
 

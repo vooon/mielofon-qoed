@@ -118,9 +118,12 @@ mTLS identity (`/etc/mielofon/agent.{key,cer}` + `ca.pem`) and a single
   `network.interface.<iface> status` over ubus, re-run every 30 s; a changed
   link set triggers a re-register.
 - **Measurement** is in-process. Each managed link has a ping task on a raw
-  ICMPv6 socket bound to the tunnel /127; rtt (mean), jitter (stddev) and loss
-  come from a rolling window, with RTT taken from the kernel receive timestamp
-  (`SO_TIMESTAMPNS`). The gated throughput test runs `iperf3 -J` (the node's
+  ICMPv6 socket pinned to the tunnel interface and aimed at the OSPF
+  neighbour's link-local address (scope = interface), so the probe cannot
+  follow the route OSPF prefers to the peer's global address; the tunnel /127
+  is the fallback while the adjacency is down. rtt (mean), jitter (stddev) and
+  loss come from a rolling window, with RTT taken from the kernel receive
+  timestamp (`SO_TIMESTAMPNS`). The gated throughput test runs `iperf3 -J` (the node's
   upload to the peer's `iperf3-server`) as a child process, one at a time,
   skipped while the link carries more than `quiet_max_mbps`; pings pause
   during the test and a short grace after it, so its self-inflicted queueing
