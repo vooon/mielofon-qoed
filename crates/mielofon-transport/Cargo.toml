@@ -1,0 +1,27 @@
+[package]
+name = "mielofon-transport"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Control-plane transport for mielofon: mTLS QUIC sessions with bidirectional request streams"
+
+[dependencies]
+anyhow = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true, features = ["io-util", "net", "time", "sync", "rt"] }
+tracing = { workspace = true }
+quinn = { version = "0.11", default-features = false, features = ["runtime-tokio", "rustls-ring"] }
+rustls = { workspace = true, features = ["ring"] }
+
+rcgen = { version = "0.14", optional = true }
+
+[features]
+# In-memory CA + leaves for carrier tests (`testpki` module).
+testpki = ["dep:rcgen"]
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["full"] }
+rcgen = "0.14"

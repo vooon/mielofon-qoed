@@ -234,7 +234,7 @@ mod tests {
     fn cfg() -> Config {
         let v = json!({
             "main": {
-                "controller_url": "https://203.0.113.1:9552",
+                "endpoint": "203.0.113.1:9552",
                 "cacert": "ca", "cert": "c", "key": "k"
             },
             "x": { ".type": "exclude", "interface": "awg_legacy" }

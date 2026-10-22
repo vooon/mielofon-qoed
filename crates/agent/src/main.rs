@@ -1,49 +1,44 @@
 //! mielofon-agent — node agent of the mielofon mesh.
 //!
-//! Registers the node's auto-discovered links with the controller, long-polls
-//! `POST /v1/agent/command`, executes each command (probe harvest, gated
-//! throughput test, OSPF cost apply, trace lookup) and answers on
-//! `POST /v1/agent/reply`, echoing the command's job id. Spokes sit behind
-//! NAT, so the agent always connects out; the controller never does.
+//! Holds one mTLS QUIC session with a controller (`session.rs`): registers
+//! the node's auto-discovered links, then answers every command stream the
+//! controller opens (probe harvest, gated throughput test, OSPF cost apply,
+//! trace lookup) on that same stream. Spokes sit behind NAT, so the agent
+//! always dials out; the controller never does.
 
 mod agent;
 mod bird;
 mod bus;
-mod client;
 mod config;
 mod discover;
 mod icmp;
 mod metrics;
+mod session;
 mod throughput;
+mod tls;
 mod window;
 
 use agent::Agent;
 use anyhow::{Context, Result};
 use bus::UbusCli;
-use client::Controller;
 use config::Config;
-use mielofon_proto::{CommandReq, LinkKey, RegisterResp, WorkCmd, WorkResp};
-use std::sync::atomic::{AtomicBool, Ordering};
+use mielofon_proto::LinkKey;
+use mielofon_transport::Dialer;
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
 use tokio::signal::unix::{signal, SignalKind};
-use tracing::{debug, error, info, warn};
+use tokio::sync::Notify;
+use tracing::{error, info, warn};
 
-/// Re-discovery cadence: tunnels and BGP sessions come up seconds apart at
-/// boot, so the first register may see a partial link set.
-const REPLY_TIMEOUT: Duration = Duration::from_secs(30);
-/// Consecutive failed long-polls after which the agent registers again: the
-/// controller may have restarted (and forgotten us) without ever answering.
-const POLL_FAILURES_BEFORE_REREGISTER: u32 = 3;
-
-/// Map the UCI syslog-style level onto a tracing filter.
-fn log_filter(level: &str) -> &'static str {
+/// Map the UCI syslog-style level onto a tracing filter. `debug` applies to
+/// the agent's own code; dependencies stay at `info` so the log is not
+/// flooded with connection-pool chatter.
+fn log_filter(level: &str) -> String {
     match level {
-        "debug" => "debug",
-        "info" | "notice" => "info",
-        "warning" | "warn" => "warn",
-        "err" | "error" | "crit" => "error",
-        _ => "info",
+        "debug" => "info,mielofon_agent=debug,mielofon_transport=debug".into(),
+        "info" | "notice" => "info".into(),
+        "warning" | "warn" => "warn".into(),
+        "err" | "error" | "crit" => "error".into(),
+        _ => "info".into(),
     }
 }
 
@@ -60,100 +55,17 @@ fn init_logging(level: &str) {
         .init();
 }
 
-struct Runtime {
-    agent: Agent<UbusCli>,
-    ctl: Controller,
-    need_register: AtomicBool,
-    registered: Mutex<Vec<LinkKey>>,
+pub struct Runtime {
+    pub agent: Agent<UbusCli>,
+    pub dialer: Dialer,
+    /// Signalled by the refresher when the link set changed: the session
+    /// re-registers.
+    pub links_changed: Notify,
+    /// The link set the controller last acknowledged.
+    pub registered: Mutex<Vec<LinkKey>>,
 }
 
 impl Runtime {
-    fn dispatch(self: &Arc<Self>, cmds: Vec<WorkCmd>) {
-        for cmd in cmds {
-            let rt = self.clone();
-            tokio::spawn(async move {
-                let Some(reply) = rt.agent.execute(cmd).await else {
-                    return;
-                };
-                if let Err(e) = rt
-                    .ctl
-                    .post::<_, serde_json::Value>("/v1/agent/reply", &reply, REPLY_TIMEOUT)
-                    .await
-                {
-                    warn!("reply: {e:#}");
-                }
-            });
-        }
-    }
-
-    async fn register(self: &Arc<Self>) -> Result<()> {
-        self.agent.refresh().await;
-        let req = self.agent.register_req();
-        info!("registering {} with {} links", req.agent, req.links.len());
-        let resp: RegisterResp = self
-            .ctl
-            .post("/v1/agent/register", &req, REPLY_TIMEOUT)
-            .await?;
-        *self.registered.lock().expect("registered lock") = req.links;
-        self.dispatch(resp.commands);
-        Ok(())
-    }
-
-    /// Register when needed, then long-poll; forever. A `404` from the
-    /// command endpoint means the controller does not know us (it restarted
-    /// or evicted us): register again before the next poll. Repeated
-    /// transport failures also trigger a re-register, in case the controller
-    /// came back without ever answering a poll.
-    async fn pump(self: Arc<Self>) {
-        let cfg = &self.agent.cfg;
-        let poll = CommandReq {
-            agent: cfg.agent.clone(),
-            timeout_ms: cfg.command_timeout.as_millis() as u64,
-        };
-        let mut failures = 0u32;
-        loop {
-            if self.need_register.swap(false, Ordering::AcqRel) {
-                if let Err(e) = self.register().await {
-                    warn!("register failed: {e:#}; retrying");
-                    self.need_register.store(true, Ordering::Release);
-                    tokio::time::sleep(Duration::from_secs(3)).await;
-                    continue;
-                }
-            }
-            match self
-                .ctl
-                .post::<_, WorkResp>(
-                    "/v1/agent/command",
-                    &poll,
-                    cfg.command_timeout + Duration::from_secs(10),
-                )
-                .await
-            {
-                Ok(r) => {
-                    failures = 0;
-                    debug!("{} command(s)", r.commands.len());
-                    self.dispatch(r.commands);
-                }
-                Err(e)
-                    if e.downcast_ref::<client::HttpError>()
-                        .is_some_and(|h| h.status == 404) =>
-                {
-                    info!("controller does not know us; registering again");
-                    self.need_register.store(true, Ordering::Release);
-                }
-                Err(e) => {
-                    failures += 1;
-                    warn!("command long-poll failed: {e:#}; retrying");
-                    if failures >= POLL_FAILURES_BEFORE_REREGISTER {
-                        failures = 0;
-                        self.need_register.store(true, Ordering::Release);
-                    }
-                    tokio::time::sleep(Duration::from_secs(2)).await;
-                }
-            }
-        }
-    }
-
     /// Periodic re-discovery; re-register when the link set changed.
     async fn refresher(self: Arc<Self>) {
         let mut tick = tokio::time::interval(self.agent.cfg.refresh_interval);
@@ -163,7 +75,7 @@ impl Runtime {
             self.agent.refresh().await;
             let now = self.agent.link_keys();
             if *self.registered.lock().expect("registered lock") != now {
-                self.need_register.store(true, Ordering::Release);
+                self.links_changed.notify_one();
             }
         }
     }
@@ -191,18 +103,22 @@ async fn run() -> Result<()> {
     let cfg = Config::load(&bus).await?;
     init_logging(&cfg.log_level);
     info!(
-        "mielofon-agent {} starting as {} (controller {})",
+        "mielofon-agent {} starting as {} (controller endpoints: {})",
         env!("CARGO_PKG_VERSION"),
         cfg.agent,
-        cfg.controller_url
+        cfg.endpoints
+            .iter()
+            .map(|e| format!("{}:{}", e.host, e.port))
+            .collect::<Vec<_>>()
+            .join(", ")
     );
 
-    let tls = client::tls_config(&cfg.cacert, &cfg.cert, &cfg.key)?;
-    let ctl = Controller::new(&cfg.controller_url, tls)?;
+    let tls = tls::client_config(&cfg.cacert, &cfg.cert, &cfg.key)?;
+    let dialer = Dialer::new(tls).context("QUIC dialer")?;
     let rt = Arc::new(Runtime {
         agent: Agent::new(cfg, bus),
-        ctl,
-        need_register: AtomicBool::new(true),
+        dialer,
+        links_changed: Notify::new(),
         registered: Mutex::new(Vec::new()),
     });
 
@@ -214,7 +130,7 @@ async fn run() -> Result<()> {
     let mut term = signal(SignalKind::terminate()).context("SIGTERM handler")?;
     let mut int = signal(SignalKind::interrupt()).context("SIGINT handler")?;
     tokio::select! {
-        _ = rt.clone().pump() => {}
+        _ = session::run(rt.clone()) => {}
         _ = term.recv() => info!("SIGTERM, exiting"),
         _ = int.recv() => info!("SIGINT, exiting"),
     }

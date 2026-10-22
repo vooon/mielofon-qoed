@@ -13,6 +13,7 @@ path = "src/main.rs"
 [dependencies]
 mielofon-otel = { workspace = true }
 mielofon-proto = { workspace = true }
+mielofon-transport = { workspace = true }
 tokio = { workspace = true }
 axum = { workspace = true }
 axum-server = { workspace = true }
@@ -39,6 +40,7 @@ workspace = true
 workspace = true
 
 [dev-dependencies]
+mielofon-transport = { workspace = true, features = ["testpki"] }
 tower = { workspace = true }
 tokio = { workspace = true, features = ["full"] }
 http-body-util = "0.1"

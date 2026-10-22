@@ -1,7 +1,7 @@
 //! Mielofon controller entrypoint. Runs three listeners:
-//!   members (9551, mTLS) — cluster gossip
-//!   clients (9552, mTLS) — agents (commands, replies, measurements)
-//!   admin  (9553, loopback) — dashboard, /metrics, /healthz, /readyz, reads
+//!   cluster (9551/tcp, mTLS HTTP) — gossip between members
+//!   client  (9552/udp, mTLS QUIC) — agent sessions (commands and replies)
+//!   admin   (9553/tcp, loopback)  — dashboard, /metrics, /healthz, /readyz, reads
 
 use anyhow::Context;
 use axum_server::tls_rustls::RustlsConfig;
@@ -34,6 +34,9 @@ enum Command {
     /// mTLS certificate generation (openssl-based; runs on the operator host).
     #[command(subcommand)]
     Cert(mielofon_controller::cert::CertCli),
+    /// Tooling that speaks the agent protocol (e2e harness, diagnostics).
+    #[command(subcommand)]
+    Tool(mielofon_controller::tool::ToolCli),
 }
 
 #[derive(clap::Args)]
@@ -49,6 +52,7 @@ async fn main() -> anyhow::Result<()> {
     match cli.command {
         Command::Daemon(args) => run_daemon(&args.config).await,
         Command::Cert(args) => mielofon_controller::cert::run(args),
+        Command::Tool(args) => mielofon_controller::tool::run(args).await,
     }
 }
 
@@ -81,7 +85,9 @@ async fn run_daemon(path: &str) -> anyhow::Result<()> {
     let admin_bind = state.cfg.listeners.admin();
     let admin_listener = bind(admin_bind, "admin")?;
     let cluster_listener = bind(state.cfg.listeners.cluster(), "cluster")?;
-    let client_listener = bind(state.cfg.listeners.client(), "client")?;
+    let client_bind = state.cfg.listeners.client();
+    let client_listener = mielofon_transport::Listener::bind(server_tls.clone(), client_bind)
+        .context("client listener")?;
 
     // Background: gossip anti-entropy pushes + KV expiry pruning.
     tokio::spawn(mielofon_controller::gossip::gossip_loop(
@@ -132,18 +138,16 @@ async fn run_daemon(path: &str) -> anyhow::Result<()> {
         cluster_listener,
         "cluster",
     ));
-    let client_handle = tokio::spawn(serve_mtls(
+    let client_handle = tokio::spawn(mielofon_controller::session::serve(
         state.clone(),
-        api::client_router(),
-        server_tls,
         client_listener,
-        "client",
     ));
 
     state.set_ready(true);
     info!(
         node = %state.cfg.node.name,
         admin = %admin_bind,
+        client = %format!("{client_bind}/udp"),
         "mielofon-controller up and ready"
     );
 

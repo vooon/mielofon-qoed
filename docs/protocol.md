@@ -1,9 +1,10 @@
 # Protocol
 
-Wiring between the controller, agents, and cluster members. All bodies are
-JSON. Endpoints on the **members** (`9551`) and **clients** (`9552`) listeners
-are mTLS; the read endpoints on the **admin** listener (`9553`) are loopback
-HTTP.
+Wiring between the controller, agents, and cluster members. Agents hold an
+mTLS **QUIC session** on the controller's **client** listener (`9552/udp`);
+every message on it is a JSON frame on a stream. Members gossip over mTLS
+HTTP on the **cluster** listener (`9551/tcp`); the read endpoints on the
+**admin** listener (`9553/tcp`) are loopback HTTP.
 
 ## Division of responsibilities
 
@@ -16,12 +17,14 @@ continuous per-link ping window (or runs the gated throughput test), reports
 raw measurements, and applies the OSPF cost it is told to apply. It holds **no** scheduling, policy, or
 classification logic and never acquires the fence itself.
 
-Because spokes sit behind NAT, the controller→agent channel is **agent-pull via
-a long-poll**: the agent registers, then holds an mTLS long-poll on the command
-endpoint; the controller returns queued commands (or an empty batch on
-timeout), and the agent immediately re-polls. Every command carries a **job
-identifier**, and every reply to it echoes that `id`. The controller never
-connects out to an agent.
+Spokes sit behind NAT, so the **agent dials** the controller and keeps one
+session; the controller never connects out. Once the session is up either
+side opens streams on it: the agent for its `register` hello, the controller
+for every command. **A request is a stream**: the opener writes one frame and
+closes its send side, the other end answers with one frame and closes. There
+is no job queue and no polling; correlation, cancellation and deadlines are
+the stream's. Every command still carries a job `id`, echoed in its reply,
+for logs and traces.
 
 ```mermaid
 flowchart LR
@@ -31,10 +34,35 @@ flowchart LR
         qual --> pol[Policy / OSPF cost]
     end
 
-    sched -->|POST /v1/agent/command · long-poll| A
-    pol -->|apply_cost| A
-    A[Agent] -->|POST /v1/agent/reply · echoes job id| qual
+    A[Agent] -->|dials · mTLS QUIC session| c
+    A -->|stream: register| sched
+    sched -->|stream per command · reply on the same stream| A
+    pol -->|stream: apply_cost| A
 ```
+
+## Transport
+
+- **Carrier**: QUIC (`quinn` over `rustls`, ring), ALPN `mielofon/1`. TLS 1.3
+  mutual authentication against the mesh CA: the controller demands a client
+  certificate, the agent verifies the server name it dialled (a DNS name or
+  the literal address, so hub certificates carry both as SANs). Keepalive
+  every 15 s holds NAT bindings; a peer silent for 60 s is gone.
+- **Frames**: a big-endian `u32` length, then JSON of a `mielofon-proto` type.
+- **Endpoints**: the agent's `list endpoint` entries (`host:port`, names or
+  literal addresses, port default 9552). Every entry is resolved to all its
+  addresses, duplicates dropped, and the agent dials them in order with a
+  3 s budget each, starting from the address its last session used. One
+  DNS name answering with every hub and a list of literal addresses are the
+  same thing to it. Control rides the **underlay**: endpoints are never mesh
+  addresses, so a cost change or a dead tunnel cannot take the control
+  channel with it.
+- **Session = registration**: the session closing, for any reason, evicts
+  the agent at once; reconnecting registers it again. A second session for
+  the same agent name supersedes the first, which is closed.
+- **Carrier abstraction**: the code above the carrier sees only "open a
+  stream, accept a stream" (`mielofon-transport::Session`), so a TCP carrier
+  (TLS 1.3 on 443 with a stream multiplexer) can be added for networks that
+  drop UDP without touching the protocol.
 
 ## Quality record
 
@@ -62,20 +90,28 @@ A directed link `{from, to, interface}` maps to a measurement record:
 
 ## Agent lifecycle
 
-### Register
+### Register (the hello)
+
+The first stream an agent opens carries `register`; the controller closes a
+session that sends nothing within 10 s. The same request is repeated on the
+live session whenever the agent's link set changes.
 
 ```jsonc
-POST /v1/agent/register           // clients
-{ "agent": "spoke-1",
+// agent → controller, one stream
+{ "type": "register", "agent": "spoke-1",
   "links": [ {"from":"spoke-1","to":"hub-a","interface":"awg_hub_a"} ],
   "loopback": "fd00:0:0:1::1" }   // mesh loopback (dummy_awg), for /v1/trace
-// -> { "ok": true, "commands": [ {apply_cost …} ] }   // current policy snapshot
+// ← { "ok": true }                // or { "ok": false, "error": "…" }
 ```
 
 `loopback` is the agent's global IPv6 on `dummy_awg` (the mesh loopback). The
 controller stores it per node and uses it to resolve a destination *node name*
-into the prefix the trace walker asks each hop's BIRD to resolve. Older agents
-omit the field; the trace sets just render the hop unresolvable.
+into the prefix the trace walker asks each hop's BIRD to resolve.
+
+Every `register` replaces the agent's link set and forgets which costs were
+sent: the controller then opens an `apply_cost` stream for every link with a
+known cost (the policy snapshot), since a re-registering agent may have
+rebooted and lost its applied costs.
 
 ### Trace
 
@@ -88,7 +124,6 @@ The controller asks a hop agent to resolve `target` against BIRD:
 route resolution through untouched — the controller owns ECMP parsing.
 
 ```jsonc
-POST /v1/agent/reply              // clients
 { "id": "trace2f4e…", "kind": "trace",
   "prefix": "fd00:0:0:1::3",
   "code": 0,                      // 0 ok, 1 unresolved, 2 bad args
@@ -109,22 +144,10 @@ POST /v1/agent/reply              // clients
 - `code: 1` / empty `routes` (older rpcd, no `route` method) — unresolvable
   hop: marked broken, the walk keeps going on the other ECMP branches.
 
-### Pull commands (long-poll)
+### Commands
 
-```jsonc
-POST /v1/agent/command            // clients
-{ "agent": "spoke-1", "timeout_ms": 30000 }
-// -> { "commands": [ … ] }        // drained; { "commands": [] } on timeout;
-//                                   the agent re-polls immediately
-// -> 404 { "error": "agent not registered" }   // register first
-```
-
-A `404` means this controller does not know the agent — it restarted, or
-evicted the agent after 300 s without a poll. The agent registers again
-before its next poll (it also re-registers after three consecutive failed
-polls, in case the controller came back without answering one).
-
-Command shapes — each carries a job `id`:
+The controller opens one stream per command on the agent's session and reads
+the reply on it. Each command carries a job `id`:
 
 ```jsonc
 { "id": "always/spoke-1/…", "type": "probe", "tier": "always",
@@ -141,19 +164,22 @@ Command shapes — each carries a job `id`:
 The controller's scheduler issues `probe/always` per link on an interval, and
 `probe/throughput` only when neither endpoint of the link is in another test
 — it acquires the node-level fence lease before issuing the command, so tests
-on disjoint node pairs run concurrently. `apply_cost` is issued when the derived cost
-for a link differs from the last cost the controller told the agent to apply.
-While no agent is long-polling, probe work is not queued (bounded). Every
-`register` replaces the agent's link set, drops queued work, forgets which
-costs were sent and re-seeds the policy snapshot — a re-registering agent may
-have rebooted and lost its applied costs.
+on disjoint node pairs run concurrently. `apply_cost` is issued when the
+derived cost for a link differs from the last cost the controller told the
+agent to apply. At most one command per (link, kind) is outstanding: while
+one is in flight the scheduler leaves that link alone, so a slow agent never
+accumulates a backlog. Each command has a deadline (30 s for an always probe,
+120 s for a throughput test, 60 s for a cost apply, 30 s for a trace hop);
+a command that produced no reply by then — the stream failed, the session
+dropped, or the agent closed the stream without answering — is treated as
+failed: a throughput lease is released at once, a cost apply is retried
+after 30 s.
 
 ### Reply
 
-Every reply echoes the command's job `id`:
+Written on the command's own stream; every reply echoes the job `id`:
 
 ```jsonc
-POST /v1/agent/reply              // clients
 { "id": "always/spoke-1/…", "kind": "probe",
   "link": { … },
   "rtt_ms":15.0, "loss_pct":0.0, "jitter_ms":2.5,
@@ -188,9 +214,10 @@ POST /v1/agent/reply              // clients
   link: the agent re-applies it on its own whenever its periodic BIRD
   snapshot shows the interface at a different cost (a config redeploy reset
   it), so the controller's "already sent" memory stays true.
-- `POST /v1/quality` (same body as a probe reply minus `kind`/`id`) ingests a
-  bare measurement for tooling; the fence/work/ack endpoints of the ucode
-  agent are gone.
+- `POST /v1/quality` on the **admin** listener (same body as a probe reply
+  minus `kind`/`id`) ingests a bare measurement for tooling and the e2e
+  harness; `mielofon-controller tool hello` registers a synthetic agent over
+  a real session for the same purpose.
 
 ## Fence (soft lease)
 
@@ -204,6 +231,7 @@ as `conflict`.
 
 ```text
 GET /v1/quality?from=..&to=..&interface=..   latest record for a link
+POST /v1/quality                             ingest a bare measurement (tooling)
 GET /v1/quality/all                          full replicated view
 GET /v1/policy?from=..&to=..&interface=..    quality + ospf_cost decision
 GET /v1/trace?from=..&to=..                  ECMP-aware end-to-end path DAG

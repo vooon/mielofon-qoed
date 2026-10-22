@@ -20,6 +20,7 @@ spec:
     - name: clients
       port: 9552
       targetPort: 9552
+      protocol: UDP
 
 ---
 apiVersion: apps/v1
@@ -92,6 +93,7 @@ spec:
               containerPort: 9551
             - name: clients
               containerPort: 9552
+              protocol: UDP
           volumeMounts:
             - name: mielofon-ca
               mountPath: /etc/mielofon-ca
