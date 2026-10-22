@@ -139,7 +139,7 @@ const fmtUpdated = () => {
 </template>
 
 <style scoped>
-.app { display: flex; flex-direction: column; height: 100%; }
+.app { display: flex; flex-direction: column; min-height: 100%; }
 .topbar {
 	display: flex; gap: 20px; align-items: baseline; padding: 14px 20px;
 	background: var(--card); border-bottom: 1px solid var(--line);
@@ -164,7 +164,7 @@ const fmtUpdated = () => {
 .alert { margin: 10px 20px; padding: 10px 14px; background: #fff0f0; color: var(--bad); border: 1px solid #ffc2c2; border-radius: 8px; }
 .layout {
 	display: grid; grid-template-columns: 1fr 360px; gap: 16px;
-	padding: 0 20px 16px; min-height: 0; flex: 1;
+	padding: 0 20px 16px; align-items: start;
 }
-.side { display: flex; flex-direction: column; gap: 12px; min-width: 0; overflow: auto; }
+.side { display: flex; flex-direction: column; gap: 12px; min-width: 0; max-height: 62vh; overflow: auto; }
 </style>
