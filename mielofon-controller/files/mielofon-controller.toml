@@ -78,7 +78,8 @@ ospf_cost = 100
 # throughput dim is used fresh within `tcp_fresh_secs` and carried (last-known)
 # within `tcp_carry_secs`, so a busy/skipped throughput probe does not blank
 # mbps from classification. `busy_hold_secs` keeps a busy link's last cost
-# instead of reclassifying it as degraded. `hysteresis_passes` requires a new
+# instead of reclassifying it as degraded; a window with no rtt/loss/jitter at
+# all keeps the last cost too. `hysteresis_passes` requires a new
 # class to be observed that many consecutive passes before it is applied, so a
 # single noisy sample cannot flip the cost.
 # `pair_cost` combines the two directions of one tunnel (A->B and B->A, matched

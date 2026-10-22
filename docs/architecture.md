@@ -78,6 +78,13 @@ link is busy — no longer blanks that dimension from classification: the last
 measured value is carried within its freshness window. Measurement and policy
 are thus independent; the store is the single source of truth.
 
+A window that says nothing is not classified: while a link is busy (for up to
+`busy_hold_secs`) or has no current ping data at all (no rtt/loss/jitter
+within `always_fresh_secs` — the agent stopped answering, or its ping window
+was still empty), the classifier keeps the last derived quality and cost
+rather than letting an unconstrained classification fall through to `good`.
+A link that was never classified stays on the map with quality unset.
+
 ```mermaid
 flowchart LR
     subgraph Controller
