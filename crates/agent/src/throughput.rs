@@ -325,6 +325,7 @@ mod tests {
             source: "::1".parse().unwrap(),
             target: "::1".parse().unwrap(),
             peer_ll: None,
+            cost: None,
         };
         let (l1, t1) = (link.clone(), t.clone());
         let first = tokio::spawn(async move { t1.run(&l1).await });

@@ -112,7 +112,12 @@ sit behind NAT, so agents pull work from the controller rather than the
 controller connecting out to them. A controller that does not know the agent
 (restart, eviction after 300 s without a poll) answers the poll with `404`
 and the agent registers again; applied costs live in BIRD's runtime config,
-so every registration re-seeds them.
+so every registration re-seeds them. The agent also remembers the last cost
+it was told to apply per link and, on every 30 s refresh, compares it with
+the cost BIRD reports for the interface: a drift (a BIRD config redeploy
+resets every interface to its static default) is re-applied at once, without
+waiting for the controller, and counted as
+`mielofon_agent_apply_cost_total{result="reapplied"}`.
 
 The agent package (`mielofon-agent/`) installs `/usr/sbin/mielofon-agent`, a
 procd init and a UCI config (`/etc/config/mielofon-agent`) that carries the

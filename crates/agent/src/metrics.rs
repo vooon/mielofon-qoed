@@ -25,6 +25,8 @@ pub struct Counters {
     pub probe_errors_iperf: AtomicUsize,
     pub apply_cost: AtomicUsize,
     pub apply_cost_errors: AtomicUsize,
+    /// Costs re-applied by the refresh because BIRD had drifted from them.
+    pub apply_cost_reapplied: AtomicUsize,
 }
 
 impl Counters {
@@ -156,6 +158,11 @@ impl Metrics {
             "mielofon_agent_apply_cost_total",
             "{result=\"error\"}",
             get(&c.apply_cost_errors),
+        );
+        o.line(
+            "mielofon_agent_apply_cost_total",
+            "{result=\"reapplied\"}",
+            get(&c.apply_cost_reapplied),
         );
 
         let thr = self.throughput.lock().expect("metrics lock");
