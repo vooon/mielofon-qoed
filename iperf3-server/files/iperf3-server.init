@@ -48,8 +48,18 @@ start_instance()
 	# ujail by default: the server only listens on its configured port, so a
 	# jail with the log + namespace and a writable /dev/log keeps it away from
 	# the rest of the box while still accepting probes.
+	#
+	# iperf3 backs every test stream with an mkstemp() file under $TMPDIR
+	# (default /tmp). The jail has no /tmp, so without a private scratch
+	# directory every test dies server-side with "unable to create a new
+	# stream: No such file or directory" and the client only sees "control
+	# socket has closed unexpectedly".
 	if [ "$jail" -ne 0 ]; then
+		local tmp="/var/run/iperf3-server/${section}-${protocol}"
+		mkdir -p "$tmp"
+		procd_set_param env TMPDIR="$tmp"
 		procd_add_jail "iperf3-${section}-${protocol}" log
+		procd_add_jail_mount_rw "$tmp"
 	fi
 
 	procd_close_instance
