@@ -139,9 +139,9 @@ Command shapes — each carries a job `id`:
 ```
 
 The controller's scheduler issues `probe/always` per link on an interval, and
-`probe/throughput` only when the link's fence lease is free — it acquires the
-lease before issuing the command — and the agent holds no lease on another
-link (it runs one iperf3 test at a time). `apply_cost` is issued when the derived cost
+`probe/throughput` only when neither endpoint of the link is in another test
+— it acquires the node-level fence lease before issuing the command, so tests
+on disjoint node pairs run concurrently. `apply_cost` is issued when the derived cost
 for a link differs from the last cost the controller told the agent to apply.
 While no agent is long-polling, probe work is not queued (bounded). Every
 `register` replaces the agent's link set, drops queued work, forgets which
@@ -190,9 +190,11 @@ POST /v1/agent/reply              // clients
 
 ## Fence (soft lease)
 
-Owned entirely by the controller scheduler. A lease has a TTL and token; on
-expiry without a report it may be re-issued. An overlapping throughput probe is
-tolerated and reported as `conflict`.
+Owned entirely by the controller scheduler. A lease has a TTL and token and
+occupies both endpoints of its link (a node runs one iperf3 client and serves
+one iperf3 server at a time, in either role); on expiry without a report it
+may be re-issued. An overlapping throughput probe is tolerated and reported
+as `conflict`.
 
 ## Read endpoints (admin listener)
 
