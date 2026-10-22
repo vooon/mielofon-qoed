@@ -1,38 +1,67 @@
-//! Agent registry and the controller's work queue.
+//! Agent registry: which agents are connected, which links they own, the
+//! session each command is dispatched on, and the per-link bookkeeping the
+//! scheduler needs (last issue per tier, cost sent, commands in flight).
 //!
-//! The controller decides what to probe and what cost to apply; each known
-//! agent owns a per-link work queue that the scheduler fills and the agent
-//! drains through the `POST /v1/agent/command` long-poll.
+//! There is no work queue: a command is a stream the controller opens on
+//! the agent's session (`session::dispatch`). "In flight" replaces queue
+//! dedup — at most one command per (link, kind) is outstanding, so a slow
+//! agent never accumulates a backlog.
 
-use crate::clock::now_secs;
 use crate::model::LinkKey;
-use std::collections::{HashMap, HashSet, VecDeque};
+use mielofon_transport::Session;
+use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use tokio::sync::Notify;
 
-pub use mielofon_proto::{RegisterReq, RegisterResp, Tier, WorkCmd, WorkResp};
+pub use mielofon_proto::{RegisterReq, RegisterResp, Tier, WorkCmd};
 
 /// How long (seconds) a failed `apply_cost` is left alone before the
 /// scheduler re-sends it, so a BIRD that keeps rejecting a cost is not
 /// hammered every tick.
 pub const APPLY_RETRY_SECS: u64 = 30;
 
-/// Per-agent state: its managed links, pending work, last-issued timestamps
-/// per tier, the last cost the controller told it to apply, and the mesh
-/// loopback it reported at register (the trace walker's "to" resolution).
+/// What is tracked as in flight per link.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Kind {
+    Always,
+    Throughput,
+    Apply,
+}
+
+/// The (link, kind) a command occupies while outstanding; traces are not
+/// per link and run under the walker's own control.
+pub fn track_key(cmd: &WorkCmd) -> Option<(LinkKey, Kind)> {
+    match cmd {
+        WorkCmd::Probe {
+            link,
+            tier: Tier::Always,
+            ..
+        } => Some((link.clone(), Kind::Always)),
+        WorkCmd::Probe {
+            link,
+            tier: Tier::Throughput,
+            ..
+        } => Some((link.clone(), Kind::Throughput)),
+        WorkCmd::ApplyCost { link, .. } => Some((link.clone(), Kind::Apply)),
+        WorkCmd::Trace { .. } => None,
+    }
+}
+
+/// Per-agent state.
 #[derive(Default)]
 struct Worker {
     links: Vec<LinkKey>,
-    queue: VecDeque<WorkCmd>,
     loopback: Option<String>,
+    /// The live session and its generation (bumps on every new connection).
+    session: Option<(u64, Arc<dyn Session>)>,
     /// link id -> cost the controller has sent (even if not yet acked)
     applied_sent: HashMap<String, u32>,
     /// link id -> unix secs before which a failed apply is not re-sent
     apply_retry_at: HashMap<String, u64>,
     /// link id -> unix secs of last issue per tier
     last_issue: HashMap<(String, Tier), u64>,
-    /// Unix secs of the last register or command poll.
-    last_seen: u64,
+    /// Commands outstanding on the session.
+    in_flight: HashSet<(String, Kind)>,
 }
 
 impl Worker {
@@ -42,17 +71,13 @@ impl Worker {
             None => true,
         }
     }
-
-    fn mark_issued(&mut self, link: &str, tier: Tier, now: u64) {
-        self.last_issue.insert((link.to_string(), tier), now);
-    }
 }
 
 /// Thread-safe registry of agents.
 #[derive(Default)]
 pub struct WorkerRegistry {
     inner: Mutex<HashMap<String, Worker>>,
-    notify_map: Mutex<HashMap<String, Arc<Notify>>>,
+    generation: AtomicU64,
 }
 
 impl WorkerRegistry {
@@ -60,101 +85,88 @@ impl WorkerRegistry {
         Self::default()
     }
 
-    /// The per-agent wake-up handle used by `/v1/agent/command` long-poll.
-    /// The scheduler signals it after queuing work. `notify_one` stores a
-    /// permit when nobody is waiting, so a command queued between the poll's
-    /// drain and its wait is never missed.
-    pub fn notify(&self, agent: &str) -> Arc<Notify> {
-        let mut map = self.notify_map.lock().expect("workers lock poisoned");
-        map.entry(agent.to_string())
-            .or_insert_with(|| Arc::new(Notify::new()))
-            .clone()
-    }
-
-    fn enqueue(&self, agent: &str, cmd: WorkCmd, front: bool) -> bool {
-        let queued = {
-            let mut map = self.inner.lock().expect("workers lock poisoned");
-            match map.get_mut(agent) {
-                Some(w) => {
-                    let key = cmd_key(&cmd);
-                    if w.queue.iter().any(|c| cmd_key(c) == key) {
-                        false
-                    } else {
-                        if front {
-                            w.queue.push_front(cmd);
-                        } else {
-                            w.queue.push_back(cmd);
-                        }
-                        true
-                    }
-                }
-                None => return false,
-            }
-        };
-        self.notify(agent).notify_one();
-        queued
-    }
-
-    /// Queue a command for an agent and wake its long-poll waiter. A probe is
-    /// not enqueued if one of the same (link, tier) is already pending — the
-    /// agent only ever has one outstanding probe per kind per link, so an
-    /// unresponsive agent cannot accumulate an unbounded backlog. Returns true
-    /// when the command was actually enqueued (so the caller stamps "issued").
-    pub fn push(&self, agent: &str, cmd: WorkCmd) -> bool {
-        self.enqueue(agent, cmd, false)
-    }
-
-    /// Queue a command at the FRONT of an agent's queue. Trace hops jump the
-    /// probe backlog (a trace must answer promptly, not wait behind a
-    /// throughput test), so the walker's per-hop timeout does not expire
-    /// because the command sat queued. Trace commands are deduped by id only,
-    /// so a retried hop is never silently dropped.
-    pub fn push_front(&self, agent: &str, cmd: WorkCmd) -> bool {
-        self.enqueue(agent, cmd, true)
-    }
-
     /// Register (or refresh) an agent with its current link set. Returns true
     /// when a link is new to the registry (it is due for probing right away).
     ///
-    /// A registration is a clean slate: queued work is dropped, links the
-    /// agent no longer reports are forgotten, and the "cost sent" memory is
-    /// cleared so the policy snapshot is re-seeded — a re-registering agent
-    /// may have rebooted and lost its applied costs.
+    /// A registration is a clean slate for policy: links the agent no longer
+    /// reports are forgotten and the "cost sent" memory is cleared so the
+    /// policy snapshot is re-seeded — a re-registering agent may have
+    /// rebooted and lost its applied costs. The session, if any, is kept.
     pub fn register(&self, agent: &str, links: Vec<LinkKey>, loopback: Option<String>) -> bool {
         let mut map = self.inner.lock().expect("workers lock poisoned");
         let w = map.entry(agent.to_string()).or_default();
-        w.last_seen = now_secs();
-        w.queue.clear();
         w.loopback = loopback;
         w.applied_sent.clear();
         w.apply_retry_at.clear();
         let fresh = links.iter().any(|l| !w.links.contains(l));
         let keep: HashSet<String> = links.iter().map(LinkKey::id).collect();
         w.last_issue.retain(|(id, _), _| keep.contains(id));
+        w.in_flight.retain(|(id, _)| keep.contains(id));
         w.links = links;
         fresh
     }
 
-    /// Forget agents that have neither registered nor polled for `max_idle`
-    /// seconds. Returns the evicted names.
-    pub fn evict_idle(&self, now: u64, max_idle: u64) -> Vec<String> {
+    /// Attach the session commands for `agent` are dispatched on. `own` is
+    /// the generation this connection already holds, if it registered
+    /// before (a link-set refresh): then nothing changes. Otherwise the
+    /// session replaces the previous one, which is returned so the caller
+    /// can close it. Returns the generation the caller must detach with.
+    pub fn attach(
+        &self,
+        agent: &str,
+        session: Arc<dyn Session>,
+        own: Option<u64>,
+    ) -> (u64, Option<Arc<dyn Session>>) {
         let mut map = self.inner.lock().expect("workers lock poisoned");
-        let gone: Vec<String> = map
-            .iter()
-            .filter(|(_, w)| now.saturating_sub(w.last_seen) > max_idle)
-            .map(|(name, _)| name.clone())
-            .collect();
-        for name in &gone {
-            map.remove(name);
-        }
-        drop(map);
-        if !gone.is_empty() {
-            let mut notify = self.notify_map.lock().expect("workers lock poisoned");
-            for name in &gone {
-                notify.remove(name);
+        let w = map.entry(agent.to_string()).or_default();
+        if let (Some(own), Some((cur, _))) = (own, &w.session) {
+            if own == *cur {
+                return (own, None);
             }
         }
-        gone
+        let generation = self.generation.fetch_add(1, Ordering::Relaxed) + 1;
+        let old = w.session.replace((generation, session)).map(|(_, s)| s);
+        w.in_flight.clear();
+        (generation, old)
+    }
+
+    /// The session of `agent` went away: forget the agent, unless a newer
+    /// session has replaced it meanwhile. Returns true when evicted.
+    pub fn detach(&self, agent: &str, generation: u64) -> bool {
+        let mut map = self.inner.lock().expect("workers lock poisoned");
+        match map.get(agent) {
+            Some(w) if w.session.as_ref().is_some_and(|(g, _)| *g == generation) => {
+                map.remove(agent);
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// The live session of an agent, if it has one.
+    pub fn session(&self, agent: &str) -> Option<Arc<dyn Session>> {
+        let map = self.inner.lock().expect("workers lock poisoned");
+        map.get(agent)
+            .and_then(|w| w.session.as_ref().map(|(_, s)| s.clone()))
+    }
+
+    /// Claim the (link, kind) slot for a command about to be dispatched.
+    /// False when the agent is unknown or a command of that kind is already
+    /// outstanding on the link.
+    pub fn begin(&self, agent: &str, link: &LinkKey, kind: Kind) -> bool {
+        let mut map = self.inner.lock().expect("workers lock poisoned");
+        match map.get_mut(agent) {
+            Some(w) => w.in_flight.insert((link.id(), kind)),
+            None => false,
+        }
+    }
+
+    /// Release the slot once the command answered or failed.
+    pub fn end(&self, agent: &str, link: &LinkKey, kind: Kind) {
+        let mut map = self.inner.lock().expect("workers lock poisoned");
+        if let Some(w) = map.get_mut(agent) {
+            w.in_flight.remove(&(link.id(), kind));
+        }
     }
 
     /// How many known agents there are.
@@ -203,7 +215,7 @@ impl WorkerRegistry {
     pub fn mark_issued(&self, agent: &str, link: &LinkKey, tier: Tier, now: u64) {
         let mut map = self.inner.lock().expect("workers lock poisoned");
         if let Some(w) = map.get_mut(agent) {
-            w.mark_issued(&link.id(), tier, now);
+            w.last_issue.insert((link.id(), tier), now);
         }
     }
 
@@ -248,15 +260,6 @@ impl WorkerRegistry {
         }
     }
 
-    /// Drain all pending commands for an agent; `None` when the agent is not
-    /// registered (it must register before it can poll).
-    pub fn drain(&self, agent: &str) -> Option<Vec<WorkCmd>> {
-        let mut map = self.inner.lock().expect("workers lock poisoned");
-        let w = map.get_mut(agent)?;
-        w.last_seen = now_secs();
-        Some(w.queue.drain(..).collect())
-    }
-
     pub fn agents(&self) -> Vec<String> {
         self.inner
             .lock()
@@ -286,35 +289,14 @@ impl WorkerRegistry {
     }
 }
 
-/// Dedup key for a queued command: link id + kind/tier.
-fn cmd_key(c: &WorkCmd) -> (String, String) {
-    match c {
-        WorkCmd::Probe { link, tier, .. } => (link.id(), format!("probe/{tier:?}")),
-        WorkCmd::ApplyCost { link, .. } => (link.id(), "apply".into()),
-        // Trace commands are unique per dispatch — the cmd id is the dedup key,
-        // so a walker that retries a dead/unresponsive hop cannot silently lose
-        // a command behind an identical one that is already queued.
-        WorkCmd::Trace { id, .. } => (id.clone(), "trace".into()),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::model::LinkKey;
+    use crate::session::testing::FakeAgent;
 
     fn link() -> LinkKey {
         LinkKey::new("spoke-1", "hub-a", "awg_hub_a")
-    }
-
-    fn probe(id: &str, tier: Tier) -> WorkCmd {
-        WorkCmd::Probe {
-            id: id.into(),
-            tier,
-            token: None,
-            link: link(),
-            traceparent: None,
-        }
     }
 
     #[test]
@@ -364,22 +346,6 @@ mod tests {
     }
 
     #[test]
-    fn pending_commands_are_drained_once() {
-        let r = WorkerRegistry::new();
-        r.register("spoke-1", vec![link()], None);
-        r.push("spoke-1", probe("x", Tier::Always));
-        assert_eq!(r.drain("spoke-1").unwrap().len(), 1);
-        assert_eq!(r.drain("spoke-1").unwrap().len(), 0);
-    }
-
-    #[test]
-    fn unregistered_agent_cannot_drain() {
-        let r = WorkerRegistry::new();
-        assert!(r.drain("spoke-1").is_none());
-        assert!(!r.push("spoke-1", probe("x", Tier::Always)));
-    }
-
-    #[test]
     fn failed_apply_is_retried_after_backoff() {
         let r = WorkerRegistry::new();
         r.register("spoke-1", vec![link()], None);
@@ -394,36 +360,42 @@ mod tests {
     }
 
     #[test]
-    fn push_dedups_same_link_tier() {
+    fn one_command_per_link_and_kind_in_flight() {
         let r = WorkerRegistry::new();
+        assert!(!r.begin("spoke-1", &link(), Kind::Always), "unknown agent");
         r.register("spoke-1", vec![link()], None);
-        // Same (link, tier) queued repeatedly → only one makes it in.
-        assert!(r.push("spoke-1", probe("a", Tier::Always)));
-        assert!(!r.push("spoke-1", probe("b", Tier::Always)));
-        assert_eq!(r.drain("spoke-1").unwrap().len(), 1);
+        assert!(r.begin("spoke-1", &link(), Kind::Always));
+        assert!(
+            !r.begin("spoke-1", &link(), Kind::Always),
+            "still outstanding"
+        );
+        assert!(r.begin("spoke-1", &link(), Kind::Throughput), "other kind");
+        r.end("spoke-1", &link(), Kind::Always);
+        assert!(r.begin("spoke-1", &link(), Kind::Always));
     }
 
-    #[test]
-    fn register_drops_stale_queued_work() {
+    #[tokio::test]
+    async fn sessions_supersede_and_detach_by_generation() {
         let r = WorkerRegistry::new();
         r.register("spoke-1", vec![link()], None);
-        r.push("spoke-1", probe("stale", Tier::Throughput));
-        // Re-register (e.g. agent reconnect) clears anything queued while away.
-        assert!(!r.register("spoke-1", vec![link()], None));
-        assert!(r.drain("spoke-1").unwrap().is_empty());
-        // New work is accepted after the reset.
-        r.push("spoke-1", probe("fresh", Tier::Always));
-        assert_eq!(r.drain("spoke-1").unwrap().len(), 1);
-    }
-
-    #[test]
-    fn idle_agents_are_evicted() {
-        let r = WorkerRegistry::new();
-        r.register("spoke-1", vec![link()], None);
-        let now = now_secs();
-        assert!(r.evict_idle(now + 100, 300).is_empty());
-        assert_eq!(r.evict_idle(now + 301, 300), vec!["spoke-1".to_string()]);
+        let first = FakeAgent::silent();
+        let (g1, old) = r.attach("spoke-1", first.clone(), None);
+        assert!(old.is_none());
+        // The same connection refreshing its links keeps its generation.
+        let (g1b, old) = r.attach("spoke-1", first.clone(), Some(g1));
+        assert_eq!(g1b, g1);
+        assert!(old.is_none());
+        // A new connection for the same agent supersedes the old one.
+        let second = FakeAgent::silent();
+        let (g2, old) = r.attach("spoke-1", second, None);
+        assert_ne!(g2, g1);
+        assert!(old.is_some(), "the superseded session is handed back");
+        // The old connection closing must not evict the new registration.
+        assert!(!r.detach("spoke-1", g1));
+        assert!(r.has_agent("spoke-1"));
+        assert!(r.detach("spoke-1", g2));
         assert!(!r.has_agent("spoke-1"));
+        assert!(r.session("spoke-1").is_none());
     }
 
     #[test]

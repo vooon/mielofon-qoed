@@ -1,6 +1,8 @@
-//! HTTP API: three listeners. Members (9551) and clients (9552) are mTLS; the
-//! admin listener (9553) is plain HTTP on loopback serving dashboard, metrics,
-//! healthz and read-only query endpoints.
+//! HTTP API: the members listener (9551, mTLS) carries gossip; the admin
+//! listener (9553) is plain HTTP on loopback serving the dashboard, metrics,
+//! healthz, the read-only query endpoints and the tooling ingest. Agents do
+//! not speak HTTP: they hold a QUIC session on the client listener (9552,
+//! see `session.rs`).
 
 use crate::model::{LinkKey, ProbeState, QualityRecord};
 use crate::state::AppState;
@@ -11,14 +13,12 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
 use std::sync::atomic::{AtomicU64, Ordering};
-use tracing::warn;
-
-pub use mielofon_proto::{AgentReply, CommandReq};
 
 // ── Request/response types ────────────────────────────────────────────────
 
-/// `POST /v1/quality`: a bare measurement without a command to answer (used
-/// by tooling and the e2e harness; agents answer commands on `/v1/agent/reply`).
+/// `POST /v1/quality` (admin): a bare measurement without a command to
+/// answer, for tooling and the e2e harness. Agents answer commands on their
+/// session streams.
 #[derive(Debug, Deserialize)]
 pub struct QualityReq {
     pub link: LinkKey,
@@ -103,7 +103,7 @@ fn not_found(msg: &str) -> Response {
         .into_response()
 }
 
-// ── Measurement ingest (clients listener) ─────────────────────────────────
+// ── Measurement ingest ────────────────────────────────────────────────────
 
 pub async fn post_quality(
     State(state): State<AppState>,
@@ -128,18 +128,18 @@ pub async fn post_quality(
 }
 
 /// A single measurement to ingest.
-struct Measure {
-    link: LinkKey,
-    ts: Option<u64>,
-    rtt_ms: Option<f64>,
-    loss_pct: Option<f64>,
-    jitter_ms: Option<f64>,
-    tcp_mbps: Option<f64>,
+pub(crate) struct Measure {
+    pub link: LinkKey,
+    pub ts: Option<u64>,
+    pub rtt_ms: Option<f64>,
+    pub loss_pct: Option<f64>,
+    pub jitter_ms: Option<f64>,
+    pub tcp_mbps: Option<f64>,
     /// UDP leg: (mbps, jitter_ms, loss_pct).
-    udp: (Option<f64>, Option<f64>, Option<f64>),
-    util_mbps: f64,
-    probe_state: ProbeState,
-    token: Option<String>,
+    pub udp: (Option<f64>, Option<f64>, Option<f64>),
+    pub util_mbps: f64,
+    pub probe_state: ProbeState,
+    pub token: Option<String>,
 }
 
 /// Shared measurement ingest: append the raw sample to the replicated store and
@@ -150,7 +150,7 @@ struct Measure {
 /// are decoupled). Storing exactly what arrives means a failed probe clears the
 /// stale dimension in the *sample* instead of resurrecting it (e.g. a 100%-loss
 /// ping must not keep an old rtt); the derived live record reflects the window.
-fn ingest_quality(state: &AppState, m: Measure) {
+pub(crate) fn ingest_quality(state: &AppState, m: Measure) {
     let ts = m.ts.unwrap_or_else(crate::clock::now_secs);
 
     state.tsdb.append(
@@ -172,177 +172,6 @@ fn ingest_quality(state: &AppState, m: Measure) {
     // A gated throughput report carries the fence token — release the lease.
     if let Some(t) = m.token {
         state.fence.release(&m.link.id(), &t);
-    }
-}
-
-// ── Agent pull endpoints (clients listener) ───────────────────────────────
-
-/// Register an agent and its managed links; the response carries the current
-/// policy snapshot (apply_cost commands) so a fresh agent converges immediately.
-pub async fn register_agent(
-    State(state): State<AppState>,
-    Json(req): Json<crate::worker::RegisterReq>,
-) -> Json<crate::worker::RegisterResp> {
-    if req.agent.is_empty() {
-        return Json(crate::worker::RegisterResp {
-            ok: false,
-            commands: Vec::new(),
-        });
-    }
-    state.workers.register(&req.agent, req.links, req.loopback);
-
-    // Seed current policy for the agent's links. `register` forgot every
-    // cost previously sent, so each known cost is re-issued.
-    let mut commands = Vec::new();
-    for link in state.workers.links_of(&req.agent) {
-        if let Some(cost) = state.kv.get(&link).and_then(|r| r.ospf_cost) {
-            state.workers.set_applied_sent(&req.agent, &link, cost);
-            commands.push(crate::worker::WorkCmd::ApplyCost {
-                id: crate::scheduler::cmd_id(),
-                link,
-                cost,
-                traceparent: None,
-            });
-        }
-    }
-    Json(crate::worker::RegisterResp { ok: true, commands })
-}
-
-/// Long-polled work fetch: returns queued commands immediately, otherwise
-/// holds the request until a command is queued (scheduler `notify`) or the
-/// timeout expires. `timeout_ms == 0` drains without waiting. An agent this
-/// node does not know (never registered, evicted, or the controller
-/// restarted) gets `404` so it re-registers instead of polling into the void.
-pub async fn command_long_poll(
-    State(state): State<AppState>,
-    Json(req): Json<CommandReq>,
-) -> Response {
-    let timeout = std::time::Duration::from_millis(req.timeout_ms.min(120_000));
-    let deadline = tokio::time::Instant::now() + timeout;
-    let mut notify = None;
-    loop {
-        match state.workers.drain(&req.agent) {
-            None => return not_found("agent not registered"),
-            Some(commands) if !commands.is_empty() => {
-                return Json(crate::worker::WorkResp { commands }).into_response();
-            }
-            Some(_) => {}
-        }
-        if timeout.is_zero() {
-            break;
-        }
-        let notify = notify.get_or_insert_with(|| state.workers.notify(&req.agent));
-        tokio::select! {
-            _ = notify.notified() => continue,
-            _ = tokio::time::sleep_until(deadline) => break,
-        }
-    }
-    Json(crate::worker::WorkResp {
-        commands: Vec::new(),
-    })
-    .into_response()
-}
-
-/// Run `f` inside a span whose W3C parent is `traceparent`, when present.
-/// Returns the span's return value.
-fn with_traceparent<T>(traceparent: Option<&str>, f: impl FnOnce() -> T) -> T {
-    let span = tracing::info_span!("agent.report");
-    use tracing_opentelemetry::OpenTelemetrySpanExt;
-    if let Some(cx) = crate::tracectx::parent_context(traceparent) {
-        let _ = span.set_parent(cx);
-    }
-    span.in_scope(f)
-}
-
-/// `/v1/agent/reply`: agent→controller results for previously issued commands.
-pub async fn agent_reply(
-    State(state): State<AppState>,
-    Json(reply): Json<AgentReply>,
-) -> Json<serde_json::Value> {
-    match reply {
-        AgentReply::Probe {
-            agent,
-            id,
-            link,
-            ts,
-            rtt_ms,
-            loss_pct,
-            jitter_ms,
-            tcp_mbps,
-            udp_mbps,
-            udp_jitter_ms,
-            udp_loss_pct,
-            util_mbps,
-            state: probe_state,
-            token,
-            note,
-            traceparent,
-        } => {
-            with_traceparent(traceparent.as_deref(), || {
-                if let Some(note) = &note {
-                    PROBE_FAILURES.fetch_add(1, Ordering::Relaxed);
-                    warn!(agent, link = %link.id(), id, "probe failed: {note}");
-                }
-                ingest_quality(
-                    &state,
-                    Measure {
-                        link,
-                        ts,
-                        rtt_ms,
-                        loss_pct,
-                        jitter_ms,
-                        tcp_mbps,
-                        udp: (udp_mbps, udp_jitter_ms, udp_loss_pct),
-                        util_mbps,
-                        probe_state,
-                        token,
-                    },
-                )
-            });
-            Json(serde_json::json!({"ok": true, "id": id}))
-        }
-        AgentReply::Applied {
-            agent,
-            id,
-            link,
-            cost,
-            note,
-            traceparent,
-        } => {
-            with_traceparent(traceparent.as_deref(), || match note {
-                None => state.workers.set_applied_sent(&agent, &link, cost),
-                Some(note) => {
-                    warn!(agent, link = %link.id(), cost, id, "apply_cost failed: {note}");
-                    state
-                        .workers
-                        .note_apply_failed(&agent, &link, crate::clock::now_secs());
-                }
-            });
-            Json(serde_json::json!({"ok": true, "id": id}))
-        }
-        AgentReply::Trace {
-            agent,
-            id,
-            traceparent,
-            prefix,
-            code,
-            routes,
-        } => {
-            // Hand the hop resolution back to the trace walker, which is
-            // awaiting it by command id.
-            let delivered = with_traceparent(traceparent.as_deref(), || {
-                state.trace.complete(
-                    &id,
-                    crate::trace::TraceHopReply {
-                        agent,
-                        prefix,
-                        code,
-                        routes,
-                    },
-                )
-            });
-            Json(serde_json::json!({"ok": delivered, "id": id}))
-        }
     }
 }
 
@@ -598,17 +427,6 @@ pub fn cluster_router() -> Router<AppState> {
         }))
 }
 
-pub fn client_router() -> Router<AppState> {
-    Router::new()
-        .route("/v1/quality", post(post_quality))
-        .route("/v1/agent/register", post(register_agent))
-        .route("/v1/agent/command", post(command_long_poll))
-        .route("/v1/agent/reply", post(agent_reply))
-        .layer(axum::middleware::from_fn(|req, next| {
-            access_log("client", req, next)
-        }))
-}
-
 pub fn admin_router() -> Router<AppState> {
     Router::new()
         .route("/v1/graph", get(frontend_graph))
@@ -618,7 +436,7 @@ pub fn admin_router() -> Router<AppState> {
         .route("/healthz", get(healthz))
         .route("/readyz", get(readyz))
         .route("/v1/quality/all", get(get_quality_all))
-        .route("/v1/quality", get(get_quality))
+        .route("/v1/quality", get(get_quality).post(post_quality))
         .route("/v1/policy", get(get_policy))
         .route("/v1/status", get(get_status))
         .route("/", get(frontend))
@@ -633,7 +451,7 @@ pub fn admin_router() -> Router<AppState> {
 /// Quality reports accepted since start (probe replies + `POST /v1/quality`).
 static REPORTS: AtomicU64 = AtomicU64::new(0);
 /// Probe replies that carried a failure note (e.g. iperf3 could not run).
-static PROBE_FAILURES: AtomicU64 = AtomicU64::new(0);
+pub(crate) static PROBE_FAILURES: AtomicU64 = AtomicU64::new(0);
 
 #[cfg(test)]
 mod tests {
@@ -644,136 +462,36 @@ mod tests {
     use http_body_util::BodyExt;
     use tower::ServiceExt;
 
-    async fn call(
-        state: &AppState,
-        path: &str,
-        body: serde_json::Value,
-    ) -> (StatusCode, serde_json::Value) {
-        let app = client_router().with_state(state.clone());
+    #[tokio::test]
+    async fn admin_ingest_is_stored_and_readable() {
+        let state = AppState::new(Config::default());
+        let app = admin_router().with_state(state.clone());
+        let link = LinkKey::new("spoke-1", "hub-a", "awg0");
+        let body = serde_json::json!({
+            "link": link, "rtt_ms": 21.0, "loss_pct": 0.0, "util_mbps": 0.0, "state": "quiet"
+        });
         let req = Request::builder()
             .method("POST")
-            .uri(path)
+            .uri("/v1/quality")
             .header("content-type", "application/json")
             .body(Body::from(body.to_string()))
             .unwrap();
+        let resp = app.clone().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let now = crate::clock::now_secs();
+        let req = Request::builder()
+            .uri(format!(
+                "/v1/ts?from=spoke-1&to=hub-a&interface=awg0&since={}&until={}",
+                now - 1,
+                now + 2
+            ))
+            .body(Body::empty())
+            .unwrap();
         let resp = app.oneshot(req).await.unwrap();
-        let status = resp.status();
+        assert_eq!(resp.status(), StatusCode::OK);
         let bytes = resp.into_body().collect().await.unwrap().to_bytes();
-        (
-            status,
-            serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null),
-        )
-    }
-
-    #[tokio::test]
-    async fn unknown_agent_poll_is_404() {
-        let state = AppState::new(Config::default());
-        let (status, body) = call(
-            &state,
-            "/v1/agent/command",
-            serde_json::json!({ "agent": "spoke-1", "timeout_ms": 0 }),
-        )
-        .await;
-        assert_eq!(status, StatusCode::NOT_FOUND);
-        assert_eq!(body["error"], "agent not registered");
-
-        let (status, _) = call(
-            &state,
-            "/v1/agent/register",
-            serde_json::json!({ "agent": "spoke-1", "links": [] }),
-        )
-        .await;
-        assert_eq!(status, StatusCode::OK);
-        let (status, body) = call(
-            &state,
-            "/v1/agent/command",
-            serde_json::json!({ "agent": "spoke-1", "timeout_ms": 0 }),
-        )
-        .await;
-        assert_eq!(status, StatusCode::OK);
-        assert_eq!(body["commands"], serde_json::json!([]));
-    }
-
-    #[tokio::test]
-    async fn long_poll_wakes_on_push_before_wait() {
-        // A command queued between the poll's drain and its wait must still
-        // wake the poll (Notify permit semantics), not sit for the full timeout.
-        let state = AppState::new(Config::default());
-        let link = LinkKey::new("spoke-1", "hub-a", "awg_hub_a");
-        state.workers.register("spoke-1", vec![link.clone()], None);
-        let pusher = {
-            let state = state.clone();
-            tokio::spawn(async move {
-                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-                state.workers.push(
-                    "spoke-1",
-                    crate::worker::WorkCmd::Probe {
-                        id: "x".into(),
-                        tier: crate::worker::Tier::Always,
-                        token: None,
-                        link,
-                        traceparent: None,
-                    },
-                );
-            })
-        };
-        let started = std::time::Instant::now();
-        let (status, body) = call(
-            &state,
-            "/v1/agent/command",
-            serde_json::json!({ "agent": "spoke-1", "timeout_ms": 10_000 }),
-        )
-        .await;
-        pusher.await.unwrap();
-        assert_eq!(status, StatusCode::OK);
-        assert_eq!(body["commands"].as_array().unwrap().len(), 1);
-        assert!(started.elapsed() < std::time::Duration::from_secs(5));
-    }
-
-    #[tokio::test]
-    async fn failed_apply_is_not_treated_as_applied() {
-        let state = AppState::new(Config::default());
-        let link = LinkKey::new("spoke-1", "hub-a", "awg_hub_a");
-        state.workers.register("spoke-1", vec![link.clone()], None);
-        state.workers.set_applied_sent("spoke-1", &link, 50);
-        let (status, _) = call(
-            &state,
-            "/v1/agent/reply",
-            serde_json::json!({
-                "kind": "applied", "agent": "spoke-1", "id": "apply/1",
-                "link": link, "cost": 50, "note": "bird returned code 3"
-            }),
-        )
-        .await;
-        assert_eq!(status, StatusCode::OK);
-        assert_eq!(state.workers.applied_sent("spoke-1", &link), None);
-    }
-
-    #[tokio::test]
-    async fn register_reseeds_known_costs() {
-        let state = AppState::new(Config::default());
-        let link = LinkKey::new("spoke-1", "hub-a", "awg_hub_a");
-        let mut rec = QualityRecord::new(
-            Some(10.0),
-            Some(0.0),
-            Some(1.0),
-            None,
-            None,
-            0.0,
-            ProbeState::Quiet,
-        );
-        rec.ospf_cost = Some(20);
-        state.kv.put(link.clone(), rec);
-        for _ in 0..2 {
-            // Every registration re-seeds, even a repeat with no change.
-            let (_, body) = call(
-                &state,
-                "/v1/agent/register",
-                serde_json::json!({ "agent": "spoke-1", "links": [link] }),
-            )
-            .await;
-            assert_eq!(body["commands"][0]["type"], "apply_cost");
-            assert_eq!(body["commands"][0]["cost"], 20);
-        }
+        let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(v["samples"].as_array().unwrap().len(), 1);
     }
 }

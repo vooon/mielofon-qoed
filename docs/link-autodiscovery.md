@@ -111,7 +111,7 @@ the socket is pinned to the interface either way.
 ```uci
 config agent 'main'
 	option agent_name 'spoke-1'
-	option controller_url 'https://203.0.113.1:9552'
+	list endpoint 'hub-a.example.com:9552'
 	# ...tls/timeouts/prober knobs unchanged...
 	# OSPF scoping: only the links of this OSPF protocol are probed/
 	# cost-driven. Chosen by protocol name (simpler than remembering an

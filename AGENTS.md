@@ -19,21 +19,25 @@ This is a **PUBLIC** repository describing software for a **private** production
 ## Architecture (controller = decision-maker)
 - The **controller is the responsible party** for the whole mesh: scheduler,
   probe fence, quality classification, cost policy, and work dispatch to agents.
-- The **agent is a thin executor** (`crates/agent`, Rust): it registers, then
-  **long-polls** `POST /v1/agent/command` for commands, answers probes from its
-  own continuous per-link ping window (or runs the gated throughput test),
-  applies the OSPF cost it is told to apply, and replies on
-  `POST /v1/agent/reply`, **echoing the job id** of every command. It has no
-  scheduling/policy logic and never acquires the fence. Spokes sit behind NAT →
-  agent-pull (long-poll) only; the controller never connects out.
+- The **agent is a thin executor** (`crates/agent`, Rust): it dials a
+  controller and keeps one **mTLS QUIC session**, registers its links on it,
+  answers every command stream the controller opens (probes from its own
+  continuous per-link ping window, or the gated throughput test) with a reply
+  on the same stream **echoing the job id**, and applies the OSPF cost it is
+  told to apply. It has no scheduling/policy logic and never acquires the
+  fence. Spokes sit behind NAT → the agent dials, the controller never
+  connects out; once the session is up the controller opens streams on it.
 - Wire types live in `crates/mielofon-proto`, shared by controller and agent:
-  change the contract there, never in one side only.
-- Wire flow: `register` → long-poll `command` (`probe{always|throughput}` +
-  `apply_cost`, each with an `id`) → `reply` (`kind: probe` echoes the fence
-  token for throughput; `kind: applied` acks a cost).
+  change the contract there, never in one side only. The carrier (frames,
+  sessions, QUIC) is `crates/mielofon-transport`; code above it only opens
+  and accepts streams, so a TCP carrier can be added later.
+- Wire flow: agent stream `register` → controller streams `probe{always|throughput}`
+  / `apply_cost` / `trace` (each with an `id`), reply on the same stream
+  (`kind: probe` echoes the fence token for throughput; `kind: applied` acks
+  a cost). Control rides the underlay, never a mesh tunnel.
 
 ## Stack & conventions
-- **Controller** is Rust (tokio + axum + rustls). Hubs run **glibc**; build/test
+- **Controller** is Rust (tokio + axum + rustls + quinn). Hubs run **glibc**; build/test
   natively. CI additionally builds a static `x86_64-unknown-linux-musl` artifact.
 - **Agent** is Rust (tokio), built per target by the feed (`rust-package.mk`);
   agent nodes are x86_64, aarch64 and armv7 (musl). It pings in-process on raw

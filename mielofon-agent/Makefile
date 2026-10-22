@@ -28,8 +28,8 @@ define Package/mielofon-agent/description
   Mielofon agent: runs on each mesh router, discovers its tunnels from
   BIRD/OSPF (rpcd-mod-bird), pings them continuously, runs gated iperf3
   throughput tests, applies the OSPF costs the mielofon-controller decides,
-  and answers its trace lookups. Pulls commands from the controller over an
-  mTLS long-poll and replies with each command's job id. Thin executor — no
+  and answers its trace lookups. Holds an mTLS QUIC session with a
+  controller and answers each command stream on it. Thin executor — no
   scheduling or policy logic of its own.
 endef
 

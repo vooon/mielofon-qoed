@@ -1,8 +1,10 @@
 //! Wire types shared by the mielofon controller and agent.
 //!
-//! Everything that crosses the agent ↔ controller boundary (`register`, the
-//! `command` long-poll, `reply`) lives here, so both sides compile against the
-//! same contract. See `docs/protocol.md` for the flow.
+//! Everything that crosses the agent ↔ controller boundary lives here, so
+//! both sides compile against the same contract. Messages travel as frames
+//! on `mielofon-transport` streams: the agent opens a stream for an
+//! [`AgentRequest`] and reads its response; the controller opens a stream
+//! for a [`WorkCmd`] and reads the [`AgentReply`]. See `docs/protocol.md`.
 
 use serde::{Deserialize, Serialize};
 
@@ -85,7 +87,16 @@ pub enum WorkCmd {
     },
 }
 
-/// `POST /v1/agent/register`.
+/// A request the agent opens a stream for. `register` is the session hello:
+/// it names the agent and its links, and is repeated on the same session
+/// whenever the link set changes.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum AgentRequest {
+    Register(RegisterReq),
+}
+
+/// The agent's identity and managed links.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RegisterReq {
     pub agent: String,
@@ -97,35 +108,18 @@ pub struct RegisterReq {
     pub loopback: Option<String>,
 }
 
-/// Answer to `register`: the current policy snapshot as commands.
+/// Answer to `register`. The policy snapshot is not carried here: the
+/// controller opens `apply_cost` streams for every known cost right after.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RegisterResp {
     pub ok: bool,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub commands: Vec<WorkCmd>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
 }
 
-/// `POST /v1/agent/command`: long-poll for queued commands.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CommandReq {
-    pub agent: String,
-    #[serde(default = "default_timeout_ms")]
-    pub timeout_ms: u64,
-}
-
-fn default_timeout_ms() -> u64 {
-    30_000
-}
-
-/// Drained commands (empty on long-poll timeout).
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct WorkResp {
-    #[serde(default)]
-    pub commands: Vec<WorkCmd>,
-}
-
-/// `POST /v1/agent/reply`: the answer to a previously dispatched command.
-/// Every reply echoes the command's job identifier (`id`).
+/// The answer to a dispatched command, written on the command's own stream.
+/// Every reply still echoes the command's job identifier (`id`) for logs
+/// and traces.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum AgentReply {

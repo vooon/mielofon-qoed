@@ -76,42 +76,48 @@ done
 log "all nodes ready with ${PEER_COUNT} members"
 
 # Gossip replication: report a link on mielofon-0, watch it appear on the
-# other two nodes. The report is pushed over the mTLS clients listener using
-# mielofon-0's own node identity. The `ts` is the ingest time (matching live
-# agents) so the classifier derives a live policy record from the replicated
-# sample set. A node derives policy only for links of agents registered with
-# it, so the link's owner (`spoke-1`) registers on mielofon-0 first; the
-# derived record then reaches the other nodes through gossip, and the raw
-# sample travels on its own.
+# other two nodes. The `ts` is the ingest time (matching live agents) so the
+# classifier derives a live policy record from the replicated sample set. A
+# node derives policy only for links of agents registered with it, so the
+# link's owner (`spoke-1`) first opens a real QUIC session on mielofon-0's
+# client listener (`mielofon-controller tool hello`, using the pod's own
+# node identity) and holds it; the derived record then reaches the other
+# nodes through gossip, and the raw sample travels on its own.
 TS="$(date +%s)"
 LINK='{"from":"spoke-1","to":"hub-a","interface":"awg0"}'
-REGISTER="{\"agent\":\"spoke-1\",\"links\":[${LINK}]}"
 PAYLOAD="{\"link\":${LINK},\"ts\":${TS},\"rtt_ms\":21,\"loss_pct\":0.7,\"tcp_mbps\":7,\"util_mbps\":3,\"state\":\"quiet\"}"
 
-# POST a JSON body to a pod's own mTLS clients listener (its node identity).
-client_post() {
-	local pod="$1" path="$2" body="$3"
+# Register `spoke-1` on a pod over QUIC and keep the session for the test.
+register_owner() {
+	local pod="$1"
 	local ip
-	ip="$(kubectl exec "${pod}" -n "${NAMESPACE}" -- hostname -i 2>/dev/null | tr -d '[:space:]' || true)"
-	# Fall back to the pod IP if hostname -i empties; normally it matches the
-	# node cert SAN.
-	if [ -z "${ip}" ]; then
-		ip="$(kubectl get pod "${pod}" -n "${NAMESPACE}" -o jsonpath='{.status.podIP}')"
-	fi
-	kubectl exec "${pod}" -n "${NAMESPACE}" -- \
-		curl -sf \
-		--cacert /etc/mielofon/ca.crt \
-		--cert /etc/mielofon/node.crt \
-		--key /etc/mielofon/node.key \
-		-H 'Content-Type: application/json' \
-		-d "${body}" \
-		"https://${ip}:9552${path}"
+	ip="$(kubectl get pod "${pod}" -n "${NAMESPACE}" -o jsonpath='{.status.podIP}')"
+	kubectl exec "${pod}" -n "${NAMESPACE}" -- sh -c "
+		nohup /usr/local/bin/mielofon-controller tool hello \
+			--endpoint '${ip}:9552' \
+			--ca /etc/mielofon/ca.crt \
+			--cert /etc/mielofon/node.crt \
+			--key /etc/mielofon/node.key \
+			--agent spoke-1 --link spoke-1,hub-a,awg0 \
+			--hold-secs 600 > /tmp/hello.log 2>&1 &"
+	for i in $(seq 1 30); do
+		agents="$(kubectl exec "${pod}" -n "${NAMESPACE}" -- \
+			curl -sf http://127.0.0.1:9553/v1/status |
+			python3 -c "import sys,json;print(','.join(json.load(sys.stdin)['agents']))" 2>/dev/null || true)"
+		case ",${agents}," in *,spoke-1,*) return 0 ;; esac
+		sleep 1
+	done
+	echo "spoke-1 never registered on ${pod}:" >&2
+	kubectl exec "${pod}" -n "${NAMESPACE}" -- cat /tmp/hello.log >&2 || true
+	return 1
 }
 
 ingest() {
-	client_post "$1" /v1/agent/register "${REGISTER}"
+	register_owner "$1"
+	kubectl exec "$1" -n "${NAMESPACE}" -- \
+		curl -sf -H 'Content-Type: application/json' -d "${PAYLOAD}" \
+		http://127.0.0.1:9553/v1/quality
 	echo
-	client_post "$1" /v1/quality "${PAYLOAD}"
 }
 
 # Both replication paths: the owner's derived record (KV, LWW gossip) and the

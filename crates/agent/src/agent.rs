@@ -373,7 +373,7 @@ mod tests {
         let cfg = Config::from_uci(
             &json!({ "main": {
                 "agent_name": "node-0",
-                "controller_url": "https://203.0.113.1:9552",
+                "endpoint": "203.0.113.1:9552",
                 "cacert": "ca", "cert": "c", "key": "k",
                 // Pings never reach the test's documentation-range peers.
                 "ping_interval": "60"

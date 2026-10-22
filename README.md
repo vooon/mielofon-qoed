@@ -18,7 +18,7 @@ This repository is **both the source and an OpenWrt feed**:
 ## Status
 
 Stage 1 (controller) and Stage 2 (agent) are implemented and validated
-end-to-end (mTLS listeners, long-poll command/reply, fence, LWW KV, quality
+end-to-end (mTLS listeners, QUIC agent sessions, fence, LWW KV, quality
 classification, gossip, dashboard, `/metrics`, `/healthz`, `/readyz`, OTEL,
 node-exporter textfile metrics on the agent).
 

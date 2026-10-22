@@ -27,11 +27,29 @@ pub struct Counters {
     pub apply_cost_errors: AtomicUsize,
     /// Costs re-applied by the refresh because BIRD had drifted from them.
     pub apply_cost_reapplied: AtomicUsize,
+    /// Controller sessions established / dial attempts that failed.
+    pub session_connects: AtomicUsize,
+    pub session_dial_errors: AtomicUsize,
+    /// 1 while a controller session is up (a gauge).
+    pub session_connected: AtomicUsize,
 }
 
 impl Counters {
     pub fn inc(c: &AtomicUsize) {
         c.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn session_connects_inc(&self) {
+        Self::inc(&self.session_connects);
+    }
+
+    pub fn session_dial_errors_inc(&self) {
+        Self::inc(&self.session_dial_errors);
+    }
+
+    pub fn set_connected(&self, up: bool) {
+        self.session_connected
+            .store(usize::from(up), Ordering::Relaxed);
     }
 }
 
@@ -98,9 +116,34 @@ impl Metrics {
         o.line("mielofon_agent_links_configured", "", links.len());
 
         o.decl(
+            "mielofon_agent_session_connected",
+            "gauge",
+            "1 while a controller session is up.",
+        );
+        o.line(
+            "mielofon_agent_session_connected",
+            "",
+            get(&c.session_connected),
+        );
+        o.decl(
+            "mielofon_agent_session_total",
+            "counter",
+            "Controller sessions established and dial attempts that failed.",
+        );
+        for (k, v) in [
+            ("connected", &c.session_connects),
+            ("dial_error", &c.session_dial_errors),
+        ] {
+            o.line(
+                "mielofon_agent_session_total",
+                &format!("{{result=\"{k}\"}}"),
+                get(v),
+            );
+        }
+        o.decl(
             "mielofon_agent_commands_total",
             "counter",
-            "Commands drained from the controller, by outcome.",
+            "Commands received from the controller, by outcome.",
         );
         for (k, v) in [
             ("received", &c.commands_received),

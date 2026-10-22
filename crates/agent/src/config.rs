@@ -6,22 +6,24 @@
 
 use crate::bus::Bus;
 use anyhow::{bail, Context, Result};
+use mielofon_transport::{parse_endpoint, Endpoint};
 use serde_json::{json, Map, Value};
 use std::time::Duration;
 
 const PACKAGE: &str = "mielofon-agent";
+/// The controller's client listener port when an endpoint names none.
+const DEFAULT_PORT: u16 = 9552;
 
 #[derive(Debug, Clone)]
 pub struct Config {
     /// Node identity (`from` of every link); defaults to the hostname.
     pub agent: String,
-    /// Controller clients listener, e.g. `https://203.0.113.1:9552`.
-    pub controller_url: String,
+    /// Controller endpoints (`host:port`, names or literal addresses), tried
+    /// in order; a name resolving to several addresses yields all of them.
+    pub endpoints: Vec<Endpoint>,
     pub cacert: String,
     pub cert: String,
     pub key: String,
-    /// Long-poll hold for `/v1/agent/command`.
-    pub command_timeout: Duration,
     /// OSPF protocol whose ptp interfaces are the managed links.
     pub ospf_protocol: String,
     /// Tunnel interface prefix (`awg_hub1` minus `awg_` = `hub1`).
@@ -67,6 +69,45 @@ fn num<T: std::str::FromStr>(sec: &Map<String, Value>, name: &str, def: T) -> T 
     opt(sec, name).and_then(|v| v.parse().ok()).unwrap_or(def)
 }
 
+/// A UCI `list` option: an array in `ubus call uci get`, or a single string
+/// when the option was written as `option`.
+fn list<'a>(sec: &'a Map<String, Value>, name: &str) -> Vec<&'a str> {
+    match sec.get(name) {
+        Some(Value::Array(items)) => items.iter().filter_map(Value::as_str).collect(),
+        Some(Value::String(s)) => vec![s.as_str()],
+        _ => Vec::new(),
+    }
+}
+
+/// `list endpoint`, or the pre-QUIC `controller_url` with its scheme and
+/// path stripped, so an upgraded node keeps talking to the same hub.
+fn endpoints(main: &Map<String, Value>) -> Result<Vec<Endpoint>> {
+    let mut entries: Vec<String> = list(main, "endpoint")
+        .into_iter()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .collect();
+    if entries.is_empty() {
+        if let Some(url) = opt(main, "controller_url") {
+            let host = url
+                .trim_start_matches("https://")
+                .trim_start_matches("http://")
+                .split('/')
+                .next()
+                .unwrap_or_default();
+            entries.push(host.to_string());
+        }
+    }
+    if entries.is_empty() {
+        bail!("{PACKAGE}.main.endpoint is not set");
+    }
+    entries
+        .iter()
+        .map(|e| parse_endpoint(e, DEFAULT_PORT).map_err(|err| anyhow::anyhow!("endpoint {err}")))
+        .collect()
+}
+
 impl Config {
     /// Build from the `values` object of `ubus call uci get`.
     pub fn from_uci(values: &Value, hostname: &str) -> Result<Config> {
@@ -96,13 +137,10 @@ impl Config {
 
         Ok(Config {
             agent: opt(main, "agent_name").unwrap_or(hostname).to_string(),
-            controller_url: required("controller_url")?
-                .trim_end_matches('/')
-                .to_string(),
+            endpoints: endpoints(main)?,
             cacert: required("cacert")?,
             cert: required("cert")?,
             key: required("key")?,
-            command_timeout: Duration::from_millis(num(main, "command_timeout_ms", 30_000)),
             ospf_protocol: opt(main, "ospf_protocol").unwrap_or("mesh_v3").to_string(),
             iface_prefix: opt(main, "iface_prefix").unwrap_or("awg_").to_string(),
             loopback_iface: opt(main, "loopback_iface")
@@ -156,7 +194,7 @@ mod tests {
         json!({
             "main": {
                 ".type": "agent", ".name": "main",
-                "controller_url": "https://203.0.113.1:9552/",
+                "endpoint": ["hub.example.com:9552", "[2001:db8::1]:9552", "203.0.113.1"],
                 "cacert": "/etc/mielofon/ca.pem",
                 "cert": "/etc/mielofon/agent.cer",
                 "key": "/etc/mielofon/agent.key",
@@ -173,7 +211,19 @@ mod tests {
     fn parses_uci_with_defaults() {
         let c = Config::from_uci(&values(), "node-0").unwrap();
         assert_eq!(c.agent, "node-0", "hostname is the default identity");
-        assert_eq!(c.controller_url, "https://203.0.113.1:9552");
+        let eps: Vec<(String, u16)> = c
+            .endpoints
+            .iter()
+            .map(|e| (e.host.clone(), e.port))
+            .collect();
+        assert_eq!(
+            eps,
+            vec![
+                ("hub.example.com".to_string(), 9552),
+                ("2001:db8::1".to_string(), 9552),
+                ("203.0.113.1".to_string(), 9552),
+            ]
+        );
         assert_eq!(c.ping_interval, Duration::from_millis(500));
         assert_eq!(c.refresh_interval, Duration::from_secs(60), "default");
         assert_eq!(c.quiet_max_mbps, 15.0, "malformed number falls back");
@@ -182,6 +232,22 @@ mod tests {
         assert_eq!(c.excludes, vec!["awg_legacy".to_string()]);
         assert!(c.prometheus_textfile.is_none());
         assert_eq!((c.udp_port, c.udp_rate_mbps), (0, 20.0));
+    }
+
+    #[test]
+    fn legacy_controller_url_becomes_the_endpoint() {
+        let mut v = values();
+        let main = v["main"].as_object_mut().unwrap();
+        main.remove("endpoint");
+        main.insert("controller_url".into(), json!("https://203.0.113.1:9552/"));
+        let c = Config::from_uci(&v, "node-0").unwrap();
+        assert_eq!(c.endpoints.len(), 1);
+        assert_eq!(c.endpoints[0].host, "203.0.113.1");
+        assert_eq!(c.endpoints[0].port, 9552);
+
+        v["main"].as_object_mut().unwrap().remove("controller_url");
+        let err = Config::from_uci(&v, "node-0").unwrap_err();
+        assert!(err.to_string().contains("endpoint"));
     }
 
     #[test]

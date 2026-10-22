@@ -22,7 +22,7 @@ src-git mielofon https://github.com/vooon/mielofon-qoed.git
 ```
 
 - `crates/` — Rust workspace source (`controller`, `agent`, `mielofon-proto`,
-  `mielofon-otel`).
+  `mielofon-transport`, `mielofon-otel`).
 - `mielofon-controller/` and `mielofon-agent/` — feed `Package/` definitions.
 - OpenWrt's feed scanner ignores non-package directories (e.g. `crates/`).
 
@@ -44,9 +44,9 @@ store's expiry (`grace_ttl_secs`).
 
 | Listener | Port | Transport | Purpose |
 |----------|------|-----------|---------|
-| members  | 9551 | mTLS (rustls) | cluster gossip / anti-entropy |
-| clients  | 9552 | mTLS (rustls) | agents: commands + replies (long-poll) |
-| admin    | 9553 | HTTP on loopback | dashboard `/`, `/metrics`, `/healthz`, `/readyz`, read endpoints |
+| cluster  | 9551/tcp | mTLS HTTP (rustls) | gossip / anti-entropy between members |
+| client   | 9552/udp | mTLS QUIC (quinn + rustls) | agent sessions: commands and replies as streams |
+| admin    | 9553/tcp | HTTP on loopback | dashboard `/`, `/metrics`, `/healthz`, `/readyz`, read endpoints, tooling ingest |
 
 The admin listener binds `127.0.0.1` and is intended to be exposed through a
 reverse proxy (e.g. HAProxy). It is **not** mTLS; the proxy is the exposure
@@ -96,23 +96,25 @@ flowchart LR
     end
     T --> C
     S -->|issue probe / acquire lease| F
-    S -->|commands| A[agent]
-    A -->|replies / job id| T
+    S -->|stream per command| A[agent]
+    A -->|reply on the stream| T
     C -->|derived quality/cost| Q
     Q -->|apply_cost| S
     S -->|apply_cost| A
     A -->|ubus / rpcd-mod-bird| B[BIRD]
 ```
 
-The agent is a **thin executor** (Rust, tokio): it long-polls the controller's
-command endpoint, answers each command with raw measurements (echoing the job
-id), and applies the OSPF cost it is told to apply. It holds no scheduling,
-policy, or classification logic, and never acquires the fence itself. Spokes
-sit behind NAT, so agents pull work from the controller rather than the
-controller connecting out to them. A controller that does not know the agent
-(restart, eviction after 300 s without a poll) answers the poll with `404`
-and the agent registers again; applied costs live in BIRD's runtime config,
-so every registration re-seeds them. The agent also remembers the last cost
+The agent is a **thin executor** (Rust, tokio): it dials a controller and
+keeps one mTLS QUIC session, registers its links on it, answers every command
+stream the controller opens with raw measurements (echoing the job id) on
+that same stream, and applies the OSPF cost it is told to apply. It holds no
+scheduling, policy, or classification logic, and never acquires the fence
+itself. Spokes sit behind NAT, so the agent always dials; once the session is
+up the controller opens streams towards it. The session is the
+registration: when it drops the controller evicts the agent at once and the
+agent redials its endpoint list with back-off (see `docs/protocol.md`,
+*Transport*); applied costs live in BIRD's runtime config, so every
+registration re-seeds them. The agent also remembers the last cost
 it was told to apply per link and, on every refresh (`refresh_interval`,
 60 s by default), compares it with
 the cost BIRD reports for the interface: a drift (a BIRD config redeploy
@@ -122,11 +124,13 @@ waiting for the controller, and counted as
 
 The agent package (`mielofon-agent/`) installs `/usr/sbin/mielofon-agent`, a
 procd init and a UCI config (`/etc/config/mielofon-agent`) that carries the
-mTLS identity (`/etc/mielofon/agent.{key,cer}` + `ca.pem`) and a single
-`controller_url`. Key integration points:
+mTLS identity (`/etc/mielofon/agent.{key,cer}` + `ca.pem`) and the controller
+`endpoint` list. Key integration points:
 
-- **Transport**: mTLS HTTPS (hyper + rustls with the ring provider), pinned to
-  the mesh CA, same certificate files as the controller's clients listener.
+- **Transport**: `crates/mielofon-transport` — mTLS QUIC (quinn + rustls with
+  the ring provider), pinned to the mesh CA, same certificate files as the
+  controller's client listener. Control never rides the mesh it costs: the
+  endpoints are underlay addresses.
 - **Discovery** (`docs/link-autodiscovery.md`): `bird status` and
   `network.interface.<iface> status` over ubus, re-run every
   `refresh_interval` (60 s); a changed
@@ -194,8 +198,8 @@ tunnel exists between two nodes; anything else is classified on its own.
 
 ### Lockdown rules
 
-- mTLS on members + clients, verified against a dedicated CA; no anonymous
-  endpoints.
+- mTLS on the cluster and client listeners, verified against a dedicated CA;
+  no anonymous endpoints.
 - The CA private key lives on the operator's control plane, not on any node.
 - The admin listener is loopback-only plus whatever the proxy is configured to
   expose.
@@ -224,6 +228,8 @@ See `crates/mielofon-otel` for the shared telemetry setup.
 ```
 crates/controller/src/
   main.rs        entrypoint: three listeners, background gossip + prune
+  session.rs     agent sessions on the client listener: hello, command dispatch
+  tool.rs        `tool hello`: a synthetic agent session for the e2e harness
   clock.rs       wall-clock helper
   config.rs      TOML config (node, members, listeners, tls, quality, otel)
   tls.rs         rustls mTLS (server + client) built from a pinned CA
@@ -233,8 +239,8 @@ crates/controller/src/
   kv.rs          LWW per-link store (holds *derived* policy records)
   classifier.rs  background loop: window -> quality/cost -> derived KV
   model.rs       Link, QualityRecord, Quality, ProbeState
-  scheduler.rs   per-tick probe/apply dispatch, agent eviction
-  worker.rs      agent registry + per-agent work queues
+  scheduler.rs   per-tick probe/apply dispatch
+  worker.rs      agent registry: links, session, in-flight commands
   fence.rs       soft-lease probe mutex
   quality.rs     classification + OSPF cost derivation (window-aware)
   api.rs         axum handlers and routers for the three listeners
@@ -244,7 +250,8 @@ crates/controller/src/
 
 ```
 crates/agent/src/
-  main.rs        entrypoint: register, command long-poll, reply dispatch
+  main.rs        entrypoint: runtime, refresher, metrics writer
+  session.rs     controller session: dial the endpoint list, hello, serve streams
   agent.rs       link state + command execution (probe/apply_cost/trace)
   config.rs      UCI config via `ubus call uci get`
   bus.rs         `ubus` CLI wrapper (trait, faked in tests)

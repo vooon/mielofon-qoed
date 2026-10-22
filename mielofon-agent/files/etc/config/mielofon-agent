@@ -1,8 +1,9 @@
 # Mielofon agent configuration (SANITIZED example).
 #
-# The agent pulls commands from the controller over a long-lived mTLS
-# long-poll, reports link measurements, and applies the OSPF cost it is told
-# to apply. All addresses below are placeholders (RFC 5737 / RFC 3849).
+# The agent holds one mTLS QUIC session with a controller, answers the
+# command streams the controller opens on it (link measurements, gated
+# throughput tests, trace lookups) and applies the OSPF cost it is told to
+# apply. All addresses below are placeholders (RFC 5737 / RFC 3849).
 #
 # Links are AUTO-DISCOVERED from BIRD/OSPF, not listed per-link: the agent
 # reads `bird status` (rpcd-mod-bird) and matches the mesh OSPF protocol's
@@ -16,14 +17,19 @@ config agent 'main'
 	option log_level 'notice'
 	# Agent identity. Empty/defaults to the router hostname.
 	option agent_name 'spoke-1'
-	# Controller clients listener (mTLS). Full URL including scheme and port.
-	option controller_url 'https://203.0.113.1:9552'
+	# Controller endpoints: the client listener (QUIC, UDP 9552) of the hubs,
+	# as `host:port` names or literal addresses (`[v6]:port`). Every entry is
+	# resolved to all its addresses and they are tried in order, the last
+	# one that worked first; a name that answers with every hub is one
+	# entry. The port defaults to 9552. Control rides the underlay, never a
+	# mesh tunnel.
+	list endpoint 'hub-a.example.com:9552'
+	list endpoint '203.0.113.1:9552'
+	list endpoint '[2001:db8::1]:9552'
 	# mTLS client identity (deployed by the operator, never shipped):
 	option cacert '/etc/mielofon/ca.pem'
 	option cert    '/etc/mielofon/agent.cer'
 	option key     '/etc/mielofon/agent.key'
-	# Long-poll hold for /v1/agent/command (ms).
-	option command_timeout_ms '30000'
 	# OSPF protocol whose point-to-point interfaces are managed links.
 	# Nodes may run unrelated OSPF instances; they are ignored.
 	option ospf_protocol 'mesh_v3'

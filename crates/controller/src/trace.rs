@@ -1,6 +1,7 @@
 //! End-to-end, ECMP-aware path trace (controller side).
 //!
-//! The controller asks each hop agent (via a `WorkCmd::Trace`) to resolve a
+//! The controller asks each hop agent (a `WorkCmd::Trace` stream on its
+//! session) to resolve a
 //! destination prefix against BIRD (`rpcd-mod-bird route`) and walks the
 //! returned `next_hops`, expanding every equal-cost branch into a DAG:
 //!
@@ -19,10 +20,9 @@
 use crate::model::{LinkKey, ProbeState, Quality};
 use crate::state::AppState;
 use serde::Serialize;
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashSet, VecDeque};
 use std::sync::Mutex;
 use std::time::Instant;
-use tokio::sync::oneshot;
 use tracing::Instrument;
 
 const HOP_CAP: usize = 24;
@@ -144,54 +144,15 @@ pub struct TraceRequest {
     pub prefix: Option<String>,
 }
 
-/// Per-trace bookkeeping: pending one-shot reply channels (keyed by command
-/// id, filled by `/v1/agent/reply`) and the result TTL cache.
+/// Per-trace bookkeeping: the result TTL cache.
 #[derive(Default)]
 pub struct TraceRegistry {
-    pending: Mutex<HashMap<String, oneshot::Sender<TraceHopReply>>>,
     cache: Mutex<Vec<(String, Instant, TraceResult)>>,
 }
 
 impl TraceRegistry {
     pub fn new() -> Self {
         Self::default()
-    }
-
-    /// Register a waiter for a reply to command `id`. The reply is delivered
-    /// by `AgentReply::Trace` in `api::agent_reply`.
-    pub fn register_pending(
-        &self,
-        id: &str,
-    ) -> Result<oneshot::Receiver<TraceHopReply>, TraceError> {
-        let (tx, rx) = oneshot::channel();
-        self.pending
-            .lock()
-            .expect("trace pending lock poisoned")
-            .insert(id.to_string(), tx);
-        Ok(rx)
-    }
-
-    /// Complete a pending trace command reply (called from the agent reply
-    /// path). Returns true when a waiter was found.
-    pub fn complete(&self, id: &str, reply: TraceHopReply) -> bool {
-        if let Some(tx) = self
-            .pending
-            .lock()
-            .expect("trace pending lock poisoned")
-            .remove(id)
-        {
-            let _ = tx.send(reply);
-            return true;
-        }
-        false
-    }
-
-    /// Drop a waiter (reply timed out / agent gone).
-    fn drop_pending(&self, id: &str) {
-        self.pending
-            .lock()
-            .expect("trace pending lock poisoned")
-            .remove(id);
     }
 
     fn cache_get(&self, from: &str, prefix: &str) -> Option<TraceResult> {
@@ -257,7 +218,7 @@ pub async fn run_trace(state: &AppState, req: TraceRequest) -> Result<TraceResul
 
 /// BFS over the mesh's per-hop route resolutions. Never recurses and awaits each
 /// hop's reply before expanding, so at most one `trace` command per target is
-/// in flight and the agent queues cannot be flooded.
+/// in flight.
 async fn walk(state: &AppState, from: &str, to: Option<String>, prefix: &str) -> TraceResult {
     let mut edges: Vec<TraceEdge> = Vec::new();
     let mut visited: HashSet<String> = HashSet::new();
@@ -387,42 +348,7 @@ async fn dispatch_hop(
     if !state.workers.has_agent(agent) {
         return Err(format!("agent '{agent}' is not registered"));
     }
-
-    let id = uuid::Uuid::new_v4().to_string();
-    let rx = state
-        .trace
-        .register_pending(&id)
-        .map_err(|_| "internal".to_string())?;
-
-    let cmd = crate::worker::WorkCmd::Trace {
-        id: id.clone(),
-        target: target.to_string(),
-        traceparent: None,
-    };
-    // Push to the FRONT of the agent queue: trace hops must not wait behind a
-    // 2-minute netperf/throughput probe, or the per-hop timeout would expire
-    // while the command is merely queued.
-    if !state.workers.push_front(agent, cmd) {
-        state.trace.drop_pending(&id);
-        return Err(format!("cannot queue trace for '{agent}'"));
-    }
-
-    let span = tracing::info_span!("trace.hop", agent = %agent, target = %target);
-    match tokio::time::timeout(HOP_TIMEOUT, rx).instrument(span).await {
-        Ok(Ok(reply)) => {
-            tracing::info!(
-                agent = %agent,
-                code = reply.code,
-                routes = reply.routes.len(),
-                "trace hop resolved"
-            );
-            Ok(reply)
-        }
-        Ok(Err(_)) | Err(_) => {
-            state.trace.drop_pending(&id);
-            Err(format!("hop '{agent}' unanswered (timeout)"))
-        }
-    }
+    crate::session::request_trace(state, agent, target, HOP_TIMEOUT).await
 }
 
 /// The registered peer reachable from `node` over egress `iface`. Link records'
@@ -501,7 +427,37 @@ mod tests {
     use super::*;
     use crate::config::Config;
     use crate::model::QualityRecord;
+    use crate::session::testing::{connect, Answer};
     use crate::worker::WorkCmd;
+    use mielofon_proto::AgentReply;
+    use std::sync::Arc;
+
+    type Route = Arc<dyn Fn(&str, &str) -> TraceHopReply + Send + Sync>;
+
+    /// Attach a fake session to every registered agent that answers trace
+    /// commands from `route(agent, target)`.
+    fn wire(state: &AppState, route: Route) {
+        for name in state.workers.agents() {
+            let links = state.workers.links_of(&name);
+            let lb = state.workers.loopback(&name);
+            let route = route.clone();
+            let agent = name.clone();
+            connect(state, &name, links, lb.as_deref(), move |cmd| match cmd {
+                WorkCmd::Trace { id, target, .. } => {
+                    let r = route(&agent, target);
+                    Answer::Reply(AgentReply::Trace {
+                        agent: r.agent,
+                        id: id.clone(),
+                        traceparent: None,
+                        prefix: r.prefix,
+                        code: r.code,
+                        routes: r.routes,
+                    })
+                }
+                _ => Answer::Silent,
+            });
+        }
+    }
 
     /// Register `agents`: (name, loopback, owned links).
     fn stub_state(agents: &[(&str, Option<&str>, &[LinkKey])]) -> AppState {
@@ -541,54 +497,21 @@ mod tests {
         state.kv.put(LinkKey::new(from, to, iface), rec);
     }
 
-    /// Drive the walker from a fake BIRD route table, completing each queued
-    /// `trace` command like `/v1/agent/reply` would. `to` is the destination
-    /// node name the request resolves via the registry.
+    /// Drive the walker from a fake BIRD route table: every registered agent
+    /// answers its trace streams from `route`. `to` is the destination node
+    /// name the request resolves via the registry.
     async fn drive(
         state: &AppState,
         to: &str,
         route: impl Fn(&str, &str) -> TraceHopReply + Send + Sync + 'static,
     ) -> TraceResult {
+        wire(state, Arc::new(route));
         let cmd = TraceRequest {
             from: "spoke-1".into(),
             to: Some(to.to_string()),
             prefix: None,
         };
-        let walker = tokio::spawn({
-            let state = state.clone();
-            async move { run_trace(&state, cmd).await }
-        });
-
-        loop {
-            let drained: Vec<(String, Vec<WorkCmd>)> = state
-                .workers
-                .agents()
-                .into_iter()
-                .map(|n| (n.clone(), state.workers.drain(&n).unwrap_or_default()))
-                .filter(|(_, c)| !c.is_empty())
-                .collect();
-
-            if drained.is_empty() {
-                if walker.is_finished() {
-                    break;
-                }
-                tokio::task::yield_now().await;
-                continue;
-            }
-
-            for (agent, cmds) in drained {
-                for cmd in cmds {
-                    if let WorkCmd::Trace { id, target, .. } = cmd {
-                        state.trace.complete(&id, route(&agent, &target));
-                    }
-                }
-            }
-        }
-
-        walker
-            .await
-            .expect("walker task panicked")
-            .expect("trace failed")
+        run_trace(state, cmd).await.expect("trace failed")
     }
 
     #[tokio::test]
