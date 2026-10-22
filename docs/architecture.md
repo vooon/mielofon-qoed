@@ -147,18 +147,23 @@ mTLS identity (`/etc/mielofon/agent.{key,cer}` + `ca.pem`) and a single
 The fence is owned entirely by the controller scheduler. A lease has a TTL and
 token, is keyed by directed link, and the controller releases it when the
 corresponding reply arrives (or at once, when the command could not be
-queued). The agent itself runs one throughput test at a time per node and
-skips the test while the link carries traffic above `quiet_max_mbps`, so the
-scheduler issues at most one throughput probe per agent at a time: a link
-whose agent still holds a lease on another link stays due and is issued on
-the tick after that lease is released.
+queued). A test occupies **both endpoints**: the `from` node runs the iperf3
+client and the `to` node's single iperf3 server serves it, and a node busy in
+either role cannot take part in another test. The lease is therefore granted
+only when neither endpoint is in a live lease: `hub-a→hub-b` and
+`hub-c→hub-d` test concurrently, while `node-0→hub-b` waits for
+`node-0→hub-c` (same client) and for `hub-a→hub-b` (same server) alike. A
+link that cannot get the lease stays due and is issued on the tick after the
+blocking lease is released. The agent additionally skips the test while the
+link carries traffic above `quiet_max_mbps`.
 
-> Known limitation: the fence lives per controller process (in-memory) and
-> per directed link. The two halves of a tunnel, owned by agents registered
-> at different members, can therefore test at the same time; the utilisation
-> gate catches most overlaps, the rest are tolerated (eventual consistency)
-> and reported as `conflict`. Moving the lease into the replicated gossip
-> store so the fence is truly cluster-global is a future step.
+> Known limitation: the fence lives per controller process (in-memory).
+> Links owned by agents registered at different members are fenced
+> separately, so two members can start tests that share a node; the
+> utilisation gate catches most overlaps, the rest are tolerated (eventual
+> consistency) and reported as `conflict`. Moving the lease into the
+> replicated gossip store so the fence is truly cluster-global is a future
+> step.
 
 ### Quality classification
 

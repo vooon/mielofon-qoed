@@ -3,10 +3,10 @@
 //! The controller is the responsible party for whole-mesh coordination. On
 //! every tick it issues, per owned link:
 //!   - always-on probe work on a fixed cadence;
-//!   - gated throughput probe work only when the link's fence lease is free
-//!     (acquiring the lease here, before dispatch) and the agent holds no
-//!     other throughput lease — it runs one iperf3 test at a time, so a
-//!     second command in the same tick would only come back `busy`;
+//!   - gated throughput probe work only when both endpoints of the link are
+//!     free of other tests (acquiring the fence lease here, before dispatch):
+//!     a node runs one `iperf3 -c` and serves one `iperf3 -s` at a time, so
+//!     tests on disjoint node pairs run concurrently and the rest wait;
 //!   - `apply_cost` when the derived cost differs from what the agent last was
 //!     told to apply (or a failed apply is due for a retry).
 //!
@@ -66,16 +66,15 @@ fn plan_tick(state: &AppState) {
             }
         }
 
-        // Throughput tier (intrusive) — only when the fence is free and the
-        // agent is not already running a test on another of its links. A
-        // skipped link is not stamped, so it stays due and is picked up on
-        // the tick after that lease is released.
+        // Throughput tier (intrusive) — only when neither endpoint is in
+        // another test (the fence is node-level). A link that cannot get the
+        // lease is not stamped, so it stays due and is picked up on the tick
+        // after the blocking lease is released.
         if state
             .workers
             .probe_due(&agent, &link, Tier::Throughput, now, THROUGHPUT_INTERVAL)
-            && !state.fence.held_by(&agent, now)
         {
-            if let Ok(lease) = state.fence.acquire(&agent, &link_id, FENCE_TTL_SECS) {
+            if let Ok(lease) = state.fence.acquire(&agent, &link, FENCE_TTL_SECS) {
                 let span = tracing::info_span!("agent.command", agent=%agent, tier="throughput", link=%link_id);
                 let traceparent = span.in_scope(crate::tracectx::current_traceparent);
                 let cmd = WorkCmd::Probe {
@@ -183,5 +182,43 @@ mod tests {
         let second = throughput_links(&state.workers.drain("hub-a").unwrap_or_default());
         assert_eq!(second.len(), 1);
         assert_ne!(second, first);
+    }
+
+    #[test]
+    fn tests_run_concurrently_only_on_disjoint_node_pairs() {
+        let state = AppState::new(Config::default());
+        // Four hubs each own one link; two pairs are disjoint, the spoke's two
+        // links both end on hubs already in a test.
+        for (agent, to) in [("hub-a", "hub-b"), ("hub-c", "hub-d")] {
+            state.workers.register(
+                agent,
+                vec![LinkKey::new(agent, to, format!("awg_int_{to}"))],
+                None,
+            );
+        }
+        state.workers.register(
+            "node-0",
+            vec![
+                LinkKey::new("node-0", "hub-b", "awg_hub_b"),
+                LinkKey::new("node-0", "hub-d", "awg_hub_d"),
+            ],
+            None,
+        );
+        // Order of issue depends on registry iteration; what matters is the
+        // invariant: no node in two tests, and every free pair is used.
+        plan_tick(&state);
+        let leases = state.fence.leases();
+        let mut nodes: Vec<String> = leases
+            .iter()
+            .flat_map(|l| [l.from.clone(), l.to.clone()])
+            .collect();
+        let n = nodes.len();
+        nodes.sort();
+        nodes.dedup();
+        assert_eq!(nodes.len(), n, "a node is in two tests: {leases:?}");
+        assert_eq!(leases.len(), 2, "{leases:?}");
+        // Whatever was issued, nothing else fits until something is released.
+        plan_tick(&state);
+        assert_eq!(state.fence.leases().len(), 2);
     }
 }
