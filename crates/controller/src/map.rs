@@ -49,7 +49,7 @@ pub struct GraphLink {
 pub fn graph_part(state: &AppState) -> (Vec<GraphNode>, Vec<GraphLink>) {
     let mut nodes: BTreeMap<String, GraphNode> = BTreeMap::new();
 
-    for name in state.cfg.members.keys() {
+    for name in state.cfg.members.keys().filter(|n| state.cfg.is_hub(n)) {
         nodes.insert(
             name.clone(),
             GraphNode {
@@ -66,7 +66,7 @@ pub fn graph_part(state: &AppState) -> (Vec<GraphNode>, Vec<GraphLink>) {
             nodes.entry(id.clone()).or_insert_with(|| GraphNode {
                 id: id.clone(),
                 label: id.clone(),
-                group: if state.cfg.members.contains_key(id) {
+                group: if state.cfg.is_hub(id) {
                     "hub".to_string()
                 } else {
                     "spoke".to_string()

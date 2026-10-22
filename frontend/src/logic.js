@@ -27,6 +27,35 @@ export function qualityWidth(q) {
 	return 1;
 }
 
+// Hub→spoke edges are the mesh's leaves (costed out of transit by the
+// controller); they are drawn lighter so the hub core stays readable.
+export function isHubSpokeLink(link, hubs) {
+	return hubs.has(link.from) && !hubs.has(link.to);
+}
+
+// Deterministic positions: hubs on an inner ring, spokes on an outer ring,
+// both in name order, so the map looks the same on every load and never
+// needs physics. `existing` keeps nodes where they already are (dragged or
+// placed earlier); only new nodes get ring slots.
+export function ringLayout(nodes, existing = {}, inner = 220, outer = 460) {
+	const byName = (a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0);
+	const hubs = nodes.filter(n => n.group === 'hub').sort(byName);
+	const spokes = nodes.filter(n => n.group !== 'hub').sort(byName);
+	const out = {};
+	const place = (list, radius, phase) =>
+		list.forEach((n, i) => {
+			if (existing[n.id]) {
+				out[n.id] = existing[n.id];
+				return;
+			}
+			const a = phase + (2 * Math.PI * i) / Math.max(list.length, 1);
+			out[n.id] = { x: Math.round(radius * Math.cos(a)) || 0, y: Math.round(radius * Math.sin(a)) || 0 };
+		});
+	place(hubs, hubs.length === 1 ? 0 : inner, -Math.PI / 2);
+	place(spokes, outer, -Math.PI / 2 + Math.PI / Math.max(spokes.length, 1));
+	return out;
+}
+
 export function isBrokenLink(link) {
 	// Busy is "no measurement while the link is in use", never degraded — it is
 	// surfaced separately (state column / chips), not drawn as broken.

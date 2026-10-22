@@ -7,7 +7,47 @@ import {
 	sortLinks,
 	traceRows,
 	cellText,
+	ringLayout,
+	isHubSpokeLink,
 } from './logic';
+
+describe('ringLayout', () => {
+	const nodes = [
+		{ id: 'hub-b', group: 'hub' },
+		{ id: 'hub-a', group: 'hub' },
+		{ id: 'node-1', group: 'spoke' },
+		{ id: 'node-0', group: 'spoke' },
+	];
+	it('puts hubs on the inner ring and spokes on the outer one, in name order', () => {
+		const pos = ringLayout(nodes, {}, 100, 200);
+		const r = p => Math.round(Math.hypot(p.x, p.y));
+		expect(r(pos['hub-a'])).toBe(100);
+		expect(r(pos['hub-b'])).toBe(100);
+		expect(r(pos['node-0'])).toBe(200);
+		expect(r(pos['node-1'])).toBe(200);
+		// hub-a takes the first slot (top), regardless of input order.
+		expect(pos['hub-a']).toEqual({ x: 0, y: -100 });
+		expect(pos['hub-a']).not.toEqual(pos['hub-b']);
+		expect(pos['node-0']).not.toEqual(pos['node-1']);
+	});
+	it('keeps nodes that already have a position', () => {
+		const pos = ringLayout(nodes, { 'hub-a': { x: 7, y: 9 } }, 100, 200);
+		expect(pos['hub-a']).toEqual({ x: 7, y: 9 });
+		expect(Math.round(Math.hypot(pos['hub-b'].x, pos['hub-b'].y))).toBe(100);
+	});
+	it('centres a lone hub', () => {
+		expect(ringLayout([{ id: 'hub-a', group: 'hub' }])['hub-a']).toEqual({ x: 0, y: 0 });
+	});
+});
+
+describe('isHubSpokeLink', () => {
+	const hubs = new Set(['hub-a', 'hub-b']);
+	it('is true only from a hub towards a non-hub', () => {
+		expect(isHubSpokeLink({ from: 'hub-a', to: 'node-0' }, hubs)).toBe(true);
+		expect(isHubSpokeLink({ from: 'node-0', to: 'hub-a' }, hubs)).toBe(false);
+		expect(isHubSpokeLink({ from: 'hub-a', to: 'hub-b' }, hubs)).toBe(false);
+	});
+});
 
 // ── colors / widths ──────────────────────────────────────────────────
 
