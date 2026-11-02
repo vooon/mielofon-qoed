@@ -147,7 +147,10 @@ mTLS identity (`/etc/mielofon/agent.{key,cer}` + `ca.pem`) and the controller
   rate, jitter and loss) as a child process, one at a time,
   skipped while the link carries more than `quiet_max_mbps`; pings pause
   during the test and a short grace after it, so its self-inflicted queueing
-  is never recorded.
+  is never recorded. The test is being superseded by a passive tier that
+  counts real traffic at both ends of every tunnel (RFC 9341 alternate
+  marking) and a cheap target-rate burst test (RFC 8337); see
+  `docs/passive-quality.md`.
 - **BIRD** is driven through
   [rpcd-mod-bird](https://github.com/vooon/my-openwrt-feed/tree/master/rpcd-mod-bird)
   (`set_ospf_cost`, `route`). All ubus calls run the `ubus` CLI: they are
