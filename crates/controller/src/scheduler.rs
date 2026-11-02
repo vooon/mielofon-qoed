@@ -36,7 +36,9 @@ pub async fn scheduler_loop(state: AppState) {
 /// Whether the passive tier already proved the link good
 /// (`docs/passive-quality.md`, scheduling consequences): a joined block
 /// within `tcp_fresh_secs` carried at least the good class's `tcp_mbps`,
-/// and the measured loss allows that rate too (or is unmeasured).
+/// the measured loss allows that rate too (or is unmeasured), and no
+/// lower test result is still carried — the classifier keeps scoring that
+/// one, and only a new test can replace it.
 fn passive_proof(state: &AppState, link: &LinkKey) -> bool {
     let Some(good) = state.cfg.quality.good.tcp_mbps else {
         return false;
@@ -44,7 +46,9 @@ fn passive_proof(state: &AppState, link: &LinkKey) -> bool {
     let Some(rec) = state.kv.get(link) else {
         return false;
     };
-    rec.mark_rate_mbps.is_some_and(|r| r >= good) && rec.implied_tcp_mbps.is_none_or(|v| v >= good)
+    rec.mark_rate_mbps.is_some_and(|r| r >= good)
+        && rec.implied_tcp_mbps.is_none_or(|v| v >= good)
+        && rec.tcp_mbps.is_none_or(|t| t >= good)
 }
 
 fn plan_tick(state: &AppState) {
@@ -263,6 +267,17 @@ mod tests {
 
         // Loss that caps TCP below the good class: the test runs.
         let state = proven(Some(3.0));
+        let fake = connect(&state, "hub-a", vec![link.clone()], None, hold_throughput);
+        plan_tick(&state);
+        settle().await;
+        assert_eq!(throughput_links(&fake.seen()), vec!["awg_a".to_string()]);
+
+        // A carried test result below the class is still being scored:
+        // only a new test can replace it, so the proof does not skip it.
+        let state = proven(None);
+        let mut rec = state.kv.get(&link).unwrap();
+        rec.tcp_mbps = Some(3.0);
+        state.kv.put(link.clone(), rec);
         let fake = connect(&state, "hub-a", vec![link.clone()], None, hold_throughput);
         plan_tick(&state);
         settle().await;

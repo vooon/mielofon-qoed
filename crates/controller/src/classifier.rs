@@ -192,11 +192,20 @@ pub fn merge_pair(own: &WindowView, rev: &WindowView, mode: PairCost) -> WindowV
     v
 }
 
-/// Passive tier for one owned, paired link: join its blocks with the
-/// reverse half's, fold the summary into `view`, write each newly joined
-/// block's loss/rate back onto its sample, advance the running totals and
-/// note a loss-shape change.
-fn fold_marking(state: &AppState, link: &LinkKey, rev: &LinkKey, view: &mut WindowView, now: u64) {
+/// Passive tier for one paired link: join its blocks with the reverse
+/// half's and fold the summary into `view`. For a link this node owns it
+/// also writes each newly joined block's loss/rate back onto its sample,
+/// advances the running totals and notes a loss-shape change; the reverse
+/// half of an owned link is summarised too (its owner does the writing)
+/// so a symmetric pair merge sees both directions.
+fn fold_marking(
+    state: &AppState,
+    link: &LinkKey,
+    rev: &LinkKey,
+    view: &mut WindowView,
+    now: u64,
+    owned: bool,
+) {
     let cfg = &state.cfg.classifier;
     // One block of slack past the longest horizon so a block that straddles
     // it still joins.
@@ -205,6 +214,20 @@ fn fold_marking(state: &AppState, link: &LinkKey, rev: &LinkKey, view: &mut Wind
     let other = state.tsdb.query(rev, since, u64::MAX).samples;
     let blocks = mark::join(&own, &other);
     if blocks.is_empty() {
+        return;
+    }
+
+    let s = mark::summarize(&blocks, cfg, now);
+    view.mark_loss_pct = s.loss_pct;
+    view.mark_loss_s_pct = s.loss_s_pct;
+    view.mark_loss_l_pct = s.loss_l_pct;
+    view.mark_rate_mbps = s.rate_mbps;
+    view.regime = s.regime;
+    view.implied_tcp_mbps = match (s.loss_pct, view.rtt_ms) {
+        (Some(loss), Some(rtt)) => mark::implied_tcp_mbps(loss, rtt, cfg.loss_model, cfg.mss_bytes),
+        _ => None,
+    };
+    if !owned {
         return;
     }
 
@@ -224,17 +247,6 @@ fn fold_marking(state: &AppState, link: &LinkKey, rev: &LinkKey, view: &mut Wind
                 .append(link, RawSample::block_result(b.ts, loss, b.rate_mbps()));
         }
     }
-
-    let s = mark::summarize(&blocks, cfg, now);
-    view.mark_loss_pct = s.loss_pct;
-    view.mark_loss_s_pct = s.loss_s_pct;
-    view.mark_loss_l_pct = s.loss_l_pct;
-    view.mark_rate_mbps = s.rate_mbps;
-    view.regime = s.regime;
-    view.implied_tcp_mbps = match (s.loss_pct, view.rtt_ms) {
-        (Some(loss), Some(rtt)) => mark::implied_tcp_mbps(loss, rtt, cfg.loss_model, cfg.mss_bytes),
-        _ => None,
-    };
 
     let mut totals = state.classifier.totals.write().expect("classifier lock");
     let t = totals.entry(link.clone()).or_default();
@@ -291,11 +303,12 @@ pub fn classify_once(state: &AppState) {
         .collect();
 
     for (link, rev) in &all_pairs {
-        if !owned.contains(link) {
+        let own = owned.contains(link);
+        if !own && !owned.contains(rev) {
             continue;
         }
         if let Some(view) = views.get_mut(link) {
-            fold_marking(state, link, rev, view, now);
+            fold_marking(state, link, rev, view, now, own);
         }
     }
 
@@ -588,6 +601,48 @@ mod tests {
         assert_eq!((t.sent_s + t.sent_l, t.lost_s + t.lost_l), (6000, 120));
         assert_eq!(t.regime_changes, 0);
         assert_eq!(t.regime, Some(Regime::Sparse));
+    }
+
+    /// In symmetric pair mode the reverse half's passive loss counts even
+    /// when that half is owned by another member (its blocks arrive by
+    /// replication, its summary is computed here).
+    #[test]
+    fn symmetric_pairing_takes_the_reverse_halfs_passive_loss() {
+        let mut state = state_with(1200, 3600);
+        let cfg = std::sync::Arc::make_mut(&mut state.cfg);
+        cfg.classifier.pair_cost = PairCost::Symmetric;
+        let link = LinkKey::new("hub-a", "hub-b", "awg_hub_b");
+        let rev = LinkKey::new("hub-b", "hub-a", "awg_hub_a");
+        own(&state, &[&link]);
+        let now = crate::clock::now_secs();
+        append_always(&state, &link, now, 30.0);
+        append_always(&state, &rev, now, 30.0);
+        // Own direction clean, the reverse direction losing 2 %.
+        for i in 0..6 {
+            append_block(
+                &state,
+                (&link, &rev),
+                now / 10 - 6 + i,
+                (1000, 1000),
+                (1000, 980),
+            );
+        }
+        classify_once(&state);
+        let rec = state.kv.get(&link).unwrap();
+        assert_eq!(
+            rec.mark_loss_pct,
+            Some(0.0),
+            "the record keeps its own half"
+        );
+        assert_eq!(rec.quality, Some(Quality::Poor), "costed on the worse half");
+        // The reverse half is not written here: it has an owner elsewhere.
+        assert!(state.kv.get(&rev).is_none());
+        assert!(state
+            .tsdb
+            .query(&rev, 0, u64::MAX)
+            .samples
+            .iter()
+            .all(|s| s.mark_loss_pct.is_none()));
     }
 
     #[test]

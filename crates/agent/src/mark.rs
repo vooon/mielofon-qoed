@@ -65,8 +65,11 @@ pub struct ReadOutcome {
 
 #[derive(Default)]
 struct MarkState {
-    /// Previous read of each counter set (baseline for the next delta).
-    last: HashMap<String, SetCounters>,
+    /// Previous read of each counter set, with the block it was read for:
+    /// the baseline for the next delta, valid only for the next block of
+    /// the same colour (`n + 2`). A read that failed or was missed leaves
+    /// the baseline stale, and a delta over it would span two blocks.
+    last: HashMap<String, (u64, SetCounters)>,
 }
 
 pub struct Marker<N> {
@@ -139,31 +142,42 @@ impl<N: Nft> Marker<N> {
 
         let mut out = ReadOutcome::default();
         let mut st = self.state.lock().expect("marker state");
+        // The baseline of this colour is the read of block n − 2. Anything
+        // else (first read, a failed or missed read in between) means the
+        // counters cover more than this block: no block, new baseline.
+        let baseline = |name: &str| -> Option<&SetCounters> {
+            let (read_for, prev) = st.last.get(name)?;
+            (*read_for + 2 == n).then_some(prev)
+        };
+        if names.iter().any(|name| baseline(name).is_none()) {
+            if let Some(stale) = names.iter().find_map(|name| st.last.get(name)) {
+                tracing::debug!(
+                    "marking: block {n}: baseline is from block {}, block skipped",
+                    stale.0
+                );
+            }
+        }
         // The table was rebuilt since the previous read of this colour: the
         // counters restarted somewhere inside the block.
-        let rebuilt = names.iter().any(|name| {
-            st.last
-                .get(name)
-                .is_some_and(|prev| prev.handle != sets[name].handle)
-        });
+        let rebuilt = names
+            .iter()
+            .any(|name| baseline(name).is_some_and(|prev| prev.handle != sets[name].handle));
 
         for iface in ifaces {
             // Δ(packets, bytes) of one set since its previous read; `None`
             // without a baseline (first read, or the element is new).
             let delta = |name: &str| -> Option<(u64, u64)> {
                 let now = sets[name].elems.get(iface)?;
-                let prev = st.last.get(name)?.elems.get(iface)?;
+                let prev = baseline(name)?.elems.get(iface)?;
                 Some((now.0.checked_sub(prev.0)?, now.1.checked_sub(prev.1)?))
             };
             let tx_s = delta(&names[0]);
             let tx_l = delta(&names[1]);
             let rx_s = delta(&names[2]);
             let rx_l = delta(&names[3]);
-            let had_baseline = names.iter().all(|name| {
-                st.last
-                    .get(name)
-                    .is_some_and(|prev| prev.elems.contains_key(iface))
-            });
+            let had_baseline = names
+                .iter()
+                .all(|name| baseline(name).is_some_and(|prev| prev.elems.contains_key(iface)));
             if !had_baseline {
                 continue;
             }
@@ -207,7 +221,7 @@ impl<N: Nft> Marker<N> {
         // counting the block in progress.
         for name in names {
             let cur = sets[&name].clone();
-            st.last.insert(name, cur);
+            st.last.insert(name, (n, cur));
         }
         // Forget sets the include no longer has (keeps the map bounded if
         // the table name changes under us).
@@ -341,6 +355,39 @@ mod tests {
                 resets: 0
             }
         );
+        assert_eq!(take_blocks(&m.queue, "awg_hub_a")[0].tx_pkts_s, 10);
+    }
+
+    /// A missed or failed read leaves a baseline from an older block: the
+    /// delta over it would cover two blocks, so the next read only sets a
+    /// fresh baseline.
+    #[tokio::test]
+    async fn a_stale_baseline_yields_no_block() {
+        let c1 = a_counts("awg_hub_a", 1);
+        let c2 = a_counts("awg_hub_a", 3);
+        let c3 = a_counts("awg_hub_a", 4);
+        let m = marker(vec![
+            listing(7, &as_refs(&c1)),
+            listing(7, &as_refs(&c2)),
+            listing(7, &as_refs(&c3)),
+        ]);
+        // The read of block 12 fails (an nft timeout): the fake serves the
+        // listing meant for it to block 14 instead.
+        m.nft
+            .listings
+            .lock()
+            .unwrap()
+            .insert(1, Err("nft list sets: timed out".into()));
+        let ifaces = vec!["awg_hub_a".to_string()];
+        m.read(&ifaces, 10, false).await.unwrap();
+        assert!(m.read(&ifaces, 12, false).await.is_err());
+        // Block 14: the baseline is block 10's — two blocks of counts.
+        let out = m.read(&ifaces, 14, false).await.unwrap();
+        assert_eq!(out, ReadOutcome::default());
+        assert!(take_blocks(&m.queue, "awg_hub_a").is_empty());
+        // Block 16 has a proper baseline again.
+        let out = m.read(&ifaces, 16, false).await.unwrap();
+        assert_eq!(out.blocks, 1);
         assert_eq!(take_blocks(&m.queue, "awg_hub_a")[0].tx_pkts_s, 10);
     }
 
