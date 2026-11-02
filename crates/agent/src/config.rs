@@ -62,6 +62,13 @@ pub struct Config {
     /// Link re-discovery cadence (`bird status` + netifd over ubus, and the
     /// applied-cost drift check that rides on the same snapshot).
     pub refresh_interval: Duration,
+    /// Passive tier (`mark.rs`): alternate marking of every managed tunnel.
+    pub mark_enabled: bool,
+    /// Block length of the marking; both ends of a tunnel must agree.
+    pub mark_block: Duration,
+    /// nftables table holding the marking sets, `family name`. The default
+    /// is fw4's own table, where the package's include puts them.
+    pub mark_table: String,
     /// Syslog-style level: debug, info, notice, warning, err.
     pub log_level: String,
     /// OTLP/HTTP collector (`http(s)://host:port`); empty disables OTEL.
@@ -208,6 +215,9 @@ impl Config {
                 num(main, "prometheus_interval", 20_u64).max(1),
             ),
             refresh_interval: Duration::from_secs(num(main, "refresh_interval", 60_u64).max(10)),
+            mark_enabled: flag(main, "mark_enabled", true),
+            mark_block: Duration::from_secs(num(main, "mark_block_secs", 10_u64).clamp(2, 600)),
+            mark_table: opt(main, "mark_table").unwrap_or("inet fw4").to_string(),
             log_level: opt(main, "log_level").unwrap_or("notice").to_string(),
             otel_endpoint: opt(main, "otel_endpoint").unwrap_or("").to_string(),
             otel_traces: flag(main, "otel_traces", true),
@@ -280,6 +290,9 @@ mod tests {
         assert_eq!(c.quiet_max_mbps, 15.0, "malformed number falls back");
         assert_eq!(c.tcp_duration, Duration::from_secs(6));
         assert_eq!(c.tcp_rate_mbps, 20.0, "default cap");
+        assert!(c.mark_enabled, "marking is on by default");
+        assert_eq!(c.mark_block, Duration::from_secs(10));
+        assert_eq!(c.mark_table, "inet fw4");
         assert_eq!(c.ospf_protocol, "mesh_v3");
         assert_eq!(c.ifaces, vec!["awg_*".to_string()], "default glob");
         assert_eq!(c.excludes, vec!["awg_legacy".to_string()]);

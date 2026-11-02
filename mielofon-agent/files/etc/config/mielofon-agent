@@ -69,6 +69,16 @@ config agent 'main'
 	# disables the leg; `udp_port` unset reuses iperf_port.
 	option udp_rate_mbps '20'
 	# option udp_port '5202'
+	# Passive tier: alternate marking (RFC 9341) of every managed tunnel.
+	# The package's fw4 include (/usr/share/nftables.d/table-post/mielofon.nft)
+	# colours the inner DSCP bit 0 per block and counts per colour at both
+	# ends; the agent flips the colour and reads the counters every
+	# mark_block_secs (both ends of a tunnel must use the same value; the
+	# controller joins the two halves by block number). `mark_table` is
+	# where the include's sets live.
+	option mark_enabled '1'
+	option mark_block_secs '10'
+	# option mark_table 'inet fw4'
 	# Link re-discovery cadence (seconds, min 10): `bird status` and netifd
 	# over ubus/ucode, plus the check that BIRD still carries the applied
 	# costs (a config redeploy resets them). Each run costs rpcd work, so

@@ -7,6 +7,7 @@ use crate::bus::Bus;
 use crate::config::Config;
 use crate::discover::{self, Link};
 use crate::icmp::{Gate, Prober};
+use crate::mark::{take_blocks, BlockQueue};
 use crate::metrics::{Counters, LastThroughput, Metrics};
 use crate::throughput::Throughput;
 use mielofon_proto::{AgentReply, LinkKey, ProbeState, RegisterReq, Tier, WorkCmd};
@@ -37,6 +38,12 @@ pub struct Agent<B> {
     pub prober: Prober,
     pub throughput: Throughput,
     pub metrics: Metrics,
+    /// Pauses pings around throughput tests; the block task samples it to
+    /// flag blocks a test overlapped.
+    pub gate: Arc<Gate>,
+    /// Finished marking blocks per interface, filled by the block task and
+    /// drained into always-probe replies.
+    pub blocks: BlockQueue,
     /// Delay between `set_ospf_cost` retries while BIRD is reconfiguring.
     pub cost_retry: Duration,
     state: Mutex<NodeState>,
@@ -69,9 +76,11 @@ impl<B: Bus> Agent<B> {
         throughput.udp_port = cfg.udp_port;
         throughput.udp_rate_mbps = cfg.udp_rate_mbps;
         Agent {
-            prober: Prober::new(cfg.ping_interval, cfg.ping_window, gate),
+            prober: Prober::new(cfg.ping_interval, cfg.ping_window, gate.clone()),
             throughput,
             metrics: Metrics::default(),
+            gate,
+            blocks: BlockQueue::default(),
             cost_retry: Duration::from_secs(2),
             state: Mutex::new(NodeState::default()),
             apply_lock: tokio::sync::Mutex::new(()),
@@ -156,6 +165,12 @@ impl<B: Bus> Agent<B> {
         LinkKey::new(&self.cfg.agent, &l.to, &l.interface)
     }
 
+    /// The managed tunnel interfaces (the block task's set membership).
+    pub fn interfaces(&self) -> Vec<String> {
+        let st = self.state.lock().expect("agent state");
+        st.links.iter().map(|l| l.interface.clone()).collect()
+    }
+
     /// The managed links as the controller knows them.
     pub fn link_keys(&self) -> Vec<LinkKey> {
         let st = self.state.lock().expect("agent state");
@@ -219,6 +234,7 @@ impl<B: Bus> Agent<B> {
                         token,
                         note: Some(note),
                         traceparent,
+                        blocks: Vec::new(),
                     });
                 };
 
@@ -305,6 +321,13 @@ impl<B: Bus> Agent<B> {
                     token,
                     note,
                     traceparent,
+                    // Finished marking blocks ride on the always tier only;
+                    // a throughput reply is fenced and may be late.
+                    blocks: if tier == Tier::Always {
+                        take_blocks(&self.blocks, &l.interface)
+                    } else {
+                        Vec::new()
+                    },
                 })
             }
 
@@ -460,6 +483,51 @@ mod tests {
             panic!("expected a probe reply");
         };
         assert_eq!(link, key);
+    }
+
+    #[tokio::test]
+    async fn always_reply_drains_the_links_marking_blocks() {
+        let a = agent();
+        a.refresh().await;
+        {
+            let mut q = a.blocks.lock().unwrap();
+            q.entry("awg_hub".into())
+                .or_default()
+                .push_back(mielofon_proto::MarkBlock {
+                    n: 7,
+                    tx_pkts_s: 1,
+                    ..Default::default()
+                });
+            q.entry("awg_other".into())
+                .or_default()
+                .push_back(mielofon_proto::MarkBlock {
+                    n: 8,
+                    ..Default::default()
+                });
+        }
+        let probe = |id: &str, tier| WorkCmd::Probe {
+            id: id.into(),
+            tier,
+            token: Some("t".into()),
+            link: LinkKey::new("node-0", "hub.example.com", "awg_hub"),
+            traceparent: None,
+        };
+        let AgentReply::Probe { blocks, .. } =
+            a.execute(probe("always/1", Tier::Always)).await.unwrap()
+        else {
+            panic!("expected a probe reply");
+        };
+        assert_eq!(blocks.len(), 1, "only this link's blocks");
+        assert_eq!(blocks[0].n, 7);
+        // Drained: the next reply carries nothing.
+        let AgentReply::Probe { blocks, .. } =
+            a.execute(probe("always/2", Tier::Always)).await.unwrap()
+        else {
+            panic!("expected a probe reply");
+        };
+        assert!(blocks.is_empty());
+        // The other interface's queue is untouched.
+        assert_eq!(a.blocks.lock().unwrap()["awg_other"].len(), 1);
     }
 
     #[tokio::test]

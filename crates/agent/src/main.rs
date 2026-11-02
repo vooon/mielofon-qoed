@@ -12,7 +12,9 @@ mod bus;
 mod config;
 mod discover;
 mod icmp;
+mod mark;
 mod metrics;
+mod nft;
 mod session;
 mod throughput;
 mod tls;
@@ -22,12 +24,16 @@ use agent::Agent;
 use anyhow::{Context, Result};
 use bus::UbusCli;
 use config::Config;
+use mark::Marker;
+use metrics::Counters;
 use mielofon_proto::LinkKey;
 use mielofon_transport::Dialer;
+use nft::NftCli;
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::signal::unix::{signal, SignalKind};
 use tokio::sync::Notify;
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 
 /// Map the UCI syslog-style level onto a tracing filter. `debug` applies to
 /// the agent's own code; dependencies stay at `info` so the log is not
@@ -110,6 +116,73 @@ impl Runtime {
             self.write_metrics();
         }
     }
+
+    /// The passive tier's clock: at every block boundary switch the colour
+    /// of all managed links, half a block later read the block that ended.
+    /// Failures (the include not loaded, nft missing) are counted and
+    /// logged at a low rate; the loop never gives up, since a firewall
+    /// reload or a package install fixes them without a restart.
+    async fn marker_loop(self: Arc<Self>, marker: Marker<NftCli>) {
+        let block = marker.block;
+        let c = &self.agent.metrics.counters;
+        // Log the first occurrence of an error and then one in sixty (ten
+        // minutes at the default block), so a missing include is visible
+        // but does not flood syslog.
+        let mut last_err: Option<String> = None;
+        let mut errors = 0_u32;
+        let report = |last_err: &mut Option<String>, errors: &mut u32, e: anyhow::Error| {
+            let text = format!("{e:#}");
+            *errors += 1;
+            if last_err.as_deref() != Some(&text) || *errors % 60 == 1 {
+                warn!("{text}");
+            }
+            *last_err = Some(text);
+        };
+        loop {
+            let now = unix_now_f64();
+            let n = marker.block_of(now);
+            let boundary = (n + 1) as f64 * block.as_secs_f64();
+            tokio::time::sleep(Duration::from_secs_f64((boundary - now).max(0.0))).await;
+
+            // Block n ended, n+1 begins.
+            let ifaces = self.agent.interfaces();
+            let mut under_test = self.agent.gate.paused();
+            if let Err(e) = marker.flip(&ifaces, n + 1).await {
+                Counters::inc(&c.mark_errors);
+                report(&mut last_err, &mut errors, e);
+            }
+            tokio::time::sleep(block / 2).await;
+            under_test |= self.agent.gate.paused();
+            match marker.read(&ifaces, n, under_test).await {
+                Ok(out) => {
+                    for _ in 0..out.blocks {
+                        Counters::inc(&c.mark_blocks);
+                    }
+                    for _ in 0..out.resets {
+                        Counters::inc(&c.mark_resets);
+                    }
+                    if out.blocks > 0 {
+                        debug!(
+                            "marking: block {n}: {} links, {} reset",
+                            out.blocks, out.resets
+                        );
+                    }
+                    last_err = None;
+                }
+                Err(e) => {
+                    Counters::inc(&c.mark_errors);
+                    report(&mut last_err, &mut errors, e);
+                }
+            }
+        }
+    }
+}
+
+fn unix_now_f64() -> f64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs_f64()
 }
 
 async fn run() -> Result<()> {
@@ -142,6 +215,20 @@ async fn run() -> Result<()> {
     tokio::spawn(rt.clone().refresher());
     if rt.agent.cfg.prometheus_textfile.is_some() {
         tokio::spawn(rt.clone().metrics_writer());
+    }
+    if rt.agent.cfg.mark_enabled {
+        let marker = Marker::new(
+            NftCli::default(),
+            &rt.agent.cfg.mark_table,
+            rt.agent.cfg.mark_block,
+            rt.agent.blocks.clone(),
+        );
+        info!(
+            "marking: {} s blocks in {}",
+            rt.agent.cfg.mark_block.as_secs(),
+            rt.agent.cfg.mark_table
+        );
+        tokio::spawn(rt.clone().marker_loop(marker));
     }
 
     let mut term = signal(SignalKind::terminate()).context("SIGTERM handler")?;

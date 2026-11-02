@@ -147,10 +147,18 @@ mTLS identity (`/etc/mielofon/agent.{key,cer}` + `ca.pem`) and the controller
   rate, jitter and loss) as a child process, one at a time,
   skipped while the link carries more than `quiet_max_mbps`; pings pause
   during the test and a short grace after it, so its self-inflicted queueing
-  is never recorded. The test is being superseded by a passive tier that
-  counts real traffic at both ends of every tunnel (RFC 9341 alternate
-  marking) and a cheap target-rate burst test (RFC 8337); see
-  `docs/passive-quality.md`.
+  is never recorded.
+- **Passive tier** (`docs/passive-quality.md`): the package ships an fw4
+  nftables include that colours DSCP bit 0 of the inner header per
+  `mark_block_secs` block and counts packets per colour, direction and
+  length band in sets with per-element counters. The agent writes no rules:
+  every block boundary it applies one transaction asserting set membership
+  and the colour map, half a block later it reads the counters (`nft -j
+  list sets`, one call) and queues the finished block per interface; the
+  next always-probe reply carries them. The controller joins one end's
+  `tx` with the other end's `rx` into real loss at real rate, for zero
+  probe bytes. The classifier side of this lands with the second half of
+  phase 1; a cheap target-rate burst test (RFC 8337) follows in phase 2.
 - **BIRD** is driven through
   [rpcd-mod-bird](https://github.com/vooon/my-openwrt-feed/tree/master/rpcd-mod-bird)
   (`set_ospf_cost`, `route`). All ubus calls run the `ubus` CLI: they are
@@ -285,6 +293,8 @@ crates/agent/src/
   icmp.rs        per-link ICMPv6 ping tasks, kernel RX timestamps
   window.rs      rolling rtt/jitter/loss statistics
   throughput.rs  gated `iperf3 -J` upload test + utilisation sample
+  nft.rs         `nft` CLI wrapper (trait, faked in tests), set/counter parsing
+  mark.rs        alternate-marking block task: colour flip, counter deltas, queue
   bird.rs        rpcd-mod-bird `set_ospf_cost` / `route`
   client.rs      mTLS JSON client to the controller
   metrics.rs     Prometheus textfile

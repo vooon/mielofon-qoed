@@ -32,6 +32,11 @@ pub struct Counters {
     pub session_dial_errors: AtomicUsize,
     /// 1 while a controller session is up (a gauge).
     pub session_connected: AtomicUsize,
+    /// Passive tier: finished marking blocks queued, blocks reported as
+    /// reset (counters restarted), and nft calls that failed.
+    pub mark_blocks: AtomicUsize,
+    pub mark_resets: AtomicUsize,
+    pub mark_errors: AtomicUsize,
 }
 
 impl Counters {
@@ -184,6 +189,22 @@ impl Metrics {
             o.line(
                 "mielofon_agent_probe_errors_total",
                 &format!("{{kind=\"{k}\"}}"),
+                get(v),
+            );
+        }
+        o.decl(
+            "mielofon_agent_mark_total",
+            "counter",
+            "Alternate-marking blocks finished, blocks reported reset, nft errors.",
+        );
+        for (k, v) in [
+            ("block", &c.mark_blocks),
+            ("reset", &c.mark_resets),
+            ("error", &c.mark_errors),
+        ] {
+            o.line(
+                "mielofon_agent_mark_total",
+                &format!("{{result=\"{k}\"}}"),
                 get(v),
             );
         }
@@ -377,6 +398,7 @@ mod tests {
             (labels("awg_hub_\"b"), None),
         ]);
         assert!(text.contains("mielofon_agent_commands_total{result=\"received\"} 1"));
+        assert!(text.contains("mielofon_agent_mark_total{result=\"block\"} 0"));
         assert!(text.contains(
             "mielofon_agent_link_rtt_ms{from=\"node-0\",to=\"hub-a\",interface=\"awg_hub_a\"} 12.5"
         ));
