@@ -215,6 +215,21 @@ Written on the command's own stream; every reply echoes the job `id`:
 - A busy link is reported `state: "busy"` (with `util_mbps`) and is never
   classified as degraded. Always-on replies carry the utilisation since the
   previous probe, so a link in use is busy on every tier.
+- Always-on replies also carry `blocks`: the finished alternate-marking
+  blocks of the link since the previous reply (the passive tier,
+  `docs/passive-quality.md`), absent when there are none. Each block is what
+  the reporting node counted on the link's interface during block `n`
+  (`floor(unix_time / mark_block_secs)`): `tx_*` sent, `rx_*` arrived from
+  the peer, packets per length band (`_s` ≤ 1000 bytes `< _l`) and bytes.
+  `reset: true` marks a block whose counters restarted (firewall reload):
+  its numbers are not to be used. `under_test: true` marks a block a
+  throughput test on that node overlapped. The controller joins a block's
+  `tx` with the peer's `rx` for the same `n` into the link's real loss.
+
+```jsonc
+"blocks": [ { "n": 174700000, "tx_pkts_s": 812, "tx_pkts_l": 4105, "tx_bytes": 6012345,
+              "rx_pkts_s": 790, "rx_pkts_l": 3011, "rx_bytes": 4423110 } ]
+```
 - A probe that could not measure (iperf3 failed, unknown interface) adds a
   `note`; the dimensions stay `null`. The controller logs it and counts it in
   `mielofon_probe_failures_total`.

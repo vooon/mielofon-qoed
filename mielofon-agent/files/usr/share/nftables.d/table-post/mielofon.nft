@@ -1,0 +1,69 @@
+# mielofon-agent: alternate marking (RFC 9341) of the mesh tunnels.
+#
+# Included by fw4 into `table inet fw4` on every firewall reload. The agent
+# writes no rules: it only moves interface names between the sets below and
+# rebuilds the colour map every block (docs/passive-quality.md).
+#
+# Colour = DSCP bit 0 of the inner header (the `xxxxx1` local-use pool, so
+# every standard CS/AF/EF codepoint survives an OR / mask). The mark never
+# reaches the carrier: it is encrypted into the tunnel payload and cleared
+# again on the receiving side right after decapsulation.
+
+# Egress colour per managed interface, rebuilt by the agent each block:
+#   "awg_hub_a" : jump mielofon_a    (block n even)
+#   "awg_hub_a" : jump mielofon_b    (block n odd)
+map mf_colour {
+	type ifname : verdict
+}
+
+# Per-element counters: the element is the tunnel interface, the counter is
+# that link's packets/bytes of the colour (a/b), direction (tx = this node
+# sent, rx = arrived from the peer) and length band (s <= 1000 bytes < l).
+# Every managed interface is in all eight; the colour chains decide which
+# tx set a packet hits, the packet's own colour decides the rx set.
+set mf_tx_a_s { type ifname; counter; }
+set mf_tx_a_l { type ifname; counter; }
+set mf_tx_b_s { type ifname; counter; }
+set mf_tx_b_l { type ifname; counter; }
+set mf_rx_a_s { type ifname; counter; }
+set mf_rx_a_l { type ifname; counter; }
+set mf_rx_b_s { type ifname; counter; }
+set mf_rx_b_l { type ifname; counter; }
+
+# Egress: just before encapsulation, after fw4's mangle_postrouting so a QoS
+# rule that sets DSCP runs first.
+chain mielofon_mark {
+	type filter hook postrouting priority mangle + 10; policy accept;
+	oifname vmap @mf_colour
+}
+
+chain mielofon_a {
+	meta length <= 1000 oifname @mf_tx_a_s ip6 dscp set ip6 dscp | 0x01
+	meta length <= 1000 oifname @mf_tx_a_s ip dscp set ip dscp | 0x01
+	meta length > 1000 oifname @mf_tx_a_l ip6 dscp set ip6 dscp | 0x01
+	meta length > 1000 oifname @mf_tx_a_l ip dscp set ip dscp | 0x01
+}
+
+chain mielofon_b {
+	meta length <= 1000 oifname @mf_tx_b_s ip6 dscp set ip6 dscp & 0x3e
+	meta length <= 1000 oifname @mf_tx_b_s ip dscp set ip dscp & 0x3e
+	meta length > 1000 oifname @mf_tx_b_l ip6 dscp set ip6 dscp & 0x3e
+	meta length > 1000 oifname @mf_tx_b_l ip dscp set ip dscp & 0x3e
+}
+
+# Ingress: right after decapsulation, before fw4's mangle_prerouting and any
+# zone filtering (a packet fw4 later drops still crossed the link). The set
+# lookup is the last expression so its per-element counter only ticks when
+# colour and length matched. Colour-A packets are cleaned so the bit never
+# leaves the tunnel.
+chain mielofon_count {
+	type filter hook prerouting priority mangle - 10; policy accept;
+	ip6 dscp & 0x01 == 0x01 meta length <= 1000 iifname @mf_rx_a_s ip6 dscp set ip6 dscp & 0x3e
+	ip6 dscp & 0x01 == 0x01 meta length > 1000 iifname @mf_rx_a_l ip6 dscp set ip6 dscp & 0x3e
+	ip6 dscp & 0x01 == 0x00 meta length <= 1000 iifname @mf_rx_b_s
+	ip6 dscp & 0x01 == 0x00 meta length > 1000 iifname @mf_rx_b_l
+	ip dscp & 0x01 == 0x01 meta length <= 1000 iifname @mf_rx_a_s ip dscp set ip dscp & 0x3e
+	ip dscp & 0x01 == 0x01 meta length > 1000 iifname @mf_rx_a_l ip dscp set ip dscp & 0x3e
+	ip dscp & 0x01 == 0x00 meta length <= 1000 iifname @mf_rx_b_s
+	ip dscp & 0x01 == 0x00 meta length > 1000 iifname @mf_rx_b_l
+}

@@ -169,6 +169,11 @@ pub enum AgentReply {
         /// Echo of the dispatch span's W3C `traceparent`.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         traceparent: Option<String>,
+        /// Finished alternate-marking blocks since the previous reply (the
+        /// passive tier, `docs/passive-quality.md`); always-tier replies
+        /// only, empty when marking is off.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        blocks: Vec<MarkBlock>,
     },
     Applied {
         agent: String,
@@ -198,6 +203,32 @@ pub enum AgentReply {
         #[serde(default)]
         routes: Vec<RouteRep>,
     },
+}
+
+/// One finished alternate-marking block (RFC 9341) of a link, as counted
+/// on the reporting node: `tx_*` is what it sent on the link's interface
+/// during the block, `rx_*` what arrived from the peer on that interface.
+/// The controller joins a block's `tx` with the peer's `rx` for the same
+/// `n` to get the link's real loss. Packets are split at the include's
+/// length threshold into short (`_s`) and long (`_l`) bands.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct MarkBlock {
+    /// Block number: `floor(unix_time / block_secs)`.
+    pub n: u64,
+    pub tx_pkts_s: u64,
+    pub tx_pkts_l: u64,
+    pub tx_bytes: u64,
+    pub rx_pkts_s: u64,
+    pub rx_pkts_l: u64,
+    pub rx_bytes: u64,
+    /// The counters restarted during the block (firewall reload): the
+    /// numbers are not to be trusted and the controller stores the block as
+    /// unmeasured.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub reset: bool,
+    /// A throughput test on this node overlapped the block.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub under_test: bool,
 }
 
 /// One BIRD route from `rpcd-mod-bird route` (passed through untouched).
@@ -293,12 +324,39 @@ mod tests {
             token: None,
             note: None,
             traceparent: None,
+            blocks: Vec::new(),
         };
         let js = serde_json::to_value(&r).unwrap();
         assert_eq!(js["kind"], "probe");
         assert!(js.get("note").is_none());
         assert!(js["rtt_ms"].is_null());
         assert_eq!(js["loss_pct"], 0.0);
+        // No marking → no `blocks` key at all, and an older agent's reply
+        // without it still parses.
+        assert!(js.get("blocks").is_none());
+        let back: AgentReply = serde_json::from_value(js).unwrap();
+        assert!(matches!(back, AgentReply::Probe { blocks, .. } if blocks.is_empty()));
+    }
+
+    #[test]
+    fn mark_blocks_round_trip_with_flags_elided() {
+        let b = MarkBlock {
+            n: 174_700_000,
+            tx_pkts_s: 812,
+            tx_pkts_l: 4105,
+            tx_bytes: 6_012_345,
+            rx_pkts_s: 790,
+            rx_pkts_l: 3011,
+            rx_bytes: 4_423_110,
+            reset: false,
+            under_test: true,
+        };
+        let js = serde_json::to_value(b).unwrap();
+        assert!(js.get("reset").is_none(), "false flags are elided");
+        assert_eq!(js["under_test"], true);
+        assert_eq!(js["n"], 174_700_000_u64);
+        let back: MarkBlock = serde_json::from_value(js).unwrap();
+        assert_eq!(back, b);
     }
 
     #[test]

@@ -338,10 +338,16 @@ pub fn handle_reply(state: &AppState, reply: AgentReply) {
             token,
             note,
             traceparent,
+            blocks,
         } => with_traceparent(traceparent.as_deref(), || {
             // An older agent names the link after its own BIRD decoding.
             let mut link = link;
             link.to = state.workers.canonical_peer(&link.to);
+            if !blocks.is_empty() {
+                // Passive tier (docs/passive-quality.md): the store and the
+                // join land with the controller half of phase 1.
+                debug!(agent, link = %link.id(), n = blocks.len(), "marking blocks received");
+            }
             if let Some(note) = &note {
                 crate::api::PROBE_FAILURES.fetch_add(1, Ordering::Relaxed);
                 warn!(agent, link = %link.id(), id, "probe failed: {note}");

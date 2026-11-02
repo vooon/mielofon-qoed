@@ -21,13 +21,15 @@ define Package/mielofon-agent
   SUBMENU:=Routing and Redirection
   TITLE:=Mielofon node agent (link probing + OSPF cost execution)
   URL:=https://github.com/vooon/mielofon-qoed
-  DEPENDS:=$(RUST_ARCH_DEPENDS) +ubus +rpcd +rpcd-mod-bird +iperf3 +iperf3-server
+  DEPENDS:=$(RUST_ARCH_DEPENDS) +ubus +rpcd +rpcd-mod-bird +iperf3 +iperf3-server +firewall4 +nftables-json
 endef
 
 define Package/mielofon-agent/description
   Mielofon agent: runs on each mesh router, discovers its tunnels from
-  BIRD/OSPF (rpcd-mod-bird), pings them continuously, runs gated iperf3
-  throughput tests, applies the OSPF costs the mielofon-controller decides,
+  BIRD/OSPF (rpcd-mod-bird), pings them continuously, counts real traffic
+  per colour block at both ends of every tunnel (alternate marking through
+  an fw4 nftables include), runs gated iperf3 throughput tests, applies
+  the OSPF costs the mielofon-controller decides,
   and answers its trace lookups. Holds an mTLS QUIC session with a
   controller and answers each command stream on it. Thin executor — no
   scheduling or policy logic of its own.
@@ -65,6 +67,9 @@ define Package/mielofon-agent/install
 
 	$(INSTALL_DIR) $(1)/etc/init.d
 	$(INSTALL_BIN) ./files/etc/init.d/mielofon-agent $(1)/etc/init.d/
+
+	$(INSTALL_DIR) $(1)/usr/share/nftables.d/table-post
+	$(INSTALL_DATA) ./files/usr/share/nftables.d/table-post/mielofon.nft $(1)/usr/share/nftables.d/table-post/
 endef
 
 $(eval $(call RustBinPackage,mielofon-agent))

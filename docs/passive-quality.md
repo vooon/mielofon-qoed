@@ -1,7 +1,9 @@
 # Passive link quality (design, rev 1)
 
-Status: proposed — phase 0 shipped (paced iperf3 TCP leg, configurable
-cadences); phase 1 (this document) not yet implemented.
+Status: in progress — phase 0 shipped (paced iperf3 TCP leg, configurable
+cadences); phase 1 agent half shipped (fw4 include, block task, `blocks`
+on the always reply); controller half (store, join, classifier, metrics,
+dashboard) pending.
 
 ## Problem
 
@@ -106,83 +108,58 @@ this design maps onto are:
 ### nftables ruleset
 
 The agent package ships one include that fw4 picks up on every firewall
-reload (`/usr/share/nftables.d/table-post/mielofon.nft`, verified present and
-empty on OpenWrt 25.12 with nftables 1.1.6). Everything lives inside the
-`inet fw4` table so it shows in `fw4 print`, follows the firewall's lifecycle
-and never fights the zone configuration; the agent writes **no rules**, it
-only moves interface names between sets and reads counters.
+reload (`mielofon-agent/files/usr/share/nftables.d/table-post/mielofon.nft`,
+installed under `/usr/share/nftables.d/table-post/`). Everything lives
+inside the `inet fw4` table so it shows in `fw4 print`, follows the
+firewall's lifecycle and never fights the zone configuration; the agent
+writes **no rules**, it only updates a verdict map and set membership and
+reads counters.
 
-```nft
-# /usr/share/nftables.d/table-post/mielofon.nft — PLACEHOLDER interface names
-# Sets carry per-element counters: the element is the tunnel interface, the
-# counter is this link's packet count for that colour and length band.
-set mf_tx_a_s { type ifname; counter; }
-set mf_tx_a_l { type ifname; counter; }
-set mf_tx_b_s { type ifname; counter; }
-set mf_tx_b_l { type ifname; counter; }
-set mf_rx_a_s { type ifname; counter; }
-set mf_rx_a_l { type ifname; counter; }
-set mf_rx_b_s { type ifname; counter; }
-set mf_rx_b_l { type ifname; counter; }
+Shape (see the include for the full text):
 
-# Egress: just before encapsulation, after fw4's own mangle_postrouting so a
-# QoS rule that sets DSCP runs first. A link's interface is in exactly one
-# colour's pair of sets (s and l); the agent flips it every L seconds.
-chain mielofon_mark {
-  type filter hook postrouting priority mangle + 10; policy accept;
-  meta length <= 1000 oifname @mf_tx_a_s ip6 dscp set ip6 dscp | 0x01
-  meta length <= 1000 oifname @mf_tx_a_s ip  dscp set ip  dscp | 0x01
-  meta length >  1000 oifname @mf_tx_a_l ip6 dscp set ip6 dscp | 0x01
-  meta length >  1000 oifname @mf_tx_a_l ip  dscp set ip  dscp | 0x01
-  meta length <= 1000 oifname @mf_tx_b_s ip6 dscp set ip6 dscp & 0x3e
-  meta length <= 1000 oifname @mf_tx_b_s ip  dscp set ip  dscp & 0x3e
-  meta length >  1000 oifname @mf_tx_b_l ip6 dscp set ip6 dscp & 0x3e
-  meta length >  1000 oifname @mf_tx_b_l ip  dscp set ip  dscp & 0x3e
-}
+- `map mf_colour { type ifname : verdict }` — the egress colour per managed
+  interface. The `mielofon_mark` chain (postrouting, `mangle + 10`, after
+  fw4's own mangle chain so a QoS rule that sets DSCP runs first) is a
+  single `oifname vmap @mf_colour`; the map sends a link to `mielofon_a`
+  (OR bit 0 in) or `mielofon_b` (mask it off).
+- Eight sets with per-element counters, `mf_{tx,rx}_{a,b}_{s,l}`: the
+  element is the interface, the counter that link's packets and bytes for
+  the colour, direction and length band (split at 1000 bytes). Every
+  managed interface is in all eight, permanently. In the colour chains the
+  set lookup selects the tx counter; in `mielofon_count` (prerouting,
+  `mangle - 10`, before any zone filtering: a packet fw4 later drops still
+  crossed the link) the packet's own colour bit and length select the rx
+  counter, and the lookup is the **last** expression so the per-element
+  counter only ticks on a full match. Colour-A packets are cleaned so the
+  bit never leaves the tunnel.
 
-# Ingress: right after decapsulation, before fw4's mangle_prerouting and any
-# zone filtering (a packet fw4 later drops still crossed the link). Every
-# managed interface is in all four rx sets; the colour is the packet's. The
-# set lookup is the LAST expression so its per-element counter only ticks
-# when the colour and length matched. Colour A packets are cleaned so the
-# bit never leaves the tunnel.
-chain mielofon_count {
-  type filter hook prerouting priority mangle - 10; policy accept;
-  ip6 dscp & 0x01 == 0x01 meta length <= 1000 iifname @mf_rx_a_s ip6 dscp set ip6 dscp & 0x3e
-  ip6 dscp & 0x01 == 0x01 meta length >  1000 iifname @mf_rx_a_l ip6 dscp set ip6 dscp & 0x3e
-  ip6 dscp & 0x01 == 0x00 meta length <= 1000 iifname @mf_rx_b_s
-  ip6 dscp & 0x01 == 0x00 meta length >  1000 iifname @mf_rx_b_l
-  ip  dscp & 0x01 == 0x01 meta length <= 1000 iifname @mf_rx_a_s ip  dscp set ip  dscp & 0x3e
-  ip  dscp & 0x01 == 0x01 meta length >  1000 iifname @mf_rx_a_l ip  dscp set ip  dscp & 0x3e
-  ip  dscp & 0x01 == 0x00 meta length <= 1000 iifname @mf_rx_b_s
-  ip  dscp & 0x01 == 0x00 meta length >  1000 iifname @mf_rx_b_l
-}
-```
+Why a verdict map rather than moving interfaces between colour sets: a
+set element's counter dies with the element, so flipping by membership
+would lose the block's tail. With the map, membership is static, counters
+persist, and the flip is one atomic `flush map` + `add element`
+transaction that no packet ever sees half-done.
 
-The whole ruleset dry-runs clean (`nft -c`) on the target nftables; the
-only runtime behaviour still to confirm on a node is the JSON shape of
-`list set` with per-element counters (phase 1 task 1).
+Per block the agent issues one assertion transaction — `add element` of
+every managed interface to all eight sets (a no-op when present) and the
+map rebuild for the colour of the block that begins — and one read,
+`nft -j list sets inet` (several `list set` commands in one invocation do
+not work: nft builds its cache for the first one only), filtered to the
+`mf_*` sets of the table. Two subprocesses per block for the whole node.
 
-Per link the agent issues, in one `nft -f -` transaction every block:
-
-```nft
-delete element inet fw4 mf_tx_a_s { "awg_hub_a" }
-delete element inet fw4 mf_tx_a_l { "awg_hub_a" }
-add    element inet fw4 mf_tx_b_s { "awg_hub_a" }
-add    element inet fw4 mf_tx_b_l { "awg_hub_a" }
-```
-
-and reads all eight sets with one `nft -j -f -` fed the eight `list set`
-lines. Two subprocesses per block for the whole node, the same low-rate CLI
-pattern as the ubus calls.
+Verified on OpenWrt 25.12 with nftables 1.1.6: the include dry-runs clean
+inside the fw4 table body; the per-element counter JSON is
+`{"elem": {"val": "<iface>", "counter": {"packets": n, "bytes": m}}}`
+under the set's `elem`, each set carrying its kernel `handle`.
 
 Interaction notes:
 
-- **Firewall reload** rebuilds the table: counters restart at zero and every
-  set is empty. The agent sees a counter go backwards (or an element gone),
-  discards that block and the next one, and re-asserts membership. Adding
-  an element that exists is a no-op, so the agent simply asserts its intended
-  state every block and never tracks reload events.
+- **Firewall reload** rebuilds the table: counters restart at zero, sets and
+  map are empty, and every set gets a new kernel handle. The agent compares
+  handles between reads: a change marks the block `reset` (and the next
+  block, whose colour's sets are read a block later, the same way) and its
+  numbers are not used. The boundary assertion re-adds everything, so the
+  agent never tracks reload events; a counter that went backwards without a
+  handle change is treated as a reset too.
 - **QoS on a tunnel interface.** cake's diffserv tables match exact
   codepoints and would demote marked AF classes to best effort every other
   block. On a tunnel interface classify by tc filter with a masked DSCP match
@@ -193,33 +170,40 @@ Interaction notes:
 
 ### Agent
 
-- `mark_enabled` (default 1), `mark_block_secs` (default 10, min 2).
-- One block task per node (not per link). A link's egress colour is `A`
-  for even `n` and `B` for odd `n`; the task switches every managed link at
-  the block boundary, and at `L/2` past the boundary it reads all eight
-  sets and finalises block `n−1` for every link, both directions it can
-  see:
-  - `tx_pkts_s`, `tx_pkts_l`, `tx_bytes` from the egress sets of the colour
-    block `n−1` had;
+- UCI: `mark_enabled` (default 1), `mark_block_secs` (default 10, 2..600;
+  both ends of a tunnel must agree), `mark_table` (default `inet fw4`).
+- One block task per node (`mark.rs`). A link's egress colour is `A` for
+  even `n` and `B` for odd; at every block boundary the task applies the
+  assertion for the block that begins, and half a block later it reads all
+  sets and finalises the block that ended for every managed interface:
+  - `tx_pkts_s`, `tx_pkts_l`, `tx_bytes` from the egress sets of that
+    block's colour (delta since the previous read of those sets, two blocks
+    earlier — the other colour's sets are counting the block in progress
+    and keep their baseline);
   - `rx_pkts_s`, `rx_pkts_l`, `rx_bytes` from the ingress sets of the same
     colour — what arrived *from the peer* on this interface.
-  Byte counts come from the same per-element counters.
-- Finished blocks ride on the next always-probe reply as an optional
-  `blocks` array (0–2 entries at the 15 s cadence; up to a bounded backlog
-  when a reply was missed). The stream model stays "controller opens, agent
-  answers"; the proto change is one optional field on `AgentReply::Probe`.
-- A block overlapping a throughput test the agent ran is flagged
-  `under_test`, so the dashboard can tell test-induced loss from ambient.
+  An interface without a baseline (first read, new link) produces no block
+  rather than a zero one.
+- Finished blocks queue per interface (bounded, ~10 minutes) and ride on
+  the next always-probe reply as the optional `blocks` array. The stream
+  model stays "controller opens, agent answers"; the proto change is one
+  optional field on `AgentReply::Probe`. Throughput replies never carry
+  blocks (they are fenced and may be late).
+- A block during which the node's ping gate was paused (a throughput test
+  ran) is flagged `under_test`, so the dashboard can tell test-induced loss
+  from ambient.
+- Metrics: `mielofon_agent_mark_total{result="block|reset|error"}`.
+- Failures (include not installed, nft missing) are counted, logged once
+  and then once per sixty blocks, and retried forever: a firewall reload
+  or a package install fixes them without an agent restart.
 
 ```jsonc
 // addition to the always-probe reply
 "blocks": [ { "n": 174700000, "tx_pkts_s": 812, "tx_pkts_l": 4105, "tx_bytes": 6012345,
-              "rx_pkts_s": 790, "rx_pkts_l": 3011, "rx_bytes": 4423110,
-              "reset": false, "under_test": false } ]
+              "rx_pkts_s": 790, "rx_pkts_l": 3011, "rx_bytes": 4423110 } ]
+// flags, elided when false: "reset": true (counters restarted; store as
+// unmeasured), "under_test": true (a throughput test overlapped)
 ```
-
-`reset: true` marks a block the agent could not trust (counters restarted);
-the controller stores it as unmeasured.
 
 ### Controller
 
@@ -334,13 +318,15 @@ phase 2 replaces the test itself.
 
 ## Configuration
 
-Agent (`/etc/config/mielofon-agent`, defaults in parentheses):
+Agent (`/etc/config/mielofon-agent`):
 
 ```text
 option mark_enabled '1'
 option mark_block_secs '10'
-option mark_length_split '1000'   # bytes; short vs long band
+# option mark_table 'inet fw4'
 ```
+
+The length split (1000 bytes) is a constant of the include, not a knob.
 
 Controller (`[classifier]`):
 
@@ -354,10 +340,12 @@ mss_bytes = 1348
 
 ## Work items
 
-1. **Agent, nft plumbing** — ship the include; `nft` wrapper beside `bus.rs`
-   (`Nft` trait, faked in tests); confirm the `list set` JSON shape on a
-   25.12 node; set-membership assert and reset detection; block task.
-2. **Proto** — `blocks` on `AgentReply::Probe`; round-trip test; `docs/protocol.md`.
+1. ~~**Agent, nft plumbing**~~ — shipped: include, `nft.rs` (`Nft` trait,
+   faked in tests), verdict-map flip, handle-based reset detection, block
+   task (`mark.rs`).
+2. ~~**Proto**~~ — shipped: `blocks` on `AgentReply::Probe`, round-trip
+   tests, `docs/protocol.md`. The controller accepts the field and logs it
+   until item 3 lands.
 3. **Controller, store** — new `RawSample` dims; bucket rollup; `/v1/ts`
    exposure; gossip carries them automatically.
 4. **Controller, window + classifier** — join, asymmetric window, model,
