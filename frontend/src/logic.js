@@ -102,6 +102,38 @@ export function traceRows(trace) {
 	}));
 }
 
+// Passive tier (docs/passive-quality.md): the alternate-marking blocks of
+// a link out of its raw samples, shaped for the loss-versus-rate plot.
+// Blocks are the samples carrying a block number; the classifier writes the
+// joined loss and rate back onto them, so a block without `mark_loss_pct`
+// is one whose peer half has not arrived (plotted as a gap, never as zero).
+// `under` lists the blocks a throughput test overlapped (flag bit 1), as
+// [start, end] spans for shading; `reset` blocks (bit 0) are skipped.
+export function blockSeries(samples) {
+	const blocks = (samples || [])
+		.filter(s => s.mark_n != null && !((s.mark_flags || 0) & 1))
+		.sort((a, b) => a.ts - b.ts);
+	return {
+		xs: blocks.map(b => b.ts),
+		rate: blocks.map(b => (b.mark_rate_mbps != null ? b.mark_rate_mbps : null)),
+		loss: blocks.map(b => (b.mark_loss_pct != null ? b.mark_loss_pct : null)),
+		under: blocks.filter(b => (b.mark_flags || 0) & 2).map(b => [b.ts, b.ts + (b.mark_secs || 0)]),
+		joined: blocks.filter(b => b.mark_loss_pct != null).length,
+	};
+}
+
+export const REGIME_TEXT = {
+	clean: 'clean',
+	sparse: 'sparse loss',
+	bursty: 'bursty loss',
+	size_selective: 'size-selective loss',
+	under_test: 'under test',
+};
+
+export function regimeText(r) {
+	return REGIME_TEXT[r] || '\u2014';
+}
+
 // Humanized cell value ("—" for unset, fixed decimals for numbers).
 export function cellText(v, digits) {
 	if (v == null) return '\u2014';

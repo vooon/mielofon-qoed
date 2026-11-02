@@ -1,9 +1,11 @@
 # Passive link quality (design, rev 1)
 
-Status: in progress — phase 0 shipped (paced iperf3 TCP leg, configurable
-cadences); phase 1 agent half shipped (fw4 include, block task, `blocks`
-on the always reply); controller half (store, join, classifier, metrics,
-dashboard) pending.
+Status: phase 1 implemented — phase 0 shipped (paced iperf3 TCP leg,
+configurable cadences); phase 1 agent half (fw4 include, block task,
+`blocks` on the always reply) and controller half (store, join,
+classifier, scheduler skip, metrics, dashboard) shipped. Where the
+implementation deviates from the text below, the deviation is noted in
+place; the rollout check at the end of the work items is still to do.
 
 ## Problem
 
@@ -209,10 +211,16 @@ Interaction notes:
 
 **Storage.** The counters are appended to the link's time-series as new
 optional dimensions on `RawSample`, stamped `ts = n·L`:
-`blk` (block number), `tx_pkts_s`, `tx_pkts_l`, `tx_bytes`, `rx_pkts_s`,
-`rx_pkts_l`, `rx_bytes`, `under_test`. Nothing else changes: samples
-replicate through gossip like every other sample, the 60 s buckets roll them
-up, `/v1/ts` returns them.
+`mark_n` (block number), `mark_secs` (L, carried in the block so two ends
+on different lengths never join), `mark_tx_s`, `mark_tx_l`, `mark_tx_bytes`,
+`mark_rx_s`, `mark_rx_l`, `mark_rx_bytes`, `mark_flags` (bit 0 reset, bit 1
+under test). Samples replicate through gossip like every other sample and
+`/v1/ts` returns them. Because a block is stamped at its start, behind the
+always sample that carried it, the per-link ring is kept sorted by `ts` on
+insert (it used to assume monotonic arrival). The joined loss and rate of
+a block (`mark_loss_pct`, `mark_rate_mbps`) are written back onto the block
+sample by the classifier, and those two are what the 60 s buckets roll up
+(`mark_loss`, `mark_rate`).
 
 **Join.** Loss is directional and needs both ends: `tx` of block `n` from the
 owner of `A→B` and `rx` of block `n` reported by the owner of `B→A` (its
@@ -230,14 +238,20 @@ rate(A→B, n)   = tx_bytes × 8 / L
 A block with only one half present (the peer's agent is registered at a
 member whose samples have not arrived yet, or is down) is skipped, not
 guessed; the join is retried on every classifier pass while both samples are
-within retention.
+within retention. *As implemented*, the join lives in the classifier pass
+(`mark::join`), not in the store's single-link window collapse, since it
+needs two links' samples; it runs for every owned link that has a reverse
+half whatever `pair_cost` says (`off` only means the halves are costed
+separately).
 
 **Window.** `WindowView` gains:
 
 - `mark_loss_pct`: `Σ lost / Σ sent` over the loss window (below),
   `None` unless `Σ sent ≥ mark_min_pkts` (default 2000) and at least one
   joined block exists;
-- `mark_rate_mbps`: the highest block rate in the window;
+- `mark_rate_mbps`: the highest block rate within `tcp_fresh_secs` (the
+  throughput freshness horizon, so the scheduler's proof below and the
+  rate shown on the map age like a test result);
 - `mark_loss_l_pct` / `mark_loss_s_pct`: the same per length band;
 - `implied_tcp_mbps`: the TCP rate the measured loss supports at the link's
   current `rtt_ms` (see model), `None` when loss is unmeasured. A measured
@@ -250,7 +264,10 @@ that short window so the demotion is fast; when they are clean, the aggregate
 is taken over `mark_recover_secs` (default 3600), so a single bad block
 inside the last hour still counts and the class recovers only after an hour
 of clean blocks. Because every block is an exact count, the aggregate has no
-sampling error — only the sample-size floor above.
+sampling error — only the sample-size floor above. Blocks a throughput test
+overlapped (either end's `under_test`) are left out of the loss aggregate
+and the counters — a test fills the link and what it drops is its own
+congestion — but their rate counts: the bytes crossed.
 
 **Model.** `implied_tcp_mbps` converts loss to rate under loss-based
 congestion control. Two forms, selected by `[classifier] loss_model`:
@@ -285,7 +302,8 @@ block series with a loss *shape*, kept in the derived record and shown as a
 chip on the map: `clean`, `sparse` (loss in most blocks, max block loss
 ≤ 3× mean), `bursty` (loss concentrated in few blocks), `size-selective`
 (large-packet loss ≥ 5× small-packet loss with both bands sampled),
-`under-test`. A shape change is logged at `notice` and counted in
+`under-test` (every block of the fast window overlapped a test). A shape
+change is logged at `info` and counted in
 `mielofon_link_regime_changes_total`. This is the early warning that the DPI
 moved; it drives nothing automatically.
 
@@ -298,9 +316,14 @@ mielofon_link_mark_rate_mbps{...}
 mielofon_link_implied_tcp_mbps{...}
 mielofon_link_mark_sent_total{...,band="s|l"}     # counters, monotonic
 mielofon_link_mark_lost_total{...,band="s|l"}
-mielofon_link_regime{...,shape="clean|sparse|bursty|size_selective"} 0|1
+mielofon_link_regime{...,shape="clean|sparse|bursty|size_selective|under_test"} 0|1
 mielofon_link_regime_changes_total{...}
+mielofon_scheduler_throughput_skipped_total              # tests the proof below saved
 ```
+
+The counters are kept by the member that joins the link (the one its
+agent is registered with) and restart with it; the gauges come from the
+replicated derived record like every other per-link gauge.
 
 **Dashboard.** The link detail page gets a loss-versus-rate panel over
 `/v1/ts`: per-block rate as area, per-block loss as points, under-test
@@ -346,16 +369,20 @@ mss_bytes = 1348
 2. ~~**Proto**~~ — shipped: `blocks` on `AgentReply::Probe`, round-trip
    tests, `docs/protocol.md`. The controller accepts the field and logs it
    until item 3 lands.
-3. **Controller, store** — new `RawSample` dims; bucket rollup; `/v1/ts`
-   exposure; gossip carries them automatically.
-4. **Controller, window + classifier** — join, asymmetric window, model,
-   `implied_tcp_mbps` scoring, regime label, metrics. Unit tests: join with
-   a missing half, reset blocks, sample-size floor, both models against the
-   table above, fast demote / slow recover, regime shapes.
-5. **Scheduler** — passive proof skips the throughput test.
-6. **Frontend** — panel and chips; `logic.test.js` for the series shaping.
-7. **Docs** — architecture, protocol, UCI and TOML samples; this document
-   moves to *implemented*.
+3. ~~**Controller, store**~~ — shipped: block dims on `RawSample`, sorted
+   insert, joined loss/rate written back and rolled into the buckets,
+   `/v1/ts` exposure; gossip carries them automatically.
+4. ~~**Controller, window + classifier**~~ — shipped (`mark.rs`): join,
+   asymmetric window, both models, `implied_tcp_mbps` scoring, regime
+   label, metrics; unit tests for the missing half, reset blocks, the
+   floor, both models against the table above, fast demote / slow recover,
+   the shapes, and an end-to-end pass that demotes a link the pings saw
+   nothing wrong with.
+5. ~~**Scheduler**~~ — shipped: passive proof skips the throughput test for
+   the round (`mielofon_scheduler_throughput_skipped_total`).
+6. ~~**Frontend**~~ — shipped: per-block loss-versus-rate panel (under-test
+   blocks shaded, unjoined blocks as gaps), regime chip, table columns.
+7. ~~**Docs**~~ — shipped.
 
 Rollout: enable on one hub pair first and let it run beside the paced
 iperf3 for a week; the manual test's retransmit count and the marking loss

@@ -271,6 +271,32 @@ pub struct Classifier {
     /// a finite, quality-ranked fallback. Spoke→hub and hub↔hub links are
     /// unaffected.
     pub hub_spoke_cost_offset: u32,
+    /// Passive tier (`docs/passive-quality.md`): the fast loss window.
+    /// Loss within the most recent `mark_window_secs` is aggregated over
+    /// that span alone, so a link is demoted quickly.
+    pub mark_window_secs: u64,
+    /// The slow window: when the fast window is clean, the aggregate covers
+    /// this span, so a bad block keeps counting until it ages out.
+    pub mark_recover_secs: u64,
+    /// Below this many packets sent in the loss window the passive loss is
+    /// unmeasured (one lost packet in a hundred is not a percent).
+    pub mark_min_pkts: u64,
+    /// How the passive loss is converted to the TCP rate it allows.
+    pub loss_model: LossModel,
+    /// Segment size the loss models assume (tunnel MTU minus IPv6 + TCP).
+    pub mss_bytes: u32,
+}
+
+/// Loss-to-rate model for `implied_tcp_mbps` (`mark::implied_tcp_mbps`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum LossModel {
+    /// `rate = 1.22 × MSS / (RTT × √p)`: the Reno/cubic long-run bound.
+    #[default]
+    Mathis,
+    /// RFC 8337 model-based metrics: the largest target whose run length
+    /// `3 × W²` the measured loss still meets. About three times stricter.
+    Mbm,
 }
 
 /// Pairing of a tunnel's two directed links.
@@ -312,6 +338,11 @@ impl Default for Classifier {
             hysteresis_passes: 3,
             pair_cost: PairCost::Directional,
             hub_spoke_cost_offset: 1000,
+            mark_window_secs: 300,
+            mark_recover_secs: 3600,
+            mark_min_pkts: 2000,
+            loss_model: LossModel::Mathis,
+            mss_bytes: 1348,
         }
     }
 }

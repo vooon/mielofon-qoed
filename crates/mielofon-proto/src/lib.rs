@@ -213,8 +213,13 @@ pub enum AgentReply {
 /// length threshold into short (`_s`) and long (`_l`) bands.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct MarkBlock {
-    /// Block number: `floor(unix_time / block_secs)`.
+    /// Block number: `floor(unix_time / secs)`.
     pub n: u64,
+    /// Block length (seconds) the agent used, so the controller can stamp
+    /// the block (`n × secs`) and refuse to join halves counted on
+    /// different lengths. 0 from an agent that predates the field.
+    #[serde(default)]
+    pub secs: u32,
     pub tx_pkts_s: u64,
     pub tx_pkts_l: u64,
     pub tx_bytes: u64,
@@ -342,6 +347,7 @@ mod tests {
     fn mark_blocks_round_trip_with_flags_elided() {
         let b = MarkBlock {
             n: 174_700_000,
+            secs: 10,
             tx_pkts_s: 812,
             tx_pkts_l: 4105,
             tx_bytes: 6_012_345,

@@ -37,15 +37,25 @@
 //! `config::PairCost`), so the round-trip dimensions both ends measure cannot
 //! drift the two OSPF costs apart. The derived record still carries each
 //! half's own measurements.
+//!
+//! Passive tier: for a paired link the pass also joins its alternate-marking
+//! blocks with the reverse half's (`mark::join`), folds the result into the
+//! window (`mark::summarize`: loss, rate, shape, and the TCP rate the loss
+//! allows), writes each block's joined loss/rate back onto the block sample
+//! so history and buckets carry it, and keeps the running sent/lost totals
+//! the metrics endpoint exports as counters.
 
 use crate::clock::now_secs;
 use crate::config::PairCost;
-use crate::model::{LinkKey, ProbeState, Quality, QualityRecord};
+use crate::mark;
+use crate::model::{LinkKey, ProbeState, Quality, QualityRecord, Regime};
 use crate::quality;
 use crate::state::AppState;
 use crate::store::{WindowSpec, WindowView};
+use crate::tsdb::RawSample;
 use std::collections::{HashMap, HashSet};
 use std::sync::RwLock;
+use tracing::info;
 
 /// Per-link last-derived policy, used to hold a cost while a link is busy and
 /// as the reference class for hysteresis.
@@ -65,9 +75,27 @@ struct Pending {
     last_ts: u64,
 }
 
+/// Running passive-tier totals of a link, for the monotonic counters on
+/// `/metrics`. Advanced by every block joined for the first time (by block
+/// number); under-test blocks are left out, as in the loss aggregate, so
+/// `rate(lost) / rate(sent)` is the passive loss.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct MarkTotals {
+    /// Highest block number folded in.
+    pub last_n: u64,
+    pub sent_s: u64,
+    pub sent_l: u64,
+    pub lost_s: u64,
+    pub lost_l: u64,
+    /// Loss-shape changes seen on the link.
+    pub regime_changes: u64,
+    pub regime: Option<Regime>,
+}
+
 pub struct ClassifierState {
     last: RwLock<HashMap<LinkKey, LastPolicy>>,
     pending: RwLock<HashMap<LinkKey, Pending>>,
+    totals: RwLock<HashMap<LinkKey, MarkTotals>>,
 }
 
 impl ClassifierState {
@@ -75,7 +103,18 @@ impl ClassifierState {
         ClassifierState {
             last: RwLock::new(HashMap::new()),
             pending: RwLock::new(HashMap::new()),
+            totals: RwLock::new(HashMap::new()),
         }
+    }
+
+    /// The passive-tier totals of every link this node has joined blocks for.
+    pub fn mark_totals(&self) -> Vec<(LinkKey, MarkTotals)> {
+        self.totals
+            .read()
+            .expect("classifier lock")
+            .iter()
+            .map(|(k, v)| (k.clone(), *v))
+            .collect()
     }
 }
 
@@ -146,8 +185,79 @@ pub fn merge_pair(own: &WindowView, rev: &WindowView, mode: PairCost) -> WindowV
         v.udp_mbps = worse_lower(own.udp_mbps, rev.udp_mbps);
         v.udp_loss_pct = worse_upper(own.udp_loss_pct, rev.udp_loss_pct);
         v.udp_jitter_ms = worse_upper(own.udp_jitter_ms, rev.udp_jitter_ms);
+        // Passive loss is directional like throughput: the worse direction.
+        v.mark_loss_pct = worse_upper(own.mark_loss_pct, rev.mark_loss_pct);
+        v.implied_tcp_mbps = worse_lower(own.implied_tcp_mbps, rev.implied_tcp_mbps);
     }
     v
+}
+
+/// Passive tier for one owned, paired link: join its blocks with the
+/// reverse half's, fold the summary into `view`, write each newly joined
+/// block's loss/rate back onto its sample, advance the running totals and
+/// note a loss-shape change.
+fn fold_marking(state: &AppState, link: &LinkKey, rev: &LinkKey, view: &mut WindowView, now: u64) {
+    let cfg = &state.cfg.classifier;
+    // One block of slack past the longest horizon so a block that straddles
+    // it still joins.
+    let since = now.saturating_sub(cfg.mark_recover_secs.max(cfg.tcp_fresh_secs) + 600);
+    let own = state.tsdb.query(link, since, u64::MAX).samples;
+    let other = state.tsdb.query(rev, since, u64::MAX).samples;
+    let blocks = mark::join(&own, &other);
+    if blocks.is_empty() {
+        return;
+    }
+
+    // The joined numbers belong to the block sample: history and the 60 s
+    // buckets carry them from here on. Re-appending an identical result is
+    // a no-op in the store, so only the blocks joined for the first time
+    // cost anything.
+    let joined: HashSet<u64> = own
+        .iter()
+        .filter(|s| s.mark_loss_pct.is_some())
+        .map(|s| s.ts)
+        .collect();
+    for b in blocks.iter().filter(|b| !joined.contains(&b.ts)) {
+        if let Some(loss) = b.loss_pct() {
+            state
+                .tsdb
+                .append(link, RawSample::block_result(b.ts, loss, b.rate_mbps()));
+        }
+    }
+
+    let s = mark::summarize(&blocks, cfg, now);
+    view.mark_loss_pct = s.loss_pct;
+    view.mark_loss_s_pct = s.loss_s_pct;
+    view.mark_loss_l_pct = s.loss_l_pct;
+    view.mark_rate_mbps = s.rate_mbps;
+    view.regime = s.regime;
+    view.implied_tcp_mbps = match (s.loss_pct, view.rtt_ms) {
+        (Some(loss), Some(rtt)) => mark::implied_tcp_mbps(loss, rtt, cfg.loss_model, cfg.mss_bytes),
+        _ => None,
+    };
+
+    let mut totals = state.classifier.totals.write().expect("classifier lock");
+    let t = totals.entry(link.clone()).or_default();
+    for b in blocks.iter().filter(|b| b.n > t.last_n && !b.under_test) {
+        t.sent_s += b.sent_s;
+        t.sent_l += b.sent_l;
+        t.lost_s += b.lost_s();
+        t.lost_l += b.lost_l();
+    }
+    t.last_n = t.last_n.max(blocks.last().map_or(0, |b| b.n));
+    if s.regime.is_some() && t.regime != s.regime {
+        if let Some(prev) = t.regime {
+            t.regime_changes += 1;
+            info!(
+                link = %link.id(),
+                from = prev.label(),
+                to = s.regime.map_or("", Regime::label),
+                loss_pct = s.loss_pct,
+                "passive loss regime changed"
+            );
+        }
+        t.regime = s.regime;
+    }
 }
 
 /// One classification pass over the links owned by this node's agents.
@@ -161,14 +271,17 @@ pub fn classify_once(state: &AppState) {
     let now = now_secs();
 
     let links = state.tsdb.links();
-    let views: HashMap<LinkKey, WindowView> = links
+    let mut views: HashMap<LinkKey, WindowView> = links
         .iter()
         .filter_map(|l| state.tsdb.window(l, &spec, now).map(|v| (l.clone(), v)))
         .collect();
+    // The passive join needs the reverse half whatever the pairing mode:
+    // `Off` only means the halves are costed on their own.
+    let all_pairs = pair_links(&links);
     let pairs = if cfg.classifier.pair_cost == PairCost::Off {
         HashMap::new()
     } else {
-        pair_links(&links)
+        all_pairs.clone()
     };
     let owned: HashSet<LinkKey> = state
         .workers
@@ -176,6 +289,15 @@ pub fn classify_once(state: &AppState) {
         .into_iter()
         .map(|(_, l)| l)
         .collect();
+
+    for (link, rev) in &all_pairs {
+        if !owned.contains(link) {
+            continue;
+        }
+        if let Some(view) = views.get_mut(link) {
+            fold_marking(state, link, rev, view, now);
+        }
+    }
 
     for link in links {
         if !owned.contains(&link) {
@@ -326,6 +448,10 @@ fn write_derived(
         state: view.state,
         quality,
         ospf_cost,
+        mark_loss_pct: view.mark_loss_pct,
+        mark_rate_mbps: view.mark_rate_mbps,
+        implied_tcp_mbps: view.implied_tcp_mbps,
+        regime: view.regime,
     };
     state.kv.put(link.clone(), rec);
 }
@@ -377,10 +503,121 @@ mod tests {
                 hysteresis_passes,
                 pair_cost: PairCost::Directional,
                 hub_spoke_cost_offset: 0,
+                ..Classifier::default()
             },
             ..Config::default()
         };
         AppState::new(cfg)
+    }
+
+    /// Block `n` (10 s) of a tunnel as its two agents report it, each with
+    /// its own tx and rx: `link`'s end sent `sent` packets (half per band)
+    /// and received `recv_rev`; `rev`'s end sent `sent_rev` and received
+    /// `recv` of the forward packets.
+    fn append_block(
+        state: &AppState,
+        (link, rev): (&LinkKey, &LinkKey),
+        n: u64,
+        (sent, recv): (u32, u32),
+        (sent_rev, recv_rev): (u32, u32),
+    ) {
+        let mk = |tx: u32, rx: u32| mielofon_proto::MarkBlock {
+            n,
+            secs: 10,
+            tx_pkts_s: u64::from(tx / 2),
+            tx_pkts_l: u64::from(tx - tx / 2),
+            tx_bytes: u64::from(tx) * 1000,
+            rx_pkts_s: u64::from(rx / 2),
+            rx_pkts_l: u64::from(rx - rx / 2),
+            rx_bytes: u64::from(rx) * 1000,
+            reset: false,
+            under_test: false,
+        };
+        state
+            .tsdb
+            .append(link, RawSample::from_block(&mk(sent, recv_rev)).unwrap());
+        state
+            .tsdb
+            .append(rev, RawSample::from_block(&mk(sent_rev, recv)).unwrap());
+    }
+
+    #[test]
+    fn passive_loss_bounds_the_class_and_is_written_back() {
+        let state = state_with(1200, 3600);
+        let link = LinkKey::new("hub-a", "hub-b", "awg_hub_b");
+        let rev = LinkKey::new("hub-b", "hub-a", "awg_hub_a");
+        own(&state, &[&link, &rev]);
+        let now = crate::clock::now_secs();
+        // 30 ms pings: good on their own in both directions.
+        append_always(&state, &link, now, 30.0);
+        append_always(&state, &rev, now, 30.0);
+        // Six blocks in the last minute: 2 % loss on 6000 packets at 0.8 Mbps,
+        // the reverse direction clean.
+        let n0 = now / 10 - 6;
+        for i in 0..6 {
+            append_block(&state, (&link, &rev), n0 + i, (1000, 980), (1000, 1000));
+        }
+        classify_once(&state);
+
+        let rec = state.kv.get(&link).unwrap();
+        assert_eq!(rec.mark_loss_pct, Some(2.0));
+        assert_eq!(rec.mark_rate_mbps, Some(0.8));
+        // Mathis at 2 % / 30 ms ≈ 3.1 Mbps: poor by the default thresholds,
+        // although the pings saw nothing.
+        let implied = rec.implied_tcp_mbps.unwrap();
+        assert!((implied - 3.10).abs() < 0.05, "{implied}");
+        assert_eq!(rec.quality, Some(Quality::Poor));
+        assert_eq!(rec.regime, Some(Regime::Sparse));
+        let back = state.kv.get(&rev).unwrap();
+        assert_eq!(back.mark_loss_pct, Some(0.0));
+        assert_eq!(back.implied_tcp_mbps, None, "no loss is no constraint");
+        assert_eq!(back.quality, Some(Quality::Good));
+        assert_eq!(back.regime, Some(Regime::Clean));
+
+        // The joined loss/rate landed on the block samples (and their bucket).
+        let hist = state.tsdb.query(&link, 0, u64::MAX);
+        let blocks: Vec<_> = hist.samples.iter().filter(|s| s.is_block()).collect();
+        assert_eq!(blocks.len(), 6);
+        assert!(blocks.iter().all(|s| s.mark_loss_pct == Some(2.0)));
+        assert!(hist.buckets.iter().any(|b| b.mark_loss.is_some()));
+
+        // Totals advanced once; a second pass changes nothing.
+        classify_once(&state);
+        let totals = state.classifier.mark_totals();
+        let (_, t) = totals.iter().find(|(k, _)| k == &link).unwrap();
+        assert_eq!((t.sent_s + t.sent_l, t.lost_s + t.lost_l), (6000, 120));
+        assert_eq!(t.regime_changes, 0);
+        assert_eq!(t.regime, Some(Regime::Sparse));
+    }
+
+    #[test]
+    fn passive_loss_is_joined_even_with_pairing_off() {
+        let mut state = state_with(1200, 3600);
+        let cfg = std::sync::Arc::make_mut(&mut state.cfg);
+        cfg.classifier.pair_cost = PairCost::Off;
+        let link = LinkKey::new("hub-a", "hub-b", "awg_hub_b");
+        let rev = LinkKey::new("hub-b", "hub-a", "awg_hub_a");
+        own(&state, &[&link, &rev]);
+        let now = crate::clock::now_secs();
+        append_always(&state, &link, now, 60.0);
+        append_always(&state, &rev, now, 60.0);
+        for i in 0..3 {
+            append_block(
+                &state,
+                (&link, &rev),
+                now / 10 - 3 + i,
+                (1000, 1000),
+                (0, 0),
+            );
+        }
+        classify_once(&state);
+        let rec = state.kv.get(&link).unwrap();
+        assert_eq!(rec.mark_loss_pct, Some(0.0));
+        assert_eq!(rec.regime, Some(Regime::Clean));
+        // The idle direction: clean shape, loss below the floor.
+        let idle = state.kv.get(&rev).unwrap();
+        assert_eq!(idle.mark_loss_pct, None);
+        assert_eq!(idle.regime, Some(Regime::Clean));
     }
 
     fn append_always(state: &AppState, link: &LinkKey, ts: u64, rtt: f64) {

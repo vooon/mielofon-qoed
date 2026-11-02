@@ -4,7 +4,7 @@
 //! on the client listener (9552, see `session.rs`), members on the cluster
 //! listener (9551, see `gossip.rs`).
 
-use crate::model::{LinkKey, ProbeState, QualityRecord};
+use crate::model::{LinkKey, ProbeState, QualityRecord, Regime};
 use crate::state::AppState;
 use axum::extract::{Path, Query, State};
 use axum::http::{header, StatusCode};
@@ -227,6 +227,11 @@ pub async fn metrics(State(state): State<AppState>) -> impl IntoResponse {
     );
     let _ = writeln!(
         body,
+        "# HELP mielofon_scheduler_throughput_skipped_total throughput tests skipped on passive proof\n# TYPE mielofon_scheduler_throughput_skipped_total counter\nmielofon_scheduler_throughput_skipped_total {}",
+        THROUGHPUT_SKIPPED.load(Ordering::Relaxed)
+    );
+    let _ = writeln!(
+        body,
         "# HELP mielofon_links number of known links\n# TYPE mielofon_links gauge\nmielofon_links {}",
         state.kv.len()
     );
@@ -247,7 +252,7 @@ pub async fn metrics(State(state): State<AppState>) -> impl IntoResponse {
     // sentinel value that a dashboard could mistake for a measurement.
     type Dim = fn(&QualityRecord) -> Option<f64>;
     let records = state.kv.all();
-    let series: [(&str, &str, Dim); 9] = [
+    let series: [(&str, &str, Dim); 12] = [
         ("mielofon_link_rtt_ms", "gauge", |r| r.rtt_ms),
         ("mielofon_link_loss_pct", "gauge", |r| r.loss_pct),
         ("mielofon_link_jitter_ms", "gauge", |r| r.jitter_ms),
@@ -261,20 +266,95 @@ pub async fn metrics(State(state): State<AppState>) -> impl IntoResponse {
         ("mielofon_link_ospf_cost", "gauge", |r| {
             r.ospf_cost.map(f64::from)
         }),
+        ("mielofon_link_mark_loss_pct", "gauge", |r| r.mark_loss_pct),
+        ("mielofon_link_mark_rate_mbps", "gauge", |r| {
+            r.mark_rate_mbps
+        }),
+        ("mielofon_link_implied_tcp_mbps", "gauge", |r| {
+            r.implied_tcp_mbps
+        }),
     ];
+    let labels = |key: &LinkKey| {
+        format!(
+            "from=\"{}\",to=\"{}\",iface=\"{}\"",
+            prom_label(&key.from),
+            prom_label(&key.to),
+            prom_label(&key.interface)
+        )
+    };
     for (name, kind, get) in series {
         let _ = writeln!(body, "# TYPE {name} {kind}");
         for (key, rec) in &records {
             if let Some(v) = get(rec) {
+                let _ = writeln!(body, "{name}{{{}}} {v}", labels(key));
+            }
+        }
+    }
+
+    // Passive loss shape: one 0|1 series per shape so a change shows as a
+    // step in both the old and the new one.
+    let _ = writeln!(body, "# TYPE mielofon_link_regime gauge");
+    for (key, rec) in &records {
+        if let Some(cur) = rec.regime {
+            for shape in [
+                Regime::Clean,
+                Regime::Sparse,
+                Regime::Bursty,
+                Regime::SizeSelective,
+                Regime::UnderTest,
+            ] {
                 let _ = writeln!(
                     body,
-                    "{name}{{from=\"{}\",to=\"{}\",iface=\"{}\"}} {v}",
-                    prom_label(&key.from),
-                    prom_label(&key.to),
-                    prom_label(&key.interface)
+                    "mielofon_link_regime{{{},shape=\"{}\"}} {}",
+                    labels(key),
+                    shape.label(),
+                    u8::from(shape == cur)
                 );
             }
         }
+    }
+
+    // Running passive totals of the links this node joins (counters:
+    // monotonic until the controller restarts).
+    let totals = state.classifier.mark_totals();
+    let _ = writeln!(body, "# TYPE mielofon_link_mark_sent_total counter");
+    for (key, t) in &totals {
+        let _ = writeln!(
+            body,
+            "mielofon_link_mark_sent_total{{{},band=\"s\"}} {}",
+            labels(key),
+            t.sent_s
+        );
+        let _ = writeln!(
+            body,
+            "mielofon_link_mark_sent_total{{{},band=\"l\"}} {}",
+            labels(key),
+            t.sent_l
+        );
+    }
+    let _ = writeln!(body, "# TYPE mielofon_link_mark_lost_total counter");
+    for (key, t) in &totals {
+        let _ = writeln!(
+            body,
+            "mielofon_link_mark_lost_total{{{},band=\"s\"}} {}",
+            labels(key),
+            t.lost_s
+        );
+        let _ = writeln!(
+            body,
+            "mielofon_link_mark_lost_total{{{},band=\"l\"}} {}",
+            labels(key),
+            t.lost_l
+        );
+    }
+    let _ = writeln!(body, "# TYPE mielofon_link_regime_changes_total counter");
+    for (key, t) in &totals {
+        let _ = writeln!(
+            body,
+            "mielofon_link_regime_changes_total{{{}}} {}",
+            labels(key),
+            t.regime_changes
+        );
     }
 
     let mut response = body.into_response();
@@ -436,6 +516,9 @@ pub fn admin_router() -> Router<AppState> {
 static REPORTS: AtomicU64 = AtomicU64::new(0);
 /// Probe replies that carried a failure note (e.g. iperf3 could not run).
 pub(crate) static PROBE_FAILURES: AtomicU64 = AtomicU64::new(0);
+/// Gated throughput tests the scheduler skipped because the passive tier
+/// had already proved the link good.
+pub(crate) static THROUGHPUT_SKIPPED: AtomicU64 = AtomicU64::new(0);
 
 #[cfg(test)]
 mod tests {

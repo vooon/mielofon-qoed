@@ -9,7 +9,38 @@ import {
 	cellText,
 	ringLayout,
 	isHubSpokeLink,
+	blockSeries,
+	regimeText,
 } from './logic';
+
+describe('blockSeries', () => {
+	const samples = [
+		{ ts: 1020, rtt_ms: 5 },
+		{ ts: 1010, mark_n: 101, mark_secs: 10, mark_flags: 2, mark_rate_mbps: 8.5, mark_loss_pct: 0.1 },
+		{ ts: 1000, mark_n: 100, mark_secs: 10, mark_rate_mbps: 1.2, mark_loss_pct: 0 },
+		{ ts: 1030, mark_n: 103, mark_secs: 10, mark_flags: 1, mark_rate_mbps: 9 },
+		{ ts: 1040, mark_n: 104, mark_secs: 10 },
+	];
+	it('keeps the blocks in time order, drops resets and leaves unjoined ones as gaps', () => {
+		const s = blockSeries(samples);
+		expect(s.xs).toEqual([1000, 1010, 1040]);
+		expect(s.rate).toEqual([1.2, 8.5, null]);
+		expect(s.loss).toEqual([0, 0.1, null]);
+		expect(s.under).toEqual([[1010, 1020]]);
+		expect(s.joined).toBe(2);
+	});
+	it('is empty without blocks', () => {
+		expect(blockSeries([{ ts: 1, rtt_ms: 2 }]).xs).toEqual([]);
+		expect(blockSeries(undefined).joined).toBe(0);
+	});
+});
+
+describe('regimeText', () => {
+	it('names the shapes and dashes the unknown', () => {
+		expect(regimeText('size_selective')).toBe('size-selective loss');
+		expect(regimeText(null)).toBe('\u2014');
+	});
+});
 
 describe('ringLayout', () => {
 	const nodes = [

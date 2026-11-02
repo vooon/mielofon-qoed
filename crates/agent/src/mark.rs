@@ -171,9 +171,11 @@ impl<N: Nft> Marker<N> {
             // reset too (a flushed set re-added by hand).
             let reset =
                 rebuilt || tx_s.is_none() || tx_l.is_none() || rx_s.is_none() || rx_l.is_none();
+            let secs = self.block.as_secs() as u32;
             let b = if reset {
                 MarkBlock {
                     n,
+                    secs,
                     reset: true,
                     under_test,
                     ..MarkBlock::default()
@@ -183,6 +185,7 @@ impl<N: Nft> Marker<N> {
                     (tx_s.unwrap(), tx_l.unwrap(), rx_s.unwrap(), rx_l.unwrap());
                 MarkBlock {
                     n,
+                    secs,
                     tx_pkts_s: tx_s.0,
                     tx_pkts_l: tx_l.0,
                     tx_bytes: tx_s.1 + tx_l.1,
@@ -289,6 +292,7 @@ mod tests {
             blocks,
             vec![MarkBlock {
                 n: 12,
+                secs: 10,
                 tx_pkts_s: 20,
                 tx_pkts_l: 200,
                 tx_bytes: 2000 + 280_000,

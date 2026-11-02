@@ -1,6 +1,6 @@
 <script setup>
 import { computed } from 'vue';
-import { sortLinks, cellText, QUALITY_ORDER } from '../logic';
+import { sortLinks, cellText, regimeText, QUALITY_ORDER } from '../logic';
 
 const props = defineProps({
 	links: { type: Array, default: () => [] },
@@ -23,6 +23,9 @@ function badge(quality) {
         <tr>
           <th>from</th><th>to</th><th>iface</th><th>rtt ms</th><th>loss %</th>
           <th>jit ms</th><th>tcp Mbps</th><th>udp Mbps</th><th>udp loss %</th>
+          <th title="passive loss of real traffic (alternate marking)">mark loss %</th>
+          <th title="TCP rate the passive loss allows at the link's rtt">impl Mbps</th>
+          <th title="passive loss shape">regime</th>
           <th>state</th><th>quality</th><th>cost</th>
         </tr>
       </thead>
@@ -41,6 +44,9 @@ function badge(quality) {
           <td>{{ cellText(l.tcp_mbps, 1) }}</td>
           <td>{{ cellText(l.udp_mbps, 1) }}</td>
           <td>{{ cellText(l.udp_loss_pct, 2) }}</td>
+          <td>{{ cellText(l.mark_loss_pct, 3) }}</td>
+          <td>{{ cellText(l.implied_tcp_mbps, 1) }}</td>
+          <td :class="'rg rg-' + (l.regime || 'none')">{{ l.regime ? regimeText(l.regime) : '\u2014' }}</td>
           <td :class="l.state === 'busy' ? 'st-busy' : ''">{{ l.state || 'quiet' }}</td>
           <td v-html="badge(l.quality)"></td>
           <td>{{ cellText(l.ospf_cost, 0) }}</td>
@@ -60,6 +66,9 @@ th { background: #fafbfc; color: var(--muted); font-size: 11px; text-transform: 
 tbody tr { cursor: pointer; }
 tbody tr:hover { background: #f5f9ff; }
 .st-busy { color: var(--poor); font-weight: 600; }
+.rg-sparse, .rg-bursty { color: var(--poor); }
+.rg-size_selective { color: var(--bad); font-weight: 600; }
+.rg-under_test, .rg-none { color: var(--muted); }
 :deep(.q) { display: inline-block; min-width: 72px; padding: 1px 8px; border-radius: 8px; text-align: center; color: #fff; font-size: 11px; font-weight: 600; }
 :deep(.q-good) { background: var(--good); }
 :deep(.q-acceptable) { background: var(--acc); }

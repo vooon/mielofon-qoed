@@ -59,7 +59,7 @@ function edgeOpts(l, hubs) {
 		dashes: broken,
 		// The two directions of one tunnel bend away from each other.
 		smooth: { enabled: true, type: 'curvedCW', roundness: 0.12 },
-		title: `${l.from} → ${l.to} · ${l.interface}\nrtt ${l.rtt_ms != null ? l.rtt_ms.toFixed(1) + ' ms' : '-'} · loss ${l.loss_pct != null ? l.loss_pct.toFixed(1) + '%' : '-'} · cost ${l.ospf_cost != null ? l.ospf_cost : '-'}`,
+		title: `${l.from} → ${l.to} · ${l.interface}\nrtt ${l.rtt_ms != null ? l.rtt_ms.toFixed(1) + ' ms' : '-'} · loss ${l.loss_pct != null ? l.loss_pct.toFixed(1) + '%' : '-'} · cost ${l.ospf_cost != null ? l.ospf_cost : '-'}${l.mark_loss_pct != null ? `\nmark loss ${l.mark_loss_pct.toFixed(3)}%${l.implied_tcp_mbps != null ? ' · implied ' + l.implied_tcp_mbps.toFixed(1) + ' Mbps' : ''}${l.regime ? ' · ' + l.regime.replace('_', '-') : ''}` : ''}`,
 	};
 }
 

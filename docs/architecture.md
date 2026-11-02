@@ -155,10 +155,14 @@ mTLS identity (`/etc/mielofon/agent.{key,cer}` + `ca.pem`) and the controller
   every block boundary it applies one transaction asserting set membership
   and the colour map, half a block later it reads the counters (`nft -j
   list sets`, one call) and queues the finished block per interface; the
-  next always-probe reply carries them. The controller joins one end's
-  `tx` with the other end's `rx` into real loss at real rate, for zero
-  probe bytes. The classifier side of this lands with the second half of
-  phase 1; a cheap target-rate burst test (RFC 8337) follows in phase 2.
+  next always-probe reply carries them. The controller stores every block
+  as a sample of its link; each classifier pass joins one end's `tx` with
+  the other end's `rx` (`mark.rs`) into real loss at real rate, for zero
+  probe bytes, converts the loss to the TCP rate it allows (Mathis or RFC
+  8337) and scores that against the throughput thresholds, labels the loss
+  shape (regime), and lets the scheduler skip the throughput test of a link
+  whose real traffic already proved the good class. A cheap target-rate
+  burst test (RFC 8337) follows in phase 2.
 - **BIRD** is driven through
   [rpcd-mod-bird](https://github.com/vooon/my-openwrt-feed/tree/master/rpcd-mod-bird)
   (`set_ospf_cost`, `route`). All ubus calls run the `ubus` CLI: they are
@@ -273,6 +277,7 @@ crates/controller/src/
   tsdb.rs        embedded redb-backed ring store implementing `Store`
   kv.rs          LWW per-link store (holds *derived* policy records)
   classifier.rs  background loop: window -> quality/cost -> derived KV
+  mark.rs        passive tier: block join, loss window + shape, loss-to-rate models
   model.rs       Link, QualityRecord, Quality, ProbeState
   scheduler.rs   per-tick probe/apply dispatch
   worker.rs      agent registry: links, session, in-flight commands

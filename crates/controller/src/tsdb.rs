@@ -13,11 +13,15 @@
 //!     flushed in batches by a background task and reloaded at boot, so history
 //!     survives controller restarts.
 //!
-//! Each directed link has exactly one producer (the probing agent), so per-link
-//! timestamps are monotonic and gossip `merge_delta` skips anything older than
-//! the last ts it saw for a link (idempotent resends are harmless). Two
-//! reports landing in the same second (an always probe and a throughput
-//! result) are merged dimension-wise rather than the second one being lost.
+//! Each directed link has exactly one producer (the probing agent), but its
+//! samples do not arrive in time order: an always reply carries the
+//! alternate-marking blocks that finished since the previous one, stamped
+//! at their block start (`docs/passive-quality.md`). The per-link ring is
+//! therefore kept sorted by `ts` on insert, and idempotency comes from the
+//! same-second merge: a resend (gossip or otherwise) finds its twin and
+//! changes nothing. Two reports landing in the same second (an always probe
+//! and a throughput result, or a block and the loss the classifier joined
+//! for it) are merged dimension-wise rather than the second one being lost.
 
 use crate::config::TsConfig;
 use crate::model::{LinkKey, ProbeState};
@@ -34,7 +38,9 @@ pub use crate::clock::now_secs;
 /// Length of a per-link aggregate bucket, in seconds.
 pub const BUCKET_SECS: u64 = 60;
 /// Grows the raw ring by this margin over the retention window (15s cadence).
-const RAW_RING_CAP: usize = (7200 * 3) / 15;
+// Two hours of 15 s always samples at three per second of slack, plus two
+// hours of 10 s marking blocks.
+const RAW_RING_CAP: usize = (7200 * 3) / 15 + 7200 / 10;
 /// How many samples a single gossip delta may carry.
 pub const DELTA_LIMIT: usize = 2000;
 
@@ -72,7 +78,40 @@ pub struct RawSample {
     pub util_mbps: f32,
     /// `ProbeState` code (0 quiet, 1 busy, 2 conflict).
     pub state: u8,
+    /// Alternate-marking block counted by the link's own node (`tx` = sent
+    /// on the interface, `rx` = arrived from the peer), stamped `ts = n ×
+    /// secs`. Set only on block samples.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mark_n: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mark_secs: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mark_tx_s: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mark_tx_l: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mark_rx_s: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mark_rx_l: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mark_tx_bytes: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mark_rx_bytes: Option<u64>,
+    /// Bit 0: the counters restarted during the block (do not use the
+    /// numbers); bit 1: a throughput test on that node overlapped it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mark_flags: Option<u8>,
+    /// The block's loss and rate as joined by the classifier (this link's
+    /// `tx` against the peer's `rx` for the same block): written back onto
+    /// the block sample so the history and the buckets carry them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mark_loss_pct: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mark_rate_mbps: Option<f32>,
 }
+
+pub const MARK_RESET: u8 = 1;
+pub const MARK_UNDER_TEST: u8 = 2;
 
 impl RawSample {
     /// Fold a same-second sample into this one: every dimension `other`
@@ -90,7 +129,57 @@ impl RawSample {
             udp_loss_pct: other.udp_loss_pct.or(self.udp_loss_pct),
             util_mbps: self.util_mbps.max(other.util_mbps),
             state: self.state.max(other.state),
+            mark_n: other.mark_n.or(self.mark_n),
+            mark_secs: other.mark_secs.or(self.mark_secs),
+            mark_tx_s: other.mark_tx_s.or(self.mark_tx_s),
+            mark_tx_l: other.mark_tx_l.or(self.mark_tx_l),
+            mark_rx_s: other.mark_rx_s.or(self.mark_rx_s),
+            mark_rx_l: other.mark_rx_l.or(self.mark_rx_l),
+            mark_tx_bytes: other.mark_tx_bytes.or(self.mark_tx_bytes),
+            mark_rx_bytes: other.mark_rx_bytes.or(self.mark_rx_bytes),
+            mark_flags: other.mark_flags.or(self.mark_flags),
+            mark_loss_pct: other.mark_loss_pct.or(self.mark_loss_pct),
+            mark_rate_mbps: other.mark_rate_mbps.or(self.mark_rate_mbps),
         }
+    }
+
+    /// A block sample: the agent's counters for one alternate-marking block,
+    /// stamped at the block start. `None` for a block whose length the
+    /// agent did not report (nothing can be stamped or joined).
+    pub fn from_block(b: &mielofon_proto::MarkBlock) -> Option<Self> {
+        if b.secs == 0 {
+            return None;
+        }
+        let clamp = |v: u64| u32::try_from(v).unwrap_or(u32::MAX);
+        let flags = u8::from(b.reset) * MARK_RESET + u8::from(b.under_test) * MARK_UNDER_TEST;
+        Some(RawSample {
+            ts: b.n * u64::from(b.secs),
+            mark_n: Some(b.n),
+            mark_secs: Some(b.secs),
+            mark_tx_s: Some(clamp(b.tx_pkts_s)),
+            mark_tx_l: Some(clamp(b.tx_pkts_l)),
+            mark_rx_s: Some(clamp(b.rx_pkts_s)),
+            mark_rx_l: Some(clamp(b.rx_pkts_l)),
+            mark_tx_bytes: Some(b.tx_bytes),
+            mark_rx_bytes: Some(b.rx_bytes),
+            mark_flags: Some(flags),
+            ..RawSample::default()
+        })
+    }
+
+    /// The classifier's joined loss/rate for the block at `ts`, to merge
+    /// onto the block sample.
+    pub fn block_result(ts: u64, loss_pct: f64, rate_mbps: f64) -> Self {
+        RawSample {
+            ts,
+            mark_loss_pct: Some(loss_pct as f32),
+            mark_rate_mbps: Some(rate_mbps as f32),
+            ..RawSample::default()
+        }
+    }
+
+    pub fn is_block(&self) -> bool {
+        self.mark_n.is_some()
     }
 
     pub fn from_dims(
@@ -110,11 +199,9 @@ impl RawSample {
             loss_pct: opt(loss_pct),
             jitter_ms: opt(jitter_ms),
             tcp_mbps: opt(tcp_mbps),
-            udp_mbps: None,
-            udp_jitter_ms: None,
-            udp_loss_pct: None,
             util_mbps: util_mbps as f32,
             state: state_code(state),
+            ..RawSample::default()
         }
     }
 
@@ -187,6 +274,9 @@ pub struct Bucket {
     pub udp_jitter: DimAgg,
     pub udp_loss: DimAgg,
     pub util: DimAgg,
+    /// Joined alternate-marking loss and rate per block (`docs/passive-quality.md`).
+    pub mark_loss: DimAgg,
+    pub mark_rate: DimAgg,
 }
 
 impl Bucket {
@@ -221,6 +311,12 @@ impl Bucket {
         if let (Some(v), None) = (s.udp_loss_pct, already.udp_loss_pct) {
             self.udp_loss.merge(v);
         }
+        if let (Some(v), None) = (s.mark_loss_pct, already.mark_loss_pct) {
+            self.mark_loss.merge(v);
+        }
+        if let (Some(v), None) = (s.mark_rate_mbps, already.mark_rate_mbps) {
+            self.mark_rate.merge(v);
+        }
     }
 }
 
@@ -252,6 +348,10 @@ pub struct BucketView {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub udp_loss: Option<DimView>,
     pub util: DimView,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mark_loss: Option<DimView>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mark_rate: Option<DimView>,
 }
 
 /// Result of a time-series query.
@@ -317,20 +417,21 @@ impl Tsdb {
         {
             let mut map = self.by_link.write().expect("tsdb by_link write");
             let ring = map.entry(link.clone()).or_default();
-            match ring.back_mut() {
-                // Out-of-order (older than the newest) — drop, keep newest.
-                Some(back) if back.ts > s.ts => return false,
-                Some(back) if back.ts == s.ts => {
-                    let merged = back.merged_with(&s);
-                    if merged == *back {
+            // Keep the ring sorted by ts: block samples arrive stamped in
+            // the past, behind the always sample that carried them.
+            let pos = ring.partition_point(|x| x.ts < s.ts);
+            match ring.get_mut(pos) {
+                Some(at) if at.ts == s.ts => {
+                    let merged = at.merged_with(&s);
+                    if merged == *at {
                         return false; // exact resend
                     }
-                    merged_from = Some(*back);
-                    *back = merged;
+                    merged_from = Some(*at);
+                    *at = merged;
                     s = merged;
                 }
                 _ => {
-                    ring.push_back(s);
+                    ring.insert(pos, s);
                     if ring.len() > RAW_RING_CAP {
                         ring.pop_front();
                     }
@@ -453,6 +554,8 @@ impl Tsdb {
                         udp: b.udp.view(),
                         udp_jitter: b.udp_jitter.view(),
                         udp_loss: b.udp_loss.view(),
+                        mark_loss: b.mark_loss.view(),
+                        mark_rate: b.mark_rate.view(),
                         util: b.util.view().unwrap_or(DimView {
                             n: 0,
                             min: 0.0,
@@ -697,10 +800,11 @@ impl Store for Tsdb {
     /// gaps are fabricated. The always-tier dims (rtt/loss/jitter) are taken
     /// from the most recent sample within `always_fresh_secs`; the gated
     /// throughput dim is the most recent value within `tcp_fresh_secs`, else
-    /// the last-known carried within `tcp_carry_secs`. The per-link timestamps
-    /// are monotonic (single producer), so scanning the ring backward from the
-    /// newest sample yields exactly the "latest within each horizon" per
-    /// dimension.
+    /// the last-known carried within `tcp_carry_secs`. The ring is sorted by
+    /// ts, so scanning it backward from the newest sample yields exactly the
+    /// "latest within each horizon" per dimension. Block samples carry none
+    /// of these dims and are skipped by the `None` checks; the marking
+    /// summary is the classifier's (`mark.rs`).
     fn window(&self, link: &LinkKey, spec: &WindowSpec, now: u64) -> Option<WindowView> {
         let map = self.by_link.read().expect("tsdb by_link read");
         let ring = map.get(link)?;
@@ -949,6 +1053,50 @@ mod tests {
         assert_eq!(v.min, 0.0);
         let avg = b.rtt.map(|x| x.avg).unwrap();
         assert!((avg - 14.5).abs() < 1e-3, "avg {avg}");
+    }
+
+    #[test]
+    fn out_of_order_samples_are_kept_sorted_and_merged() {
+        let tsdb = Tsdb::new(TsConfig::default());
+        let (a, _) = links();
+        tsdb.append(&a, sample(200, 5.0));
+        // A block stamped before the always sample that carried it.
+        let blk = RawSample::from_block(&mielofon_proto::MarkBlock {
+            n: 19,
+            secs: 10,
+            tx_pkts_s: 1,
+            tx_pkts_l: 2,
+            tx_bytes: 3000,
+            rx_pkts_s: 4,
+            rx_pkts_l: 5,
+            rx_bytes: 6000,
+            reset: false,
+            under_test: true,
+        })
+        .unwrap();
+        assert_eq!(blk.ts, 190);
+        tsdb.append(&a, blk);
+        // The joined result lands on the same second, dimension-wise.
+        tsdb.append(&a, RawSample::block_result(190, 0.5, 2.4));
+        let r = tsdb.query(&a, 0, 1000);
+        assert_eq!(
+            r.samples.iter().map(|s| s.ts).collect::<Vec<_>>(),
+            vec![190, 200]
+        );
+        let b = r.samples[0];
+        assert!(b.is_block());
+        assert_eq!(b.mark_tx_l, Some(2));
+        assert_eq!(b.mark_flags, Some(MARK_UNDER_TEST));
+        assert_eq!(b.mark_loss_pct, Some(0.5));
+        assert_eq!(b.mark_rate_mbps, Some(2.4));
+        // The bucket rolled the joined dims (not the raw counters).
+        let bucket = &r.buckets[0];
+        assert_eq!(bucket.mark_loss.as_ref().unwrap().avg, 0.5);
+        assert!(bucket.mark_rate.is_some());
+        // Still the always sample's rtt.
+        assert_eq!(r.samples[1].rtt_ms, Some(5.0));
+        // A block without a length cannot be stamped.
+        assert!(RawSample::from_block(&mielofon_proto::MarkBlock::default()).is_none());
     }
 
     #[test]

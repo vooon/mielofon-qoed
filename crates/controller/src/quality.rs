@@ -59,8 +59,13 @@ pub fn classify_window(cfg: &QualityCfg, view: &WindowView) -> Quality {
     let udp_jitter = view
         .udp_jitter_ms
         .map(|m| score_upper(m, classes.map(|c| c.udp_jitter_ms)));
+    // The passive tier's rate bound shares the throughput thresholds: the
+    // rate the measured loss allows is scored like a measured rate.
+    let implied = view
+        .implied_tcp_mbps
+        .map(|m| score_lower(m, classes.map(|c| c.tcp_mbps)));
 
-    worst(&[rtt, loss, jitter, tcp, udp, udp_loss, udp_jitter])
+    worst(&[rtt, loss, jitter, tcp, udp, udp_loss, udp_jitter, implied])
 }
 
 /// Escalate the score while the metric exceeds an upper-bound (≤-ok) class
