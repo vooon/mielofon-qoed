@@ -53,6 +53,8 @@ pub struct Throughput {
     pub udp_port: u16,
     pub udp_rate_mbps: f64,
     pub duration: Duration,
+    /// Pacing cap of the TCP leg (Mbps); 0 = unpaced.
+    pub tcp_rate_mbps: f64,
     pub quiet_max_mbps: f64,
     /// Pings stay paused this long after a test.
     pub grace: Duration,
@@ -75,6 +77,7 @@ impl Throughput {
             udp_port: 0,
             udp_rate_mbps: 0.0,
             duration,
+            tcp_rate_mbps: 0.0,
             quiet_max_mbps,
             grace,
             gate,
@@ -173,10 +176,16 @@ impl Throughput {
             Leg::Udp => self.port,
         };
         cmd.args(["-p", &port.to_string(), "-t", &secs.to_string()]);
-        if leg == Leg::Udp {
-            cmd.arg("-u")
-                .arg("-b")
-                .arg(format!("{}M", self.udp_rate_mbps));
+        match leg {
+            Leg::Tcp if self.tcp_rate_mbps > 0.0 => {
+                cmd.arg("-b").arg(format!("{}M", self.tcp_rate_mbps));
+            }
+            Leg::Tcp => {}
+            Leg::Udp => {
+                cmd.arg("-u")
+                    .arg("-b")
+                    .arg(format!("{}M", self.udp_rate_mbps));
+            }
         }
         cmd.kill_on_drop(true);
 

@@ -107,6 +107,16 @@ hysteresis_passes = 3
 pair_cost = "directional"
 hub_spoke_cost_offset = 1000
 
+# Scheduler cadences (seconds). The throughput tier is the only probe that
+# costs real traffic: each run uploads for the agent's `tcp_duration` at up
+# to its `tcp_rate_mbps`, in both directions once the peer's half runs, so on
+# a metered VPS link the interval is a traffic budget. The classifier carries
+# a throughput sample for `tcp_carry_secs`; probing more often than that only
+# burns quota. Always-on pings are cheap and stay at 15 s.
+[scheduler]
+always_interval_secs = 15
+throughput_interval_secs = 1800
+
 # Console logging. `level` sets the minimum tracing level emitted to the
 # console; `format` selects the console output (logfmt, json, or syslog for
 # a procd-fed stderr: no timestamp, target or colour). Both are

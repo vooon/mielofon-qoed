@@ -38,6 +38,12 @@ describe('ringLayout', () => {
 	it('centres a lone hub', () => {
 		expect(ringLayout([{ id: 'hub-a', group: 'hub' }])['hub-a']).toEqual({ x: 0, y: 0 });
 	});
+	it('draws an odd ring as an upright star: first node on top, none at the bottom', () => {
+		const five = ['node-0', 'node-1', 'node-2', 'node-3', 'node-4'].map(id => ({ id, group: 'spoke' }));
+		const pos = ringLayout(five, {}, 100, 200);
+		expect(pos['node-0']).toEqual({ x: 0, y: -200 });
+		Object.values(pos).forEach(p => expect(p.y).toBeLessThan(200));
+	});
 });
 
 describe('isHubSpokeLink', () => {

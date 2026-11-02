@@ -56,8 +56,11 @@ config agent 'main'
 	# Quiet threshold in Mbps: above this the throughput test is skipped.
 	option quiet_max_mbps '15'
 	# Duration (seconds) of the gated TCP throughput test (iperf3 upload to
-	# the peer).
+	# the peer) and its pacing cap in Mbps (0 = unpaced). The controller only
+	# needs to see the link clear its best class's tcp_mbps, so cap at about
+	# twice that: on a metered VPS link an unpaced run is the whole bill.
 	option tcp_duration '4'
+	option tcp_rate_mbps '20'
 	# Peer iperf3 server port; keep in sync with the iperf3-server listener.
 	option iperf_port '5201'
 	# UDP leg of the gated test: a fixed-rate stream right after the TCP

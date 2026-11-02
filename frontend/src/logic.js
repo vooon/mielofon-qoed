@@ -35,8 +35,10 @@ export function isHubSpokeLink(link, hubs) {
 
 // Deterministic positions: hubs on an inner ring, spokes on an outer ring,
 // both in name order, so the map looks the same on every load and never
-// needs physics. `existing` keeps nodes where they already are (dragged or
-// placed earlier); only new nodes get ring slots.
+// needs physics. Both rings start at the top (12 o'clock) and go clockwise,
+// so an odd ring reads as an upright star — one point up, never one node
+// sitting at the bottom. `existing` keeps nodes where they already are
+// (dragged or placed earlier); only new nodes get ring slots.
 export function ringLayout(nodes, existing = {}, inner = 220, outer = 460) {
 	const byName = (a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0);
 	const hubs = nodes.filter(n => n.group === 'hub').sort(byName);
@@ -52,7 +54,7 @@ export function ringLayout(nodes, existing = {}, inner = 220, outer = 460) {
 			out[n.id] = { x: Math.round(radius * Math.cos(a)) || 0, y: Math.round(radius * Math.sin(a)) || 0 };
 		});
 	place(hubs, hubs.length === 1 ? 0 : inner, -Math.PI / 2);
-	place(spokes, outer, -Math.PI / 2 + Math.PI / Math.max(spokes.length, 1));
+	place(spokes, outer, -Math.PI / 2);
 	return out;
 }
 

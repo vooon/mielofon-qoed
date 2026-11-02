@@ -19,9 +19,8 @@ use crate::session::dispatch;
 use crate::state::AppState;
 use crate::worker::{Tier, WorkCmd};
 
-/// Sanitized default cadences (seconds).
-const ALWAYS_INTERVAL: u64 = 15;
-const THROUGHPUT_INTERVAL: u64 = 300;
+/// Probe cadences come from `[scheduler]`; the fence lease is sized for one
+/// test (both iperf3 legs plus slack).
 const FENCE_TTL_SECS: u64 = 120;
 
 pub async fn scheduler_loop(state: AppState) {
@@ -34,6 +33,8 @@ pub async fn scheduler_loop(state: AppState) {
 
 fn plan_tick(state: &AppState) {
     let now = now_secs();
+    let always_interval = state.cfg.scheduler.always_interval_secs.max(1);
+    let throughput_interval = state.cfg.scheduler.throughput_interval_secs.max(1);
 
     // Seeding for fresh agents is handled in register; here we only issue
     // work for links owned by registered agents.
@@ -43,7 +44,7 @@ fn plan_tick(state: &AppState) {
         // Always-on tier (cheap, congestion-immune) — never gated.
         if state
             .workers
-            .probe_due(&agent, &link, Tier::Always, now, ALWAYS_INTERVAL)
+            .probe_due(&agent, &link, Tier::Always, now, always_interval)
         {
             let span =
                 tracing::info_span!("agent.command", agent=%agent, tier="always", link=%link_id);
@@ -68,7 +69,7 @@ fn plan_tick(state: &AppState) {
         // after the blocking lease is released.
         if state
             .workers
-            .probe_due(&agent, &link, Tier::Throughput, now, THROUGHPUT_INTERVAL)
+            .probe_due(&agent, &link, Tier::Throughput, now, throughput_interval)
         {
             if let Ok(lease) = state.fence.acquire(&agent, &link, FENCE_TTL_SECS) {
                 let span = tracing::info_span!("agent.command", agent=%agent, tier="throughput", link=%link_id);

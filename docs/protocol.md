@@ -255,7 +255,8 @@ GET /metrics                                 Prometheus text exposition
 ## Time-series history (TSDB)
 
 Every ingested report is appended to a per-link time-series: a raw sample
-(always probes every 15 s, throughput every 300 s) plus a 60 s aggregate
+(always probes every 15 s, throughput every 30 min by default; both are
+`[scheduler]` cadences) plus a 60 s aggregate
 bucket (min/avg/max per dimension). Two reports in the same second are merged
 dimension-wise. Raw samples are **replicated** between cluster members
 through the gossip exchange (each push carries the fresh samples since the
