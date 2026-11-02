@@ -16,6 +16,36 @@ pub enum Quality {
     Bad,
 }
 
+/// The shape of a link's passive loss over the classifier's loss window
+/// (`mark::summarize`): the early warning that the border middlebox
+/// changed its behaviour. Drives nothing automatically.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Regime {
+    /// No loss in the window.
+    Clean,
+    /// Loss in most blocks at a steady rate: a policer or random drops.
+    Sparse,
+    /// Loss concentrated in few blocks: an outage or a burst of resets.
+    Bursty,
+    /// The large-packet band loses at least five times the small one.
+    SizeSelective,
+    /// Every recent block overlapped a throughput test: nothing to judge.
+    UnderTest,
+}
+
+impl Regime {
+    pub fn label(self) -> &'static str {
+        match self {
+            Regime::Clean => "clean",
+            Regime::Sparse => "sparse",
+            Regime::Bursty => "bursty",
+            Regime::SizeSelective => "size_selective",
+            Regime::UnderTest => "under_test",
+        }
+    }
+}
+
 /// A per-link quality/policy record, keyed by LinkKey (LWW by `ts`).
 ///
 /// The KV holds the *derived* record written by the classifier: the collapsed
@@ -44,6 +74,17 @@ pub struct QualityRecord {
     pub quality: Option<Quality>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ospf_cost: Option<u32>,
+    /// Passive tier: loss of the link's real traffic over the loss window,
+    /// the highest recent block rate, the TCP rate the loss allows and the
+    /// loss shape (`docs/passive-quality.md`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mark_loss_pct: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mark_rate_mbps: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub implied_tcp_mbps: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub regime: Option<Regime>,
 }
 
 impl QualityRecord {
@@ -69,6 +110,10 @@ impl QualityRecord {
             state,
             quality: None,
             ospf_cost: None,
+            mark_loss_pct: None,
+            mark_rate_mbps: None,
+            implied_tcp_mbps: None,
+            regime: None,
         }
     }
 }

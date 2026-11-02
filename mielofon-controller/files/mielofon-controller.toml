@@ -106,6 +106,20 @@ busy_hold_secs = 120
 hysteresis_passes = 3
 pair_cost = "directional"
 hub_spoke_cost_offset = 1000
+# Passive tier (docs/passive-quality.md): loss of the links' real traffic
+# from the agents' alternate-marking blocks. Loss within the last
+# `mark_window_secs` demotes at once; a clean fast window aggregates over
+# `mark_recover_secs`, so the class recovers only after that long clean.
+# Below `mark_min_pkts` sent the loss is unmeasured. `loss_model` turns the
+# loss into the TCP rate it allows at the link's rtt ("mathis": the
+# Reno/cubic bound; "mbm": RFC 8337, about three times stricter), scored
+# against the classes' `tcp_mbps`; `mss_bytes` is the segment size assumed
+# (tunnel MTU 1420 minus IPv6 + TCP).
+mark_window_secs = 300
+mark_recover_secs = 3600
+mark_min_pkts = 2000
+loss_model = "mathis"
+mss_bytes = 1348
 
 # Scheduler cadences (seconds). The throughput tier is the only probe that
 # costs real traffic: each run uploads for the agent's `tcp_duration` at up

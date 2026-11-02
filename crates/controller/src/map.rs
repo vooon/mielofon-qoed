@@ -42,6 +42,12 @@ pub struct GraphLink {
     pub ospf_cost: Option<u32>,
     /// Unix seconds of the last probe.
     pub ts: u64,
+    /// Passive tier: loss of real traffic, highest recent block rate, the
+    /// TCP rate the loss allows, and the loss shape.
+    pub mark_loss_pct: Option<f64>,
+    pub mark_rate_mbps: Option<f64>,
+    pub implied_tcp_mbps: Option<f64>,
+    pub regime: Option<String>,
 }
 
 impl GraphLink {
@@ -63,6 +69,10 @@ impl GraphLink {
             quality: None,
             ospf_cost: None,
             ts: 0,
+            mark_loss_pct: None,
+            mark_rate_mbps: None,
+            implied_tcp_mbps: None,
+            regime: None,
         }
     }
 }
@@ -150,6 +160,10 @@ pub fn graph_part(state: &AppState) -> (Vec<GraphNode>, Vec<GraphLink>) {
                 .map(str::to_string),
             ospf_cost: rec.ospf_cost,
             ts: rec.ts,
+            mark_loss_pct: rec.mark_loss_pct,
+            mark_rate_mbps: rec.mark_rate_mbps,
+            implied_tcp_mbps: rec.implied_tcp_mbps,
+            regime: rec.regime.map(|r| r.label().to_string()),
         });
     }
 

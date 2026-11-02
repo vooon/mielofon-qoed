@@ -499,6 +499,10 @@ mod tests {
             quality: Some(quality),
             ospf_cost: Some(10),
             tcp_mbps: Some(50.0),
+            mark_loss_pct: None,
+            mark_rate_mbps: None,
+            implied_tcp_mbps: None,
+            regime: None,
         };
         state.kv.put(LinkKey::new(from, to, iface), rec);
     }

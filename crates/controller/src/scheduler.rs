@@ -15,9 +15,11 @@
 //! registry at once, so its links stop being scheduled.
 
 use crate::clock::now_secs;
+use crate::model::LinkKey;
 use crate::session::dispatch;
 use crate::state::AppState;
 use crate::worker::{Tier, WorkCmd};
+use std::sync::atomic::Ordering;
 
 /// Probe cadences come from `[scheduler]`; the fence lease is sized for one
 /// test (both iperf3 legs plus slack).
@@ -29,6 +31,20 @@ pub async fn scheduler_loop(state: AppState) {
         tick.tick().await;
         plan_tick(&state);
     }
+}
+
+/// Whether the passive tier already proved the link good
+/// (`docs/passive-quality.md`, scheduling consequences): a joined block
+/// within `tcp_fresh_secs` carried at least the good class's `tcp_mbps`,
+/// and the measured loss allows that rate too (or is unmeasured).
+fn passive_proof(state: &AppState, link: &LinkKey) -> bool {
+    let Some(good) = state.cfg.quality.good.tcp_mbps else {
+        return false;
+    };
+    let Some(rec) = state.kv.get(link) else {
+        return false;
+    };
+    rec.mark_rate_mbps.is_some_and(|r| r >= good) && rec.implied_tcp_mbps.is_none_or(|v| v >= good)
 }
 
 fn plan_tick(state: &AppState) {
@@ -71,6 +87,16 @@ fn plan_tick(state: &AppState) {
             .workers
             .probe_due(&agent, &link, Tier::Throughput, now, throughput_interval)
         {
+            if passive_proof(state, &link) {
+                // Real traffic already proved the top class for free: skip
+                // this round and look again after the interval.
+                state
+                    .workers
+                    .mark_issued(&agent, &link, Tier::Throughput, now);
+                crate::api::THROUGHPUT_SKIPPED.fetch_add(1, Ordering::Relaxed);
+                tracing::debug!(agent, link = %link_id, "throughput test skipped: passive proof");
+                continue;
+            }
             if let Ok(lease) = state.fence.acquire(&agent, &link, FENCE_TTL_SECS) {
                 let span = tracing::info_span!("agent.command", agent=%agent, tier="throughput", link=%link_id);
                 let traceparent = span.in_scope(mielofon_otel::tracectx::current_traceparent);
@@ -194,6 +220,53 @@ mod tests {
         let all = throughput_links(&fake.seen());
         assert_eq!(all.len(), 2);
         assert_ne!(all[1], all[0]);
+    }
+
+    /// A link whose real traffic already carried the good class's rate,
+    /// with the passive loss allowing it, gets no throughput test this
+    /// round; a loss bound below the class brings the test back.
+    #[tokio::test]
+    async fn passive_proof_skips_the_throughput_test() {
+        let link = LinkKey::new("hub-a", "hub-b", "awg_a");
+        let proven = |implied: Option<f64>| {
+            let state = AppState::new(Config::default());
+            let mut rec = crate::model::QualityRecord::new(
+                Some(9.0),
+                Some(0.0),
+                Some(1.0),
+                None,
+                None,
+                0.0,
+                mielofon_proto::ProbeState::Quiet,
+            );
+            rec.mark_rate_mbps = Some(12.0);
+            rec.implied_tcp_mbps = implied;
+            state.kv.put(link.clone(), rec);
+            state
+        };
+
+        let state = proven(None);
+        let fake = connect(&state, "hub-a", vec![link.clone()], None, hold_throughput);
+        let before = crate::api::THROUGHPUT_SKIPPED.load(Ordering::Relaxed);
+        plan_tick(&state);
+        settle().await;
+        assert!(throughput_links(&fake.seen()).is_empty());
+        assert!(state.fence.leases().is_empty());
+        assert_eq!(
+            crate::api::THROUGHPUT_SKIPPED.load(Ordering::Relaxed),
+            before + 1
+        );
+        // Skipped for the round: not re-evaluated on the next tick.
+        plan_tick(&state);
+        settle().await;
+        assert!(throughput_links(&fake.seen()).is_empty());
+
+        // Loss that caps TCP below the good class: the test runs.
+        let state = proven(Some(3.0));
+        let fake = connect(&state, "hub-a", vec![link.clone()], None, hold_throughput);
+        plan_tick(&state);
+        settle().await;
+        assert_eq!(throughput_links(&fake.seen()), vec!["awg_a".to_string()]);
     }
 
     #[tokio::test]

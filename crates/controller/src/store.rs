@@ -52,6 +52,19 @@ pub struct WindowView {
     /// True when `tcp_mbps` was carried from beyond its primary fresh window
     /// (still within the carry horizon).
     pub tcp_carried: bool,
+    /// Passive tier (`mark::summarize`, filled in by the classifier since
+    /// it needs the reverse link's samples): loss of the link's real
+    /// traffic over the loss window, per length band, the highest block
+    /// rate within `tcp_fresh_secs` and the loss shape.
+    pub mark_loss_pct: Option<f64>,
+    pub mark_loss_s_pct: Option<f64>,
+    pub mark_loss_l_pct: Option<f64>,
+    pub mark_rate_mbps: Option<f64>,
+    pub regime: Option<crate::model::Regime>,
+    /// The TCP rate `mark_loss_pct` allows at `rtt_ms` under the
+    /// configured loss model; `None` when either is unmeasured or the
+    /// loss is exactly zero (no constraint).
+    pub implied_tcp_mbps: Option<f64>,
 }
 
 impl WindowView {

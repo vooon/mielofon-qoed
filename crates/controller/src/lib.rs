@@ -10,6 +10,7 @@ pub mod fence;
 pub mod gossip;
 pub mod kv;
 pub mod map;
+pub mod mark;
 pub mod model;
 pub mod quality;
 pub mod scheduler;

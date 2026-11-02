@@ -343,10 +343,19 @@ pub fn handle_reply(state: &AppState, reply: AgentReply) {
             // An older agent names the link after its own BIRD decoding.
             let mut link = link;
             link.to = state.workers.canonical_peer(&link.to);
+            // Passive tier (docs/passive-quality.md): every finished
+            // alternate-marking block is a sample of its own, stamped at the
+            // block start; the classifier joins it with the peer's half.
+            for b in &blocks {
+                match crate::tsdb::RawSample::from_block(b) {
+                    Some(s) => state.tsdb.append(&link, s),
+                    None => {
+                        debug!(agent, link = %link.id(), n = b.n, "block without a length dropped")
+                    }
+                }
+            }
             if !blocks.is_empty() {
-                // Passive tier (docs/passive-quality.md): the store and the
-                // join land with the controller half of phase 1.
-                debug!(agent, link = %link.id(), n = blocks.len(), "marking blocks received");
+                debug!(agent, link = %link.id(), n = blocks.len(), "marking blocks stored");
             }
             if let Some(note) = &note {
                 crate::api::PROBE_FAILURES.fetch_add(1, Ordering::Relaxed);
