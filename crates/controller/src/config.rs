@@ -316,6 +316,31 @@ impl Default for Classifier {
     }
 }
 
+/// Scheduler cadences (seconds).
+///
+/// The throughput tier is the only probe that costs real traffic: every run
+/// uploads for the agent's `tcp_duration` at up to its `tcp_rate_mbps`, both
+/// ways on a metered link once the peer's own half runs. The classifier
+/// carries a throughput sample for `tcp_carry_secs`, so probing much more
+/// often than that only burns quota.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+pub struct Scheduler {
+    /// Always-on probe cadence per link.
+    pub always_interval_secs: u64,
+    /// Gated throughput probe cadence per link.
+    pub throughput_interval_secs: u64,
+}
+
+impl Default for Scheduler {
+    fn default() -> Self {
+        Scheduler {
+            always_interval_secs: 15,
+            throughput_interval_secs: 1800,
+        }
+    }
+}
+
 /// Time-series history configuration.
 ///
 /// `path` selects the durable embedded redb file; an empty path keeps history
@@ -353,6 +378,8 @@ impl Default for TsConfig {
 /// level = "info"
 /// [ts]
 /// path = "/var/lib/mielofon/tsdb.redb"
+/// [scheduler]
+/// throughput_interval_secs = 1800
 /// [frontend]
 /// root_dir = "/usr/share/mielofon/dashboard"
 /// [otel]
@@ -367,6 +394,7 @@ pub struct Config {
     pub tls: Tls,
     pub quality: Quality,
     pub classifier: Classifier,
+    pub scheduler: Scheduler,
     pub log: Log,
     pub otel: mielofon_otel::OTelConfig,
     pub ts: TsConfig,
@@ -403,5 +431,7 @@ mod tests {
         assert_eq!(c.listeners.client_port, 9552);
         assert!(c.listeners.admin_addr.is_loopback());
         assert_eq!(c.listeners.admin_port, 9553);
+        assert_eq!(c.scheduler.always_interval_secs, 15);
+        assert_eq!(c.scheduler.throughput_interval_secs, 1800);
     }
 }

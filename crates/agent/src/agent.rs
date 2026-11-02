@@ -65,6 +65,7 @@ impl<B: Bus> Agent<B> {
             grace,
             gate.clone(),
         );
+        throughput.tcp_rate_mbps = cfg.tcp_rate_mbps;
         throughput.udp_port = cfg.udp_port;
         throughput.udp_rate_mbps = cfg.udp_rate_mbps;
         Agent {

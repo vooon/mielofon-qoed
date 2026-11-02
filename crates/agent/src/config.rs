@@ -43,6 +43,11 @@ pub struct Config {
     pub quiet_max_mbps: f64,
     /// Duration of the TCP throughput test.
     pub tcp_duration: Duration,
+    /// Send-rate cap of the TCP leg (Mbps); 0 lets iperf3 run unpaced. The
+    /// classifier only needs to know a link clears its best class's
+    /// `tcp_mbps`, so the cap bounds the traffic a test costs on a metered
+    /// link without changing the verdict.
+    pub tcp_rate_mbps: f64,
     /// Peer iperf3 server port (TCP leg).
     pub iperf_port: u16,
     /// Peer iperf3 port for the UDP leg; `iperf_port` when unset.
@@ -193,6 +198,7 @@ impl Config {
             ping_window: num(main, "ping_window", 60_usize).clamp(2, 3600),
             quiet_max_mbps: num(main, "quiet_max_mbps", 15.0),
             tcp_duration: Duration::from_secs(num(main, "tcp_duration", 4_u64).clamp(1, 60)),
+            tcp_rate_mbps: num(main, "tcp_rate_mbps", 20.0_f64).max(0.0),
             iperf_port: num(main, "iperf_port", 5201),
             udp_port: num(main, "udp_port", 0),
             udp_rate_mbps: num(main, "udp_rate_mbps", 20.0_f64).max(0.0),
@@ -273,6 +279,7 @@ mod tests {
         assert_eq!(c.refresh_interval, Duration::from_secs(60), "default");
         assert_eq!(c.quiet_max_mbps, 15.0, "malformed number falls back");
         assert_eq!(c.tcp_duration, Duration::from_secs(6));
+        assert_eq!(c.tcp_rate_mbps, 20.0, "default cap");
         assert_eq!(c.ospf_protocol, "mesh_v3");
         assert_eq!(c.ifaces, vec!["awg_*".to_string()], "default glob");
         assert_eq!(c.excludes, vec!["awg_legacy".to_string()]);
