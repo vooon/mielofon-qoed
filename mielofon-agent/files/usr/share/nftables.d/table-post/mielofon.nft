@@ -8,6 +8,12 @@
 # every standard CS/AF/EF codepoint survives an OR / mask). The mark never
 # reaches the carrier: it is encrypted into the tunnel payload and cleared
 # again on the receiving side right after decapsulation.
+#
+# Counting rule: every packet must tick exactly one set element. A set
+# lookup ticks its element counter the moment it matches, whatever the rest
+# of the rule does, so the protocol test comes first explicitly (nft would
+# otherwise insert it right before the `ip`/`ip6` statement, after the
+# lookup, and count every packet in both the ip and the ip6 rule).
 
 # Egress colour per managed interface, rebuilt by the agent each block:
 #   "awg_hub_a" : jump mielofon_a    (block n even)
@@ -38,32 +44,33 @@ chain mielofon_mark {
 }
 
 chain mielofon_a {
-	meta length <= 1000 oifname @mf_tx_a_s ip6 dscp set ip6 dscp | 0x01
-	meta length <= 1000 oifname @mf_tx_a_s ip dscp set ip dscp | 0x01
-	meta length > 1000 oifname @mf_tx_a_l ip6 dscp set ip6 dscp | 0x01
-	meta length > 1000 oifname @mf_tx_a_l ip dscp set ip dscp | 0x01
+	meta nfproto ipv6 meta length <= 1000 oifname @mf_tx_a_s ip6 dscp set ip6 dscp | 0x01
+	meta nfproto ipv4 meta length <= 1000 oifname @mf_tx_a_s ip dscp set ip dscp | 0x01
+	meta nfproto ipv6 meta length > 1000 oifname @mf_tx_a_l ip6 dscp set ip6 dscp | 0x01
+	meta nfproto ipv4 meta length > 1000 oifname @mf_tx_a_l ip dscp set ip dscp | 0x01
 }
 
 chain mielofon_b {
-	meta length <= 1000 oifname @mf_tx_b_s ip6 dscp set ip6 dscp & 0x3e
-	meta length <= 1000 oifname @mf_tx_b_s ip dscp set ip dscp & 0x3e
-	meta length > 1000 oifname @mf_tx_b_l ip6 dscp set ip6 dscp & 0x3e
-	meta length > 1000 oifname @mf_tx_b_l ip dscp set ip dscp & 0x3e
+	meta nfproto ipv6 meta length <= 1000 oifname @mf_tx_b_s ip6 dscp set ip6 dscp & 0x3e
+	meta nfproto ipv4 meta length <= 1000 oifname @mf_tx_b_s ip dscp set ip dscp & 0x3e
+	meta nfproto ipv6 meta length > 1000 oifname @mf_tx_b_l ip6 dscp set ip6 dscp & 0x3e
+	meta nfproto ipv4 meta length > 1000 oifname @mf_tx_b_l ip dscp set ip dscp & 0x3e
 }
 
 # Ingress: right after decapsulation, before fw4's mangle_prerouting and any
-# zone filtering (a packet fw4 later drops still crossed the link). The set
-# lookup is the last expression so its per-element counter only ticks when
-# colour and length matched. Colour-A packets are cleaned so the bit never
-# leaves the tunnel.
+# zone filtering (a packet fw4 later drops still crossed the link). The
+# colour test comes first and the set lookup last, so a per-element counter
+# only ticks when colour and length matched. Colour B (bit clear) is
+# counted before the colour-A rules, which clean the bit in place and let
+# the packet continue: the other order would count every A packet as B too.
 chain mielofon_count {
 	type filter hook prerouting priority mangle - 10; policy accept;
-	ip6 dscp & 0x01 == 0x01 meta length <= 1000 iifname @mf_rx_a_s ip6 dscp set ip6 dscp & 0x3e
-	ip6 dscp & 0x01 == 0x01 meta length > 1000 iifname @mf_rx_a_l ip6 dscp set ip6 dscp & 0x3e
 	ip6 dscp & 0x01 == 0x00 meta length <= 1000 iifname @mf_rx_b_s
 	ip6 dscp & 0x01 == 0x00 meta length > 1000 iifname @mf_rx_b_l
-	ip dscp & 0x01 == 0x01 meta length <= 1000 iifname @mf_rx_a_s ip dscp set ip dscp & 0x3e
-	ip dscp & 0x01 == 0x01 meta length > 1000 iifname @mf_rx_a_l ip dscp set ip dscp & 0x3e
+	ip6 dscp & 0x01 == 0x01 meta length <= 1000 iifname @mf_rx_a_s ip6 dscp set ip6 dscp & 0x3e
+	ip6 dscp & 0x01 == 0x01 meta length > 1000 iifname @mf_rx_a_l ip6 dscp set ip6 dscp & 0x3e
 	ip dscp & 0x01 == 0x00 meta length <= 1000 iifname @mf_rx_b_s
 	ip dscp & 0x01 == 0x00 meta length > 1000 iifname @mf_rx_b_l
+	ip dscp & 0x01 == 0x01 meta length <= 1000 iifname @mf_rx_a_s ip dscp set ip dscp & 0x3e
+	ip dscp & 0x01 == 0x01 meta length > 1000 iifname @mf_rx_a_l ip dscp set ip dscp & 0x3e
 }

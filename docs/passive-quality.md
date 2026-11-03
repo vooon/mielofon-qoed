@@ -207,6 +207,41 @@ Interaction notes:
 // unmeasured), "under_test": true (a throughput test overlapped)
 ```
 
+### Counting caveats
+
+Lessons from review of the first include; each is a rule the ruleset and
+the block task now follow.
+
+- **One packet, one element.** A set lookup ticks its per-element counter
+  the moment it matches, whatever the rest of the rule does. The egress
+  rules therefore test the protocol explicitly (`meta nfproto`) *before*
+  the lookup — left implicit, nft inserts the test right before the
+  `ip`/`ip6` statement, after the lookup, and every packet is counted in
+  both the IPv4 and the IPv6 rule. The ingress chain counts colour B
+  before the colour-A rules, which clean the bit in place and let the
+  packet continue; the other order counts every A packet as B too.
+- **A baseline is for one block.** The agent's delta for block `n` is
+  valid only against the read of block `n − 2`. After a failed or missed
+  read the next read of that colour only re-seeds the baseline; a delta
+  over two blocks would join with the peer's one-block count as 50 % loss.
+- **Under test is an interval, not two instants.** A throughput test with
+  its grace can start and end inside one block, between the two moments
+  the block task used to sample the gate; the gate now remembers its
+  pauses and the block is flagged when any overlapped it.
+- **Netfilter counts socket buffers, not wire packets.** With GRO on the
+  tunnel interface the receiver's prerouting can see one coalesced buffer
+  for several segments the sender's postrouting counted one by one (or
+  the other way round for a GSO buffer of a local TCP socket, or a
+  forwarded flow GRO coalesced on the LAN side), and `tx − rx` is then
+  not loss. The large band is the one affected; the small band (pings,
+  DNS, ACKs, QUIC control) is not coalesced. Until measured otherwise the
+  rollout check below is the arbiter: if the manual test's retransmits and
+  the marking loss disagree on a clean link, turn GRO off on the tunnel
+  interfaces (`ethtool -K <iface> gro off`; the wireguard family exposes
+  the flag) and GSO/TSO off on them for locally sourced TCP, and compare
+  again. The requirement, once known, belongs to the network config, not
+  to this package.
+
 ### Controller
 
 **Storage.** The counters are appended to the link's time-series as new
@@ -248,7 +283,9 @@ separately).
 
 - `mark_loss_pct`: `Σ lost / Σ sent` over the loss window (below),
   `None` unless `Σ sent ≥ mark_min_pkts` (default 2000) and at least one
-  joined block exists;
+  joined block exists; a lossy fast window that is itself below the floor
+  (a quiet link) falls back to the slow window rather than reporting the
+  loss as unmeasured;
 - `mark_rate_mbps`: the highest block rate within `tcp_fresh_secs` (the
   throughput freshness horizon, so the scheduler's proof below and the
   rate shown on the map age like a test result);
@@ -335,8 +372,10 @@ regime.
 With passive data available the scheduler skips the gated throughput test
 for a link whose window holds a joined block with
 `rate ≥ class.good.tcp_mbps` within `tcp_fresh_secs` and
-`implied_tcp_mbps` unset or above that threshold. Such a link has proven the
-top class for free. This is the first byte-saving the passive tier delivers;
+`implied_tcp_mbps` unset or above that threshold, and no carried test
+result below it (the classifier keeps scoring a carried `tcp_mbps`, and
+only a new test replaces it). Such a link has proven the top class for
+free. This is the first byte-saving the passive tier delivers;
 phase 2 replaces the test itself.
 
 ## Configuration
@@ -387,7 +426,11 @@ mss_bytes = 1348
 Rollout: enable on one hub pair first and let it run beside the paced
 iperf3 for a week; the manual test's retransmit count and the marking loss
 over the same minute must agree before the scheduler trusts the passive
-proof on every link.
+proof on every link. Compare per length band: a disagreement confined to
+the large band points at GRO/GSO (see *Counting caveats*), not at the
+link. The 0.18.0 include counted every sent packet twice and every
+colour-A packet twice on ingress; 0.18.1 is the first release whose
+counts can be trusted.
 
 ## Later phases (summary)
 

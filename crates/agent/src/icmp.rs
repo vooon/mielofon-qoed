@@ -18,6 +18,7 @@ use crate::discover::Link;
 use crate::window::{select_rtt, Snapshot, Window};
 use socket2::{Domain, Protocol, SockAddr, Socket, Type};
 use std::collections::HashMap;
+use std::collections::VecDeque;
 use std::io;
 use std::net::SocketAddrV6;
 use std::os::fd::AsRawFd;
@@ -33,12 +34,21 @@ const ICMP6_ECHO_REPLY: u8 = 129;
 /// `ICMP6_FILTER` socket option (netinet/icmp6.h), level `IPPROTO_ICMPV6`.
 const ICMP6_FILTER: libc::c_int = 1;
 
-/// Pauses pings around throughput tests.
+/// Pauses pings around throughput tests, and remembers the pauses so the
+/// marking task can tell whether a test overlapped a block it reads later
+/// (a test can start and end inside one block, between two samples of
+/// `paused()`).
 #[derive(Default)]
 pub struct Gate {
     running: AtomicBool,
     until: Mutex<Option<Instant>>,
+    /// Recent pauses as `(begin, end)`, `end` unset while running; the end
+    /// includes the grace. Bounded; a block only ever asks about the last
+    /// few.
+    pauses: Mutex<VecDeque<(Instant, Option<Instant>)>>,
 }
+
+const PAUSE_HISTORY: usize = 16;
 
 impl Gate {
     pub fn paused(&self) -> bool {
@@ -51,13 +61,38 @@ impl Gate {
     }
 
     pub fn begin(&self) {
+        let mut pauses = self.pauses.lock().expect("gate lock");
+        pauses.push_back((Instant::now(), None));
+        while pauses.len() > PAUSE_HISTORY {
+            pauses.pop_front();
+        }
         self.running.store(true, Ordering::Release);
     }
 
     /// End a test; pings stay paused for `grace` so the queue drains.
     pub fn end(&self, grace: Duration) {
-        *self.until.lock().expect("gate lock") = Some(Instant::now() + grace);
+        let until = Instant::now() + grace;
+        *self.until.lock().expect("gate lock") = Some(until);
+        if let Some(open) = self
+            .pauses
+            .lock()
+            .expect("gate lock")
+            .iter_mut()
+            .rev()
+            .find(|(_, end)| end.is_none())
+        {
+            open.1 = Some(until);
+        }
         self.running.store(false, Ordering::Release);
+    }
+
+    /// Whether any pause (test plus grace) overlapped `[from, to)`.
+    pub fn overlapped(&self, from: Instant, to: Instant) -> bool {
+        self.pauses
+            .lock()
+            .expect("gate lock")
+            .iter()
+            .any(|(begin, end)| *begin < to && end.is_none_or(|e| e > from))
     }
 }
 

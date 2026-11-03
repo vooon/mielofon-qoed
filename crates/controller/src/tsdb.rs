@@ -182,6 +182,20 @@ impl RawSample {
         self.mark_n.is_some()
     }
 
+    /// Whether the sample is a probe report (always or throughput tier,
+    /// including a failed or busy one that carries only state and
+    /// utilisation), as opposed to a marking block or a joined block
+    /// result: only probes count towards a bucket's `n` and `util`.
+    pub fn is_probe(&self) -> bool {
+        self.rtt_ms.is_some()
+            || self.loss_pct.is_some()
+            || self.jitter_ms.is_some()
+            || self.tcp_mbps.is_some()
+            || self.udp_mbps.is_some()
+            || self.udp_loss_pct.is_some()
+            || (self.mark_n.is_none() && self.mark_loss_pct.is_none())
+    }
+
     pub fn from_dims(
         state: ProbeState,
         ts: u64,
@@ -282,13 +296,25 @@ pub struct Bucket {
 impl Bucket {
     fn add(&mut self, s: &RawSample) {
         self.bucket = s.ts - s.ts % BUCKET_SECS;
-        self.n += 1;
+        if s.is_probe() {
+            self.n += 1;
+            self.util.merge(s.util_mbps);
+        }
         self.add_dims(s, &RawSample::default());
-        self.util.merge(s.util_mbps);
     }
 
     /// Fold in the dimensions `s` has that `already` (the previously counted
-    /// version of the same sample) did not — a same-second merge.
+    /// version of the same sample) did not — a same-second merge. A block
+    /// sample carries no probe dims and no utilisation, so it is not
+    /// counted; a probe merged onto a block second is counted then.
+    fn merge_into(&mut self, s: &RawSample, already: &RawSample) {
+        if s.is_probe() && !already.is_probe() {
+            self.n += 1;
+            self.util.merge(s.util_mbps);
+        }
+        self.add_dims(s, already);
+    }
+
     fn add_dims(&mut self, s: &RawSample, already: &RawSample) {
         if let (Some(v), None) = (s.rtt_ms, already.rtt_ms) {
             self.rtt.merge(v);
@@ -364,11 +390,22 @@ pub struct TsQueryResp {
     pub buckets: Vec<BucketView>,
 }
 
+/// One link's raw samples, sorted by ts.
+#[derive(Default)]
+struct Ring {
+    samples: VecDeque<RawSample>,
+    /// Timestamp of the newest sample retention or the ring cap evicted:
+    /// nothing at or before it is accepted again, so a replay (a peer
+    /// re-sending history after a restart) cannot be counted into a bucket
+    /// a second time or be gossiped on.
+    floor: u64,
+}
+
 /// Thread-safe store handed to the API/gossip paths.
 pub struct Tsdb {
     cfg: TsConfig,
     seq: AtomicU64,
-    by_link: RwLock<HashMap<LinkKey, VecDeque<RawSample>>>,
+    by_link: RwLock<HashMap<LinkKey, Ring>>,
     buckets: RwLock<HashMap<LinkKey, VecDeque<Bucket>>>,
     /// (seq, link, sample), ascending seq — the gossip delta source.
     recent: Mutex<VecDeque<(u64, LinkKey, RawSample)>>,
@@ -417,10 +454,13 @@ impl Tsdb {
         {
             let mut map = self.by_link.write().expect("tsdb by_link write");
             let ring = map.entry(link.clone()).or_default();
+            if s.ts <= ring.floor {
+                return false; // older than what retention already dropped
+            }
             // Keep the ring sorted by ts: block samples arrive stamped in
             // the past, behind the always sample that carried them.
-            let pos = ring.partition_point(|x| x.ts < s.ts);
-            match ring.get_mut(pos) {
+            let pos = ring.samples.partition_point(|x| x.ts < s.ts);
+            match ring.samples.get_mut(pos) {
                 Some(at) if at.ts == s.ts => {
                     let merged = at.merged_with(&s);
                     if merged == *at {
@@ -431,9 +471,14 @@ impl Tsdb {
                     s = merged;
                 }
                 _ => {
-                    ring.insert(pos, s);
-                    if ring.len() > RAW_RING_CAP {
-                        ring.pop_front();
+                    if pos == 0 && ring.samples.len() >= RAW_RING_CAP {
+                        return false; // would be evicted at once
+                    }
+                    ring.samples.insert(pos, s);
+                    if ring.samples.len() > RAW_RING_CAP {
+                        if let Some(old) = ring.samples.pop_front() {
+                            ring.floor = ring.floor.max(old.ts);
+                        }
                     }
                 }
             }
@@ -449,7 +494,7 @@ impl Tsdb {
                 b.add(&s);
                 ring.insert(pos, b);
             } else if let Some(prev) = &merged_from {
-                ring[pos].add_dims(&s, prev);
+                ring[pos].merge_into(&s, prev);
             } else {
                 ring[pos].add(&s);
             }
@@ -526,7 +571,7 @@ impl Tsdb {
     pub fn query(&self, link: &LinkKey, since: u64, until: u64) -> TsQueryResp {
         let samples = {
             let map = self.by_link.read().expect("tsdb by_link read");
-            let ring = map.get(link);
+            let ring = map.get(link).map(|r| &r.samples);
             let mut out = Vec::new();
             if let Some(ring) = ring {
                 for s in ring.iter().filter(|s| s.ts >= since && s.ts < until) {
@@ -581,8 +626,9 @@ impl Tsdb {
         self.by_link
             .read()
             .expect("tsdb by_link read")
-            .keys()
-            .cloned()
+            .iter()
+            .filter(|(_, r)| !r.samples.is_empty())
+            .map(|(k, _)| k.clone())
             .collect()
     }
 
@@ -592,13 +638,16 @@ impl Tsdb {
     pub fn prune(&self, now: u64) {
         let raw_cut = now.saturating_sub(self.cfg.raw_retention_secs);
         {
+            // Emptied rings stay: their floor keeps a replay of the pruned
+            // history out.
             let mut map = self.by_link.write().expect("tsdb by_link write");
             for ring in map.values_mut() {
-                while ring.front().is_some_and(|s| s.ts < raw_cut) {
-                    ring.pop_front();
+                while ring.samples.front().is_some_and(|s| s.ts < raw_cut) {
+                    if let Some(old) = ring.samples.pop_front() {
+                        ring.floor = ring.floor.max(old.ts);
+                    }
                 }
             }
-            map.retain(|_, ring| !ring.is_empty());
         }
         let agg_cut = now.saturating_sub(self.cfg.agg_retention_secs);
         {
@@ -738,10 +787,19 @@ impl Tsdb {
                         return;
                     }
                 };
+                // Rows past retention are not hydrated: they would be
+                // pruned at the first flush, and in the meantime gossiped
+                // to peers that dropped them long ago.
+                let now = now_secs();
+                let raw_cut = now.saturating_sub(self.cfg.raw_retention_secs);
+                let agg_cut = now.saturating_sub(self.cfg.agg_retention_secs);
                 if let Ok(t) = read.open_table(RAW_TABLE) {
                     if let Ok(iter) = t.iter() {
                         for item in iter.flatten() {
-                            let (link, _ts) = item.0.value();
+                            let (link, ts) = item.0.value();
+                            if ts < raw_cut {
+                                continue;
+                            }
                             if let Ok(s) = serde_json::from_slice(&item.1.value()) {
                                 let key = parse_link_id(link);
                                 let _ = self.ingest(&key, s, false);
@@ -753,6 +811,9 @@ impl Tsdb {
                     if let Ok(iter) = t.iter() {
                         for item in iter.flatten() {
                             let (link, bucket) = item.0.value();
+                            if bucket < agg_cut {
+                                continue;
+                            }
                             if let Ok(b) = serde_json::from_slice(&item.1.value()) {
                                 let key = parse_link_id(link);
                                 let mut map = self.buckets.write().expect("tsdb buckets write");
@@ -807,7 +868,7 @@ impl Store for Tsdb {
     /// summary is the classifier's (`mark.rs`).
     fn window(&self, link: &LinkKey, spec: &WindowSpec, now: u64) -> Option<WindowView> {
         let map = self.by_link.read().expect("tsdb by_link read");
-        let ring = map.get(link)?;
+        let ring = &map.get(link)?.samples;
 
         // Newest sample overall anchors ts/state/util.
         let newest = ring.iter().rev().find(|s| {
@@ -1089,14 +1150,46 @@ mod tests {
         assert_eq!(b.mark_flags, Some(MARK_UNDER_TEST));
         assert_eq!(b.mark_loss_pct, Some(0.5));
         assert_eq!(b.mark_rate_mbps, Some(2.4));
-        // The bucket rolled the joined dims (not the raw counters).
+        // The bucket rolled the joined dims (not the raw counters), and
+        // counts only the probe towards n/util.
         let bucket = &r.buckets[0];
         assert_eq!(bucket.mark_loss.as_ref().unwrap().avg, 0.5);
         assert!(bucket.mark_rate.is_some());
+        assert_eq!(bucket.n, 1);
+        assert_eq!(bucket.util.n, 1);
         // Still the always sample's rtt.
         assert_eq!(r.samples[1].rtt_ms, Some(5.0));
         // A block without a length cannot be stamped.
         assert!(RawSample::from_block(&mielofon_proto::MarkBlock::default()).is_none());
+    }
+
+    /// A replay of history retention already dropped (a peer re-sending
+    /// after a restart) must not be counted into the buckets again.
+    #[test]
+    fn pruned_history_is_not_accepted_again() {
+        let tsdb = Tsdb::new(TsConfig {
+            raw_retention_secs: 100,
+            ..TsConfig::default()
+        });
+        let (a, _) = links();
+        let base = 1_700_000_040_u64;
+        tsdb.append(&a, sample(base, 5.0));
+        tsdb.append(&a, sample(base + 10, 5.0));
+        tsdb.prune(base + 200);
+        assert!(tsdb.links().is_empty(), "ring emptied");
+        assert_eq!(tsdb.query(&a, 0, u64::MAX).buckets[0].n, 2);
+        // The replay: rejected, bucket untouched, nothing new to gossip.
+        let (_, seq) = tsdb.take_delta(0, 100);
+        tsdb.merge_delta(&[
+            (a.clone(), sample(base, 5.0)),
+            (a.clone(), sample(base + 10, 5.0)),
+        ]);
+        assert!(tsdb.links().is_empty());
+        assert_eq!(tsdb.query(&a, 0, u64::MAX).buckets[0].n, 2);
+        assert!(tsdb.take_delta(seq, 100).0.is_empty());
+        // Newer samples are still taken.
+        tsdb.append(&a, sample(base + 300, 5.0));
+        assert_eq!(tsdb.links(), vec![a.clone()]);
     }
 
     #[test]

@@ -168,7 +168,11 @@ pub fn summarize(blocks: &[Block], cfg: &ClassifierCfg, now: u64) -> Summary {
         .iter()
         .filter(|b| age(b) <= cfg.mark_window_secs)
         .any(|b| b.under_test);
-    let window: &[&Block] = if fast.iter().any(|b| b.lost() > 0) {
+    // The fast window is used only when it can measure on its own: a
+    // lossy fast window below the sample floor would otherwise report the
+    // loss as unmeasured instead of demoting.
+    let fast_sent: u64 = fast.iter().map(|b| b.sent()).sum();
+    let window: &[&Block] = if fast.iter().any(|b| b.lost() > 0) && fast_sent >= cfg.mark_min_pkts {
         &fast
     } else {
         &recent
@@ -405,6 +409,20 @@ mod tests {
         }
         let s = summarize(&blocks, &cfg(), now);
         assert_eq!(s.blocks, 31);
+        assert_eq!(s.regime, Some(Regime::Bursty));
+    }
+
+    #[test]
+    fn a_lossy_fast_window_below_the_floor_falls_back_to_the_recovery_span() {
+        let now = 10_000;
+        // Light traffic: 50 packets a block, 1500 in the fast window, one
+        // lost in each of the last ten blocks.
+        let blocks: Vec<Block> = (640..1000)
+            .map(|n| block(n, 25, 25, u64::from(n >= 990), 0, 100))
+            .collect();
+        let s = summarize(&blocks, &cfg(), now);
+        assert_eq!(s.blocks, 360, "{s:?}");
+        assert_eq!(s.loss_pct, Some(10.0 / 18_000.0 * 100.0));
         assert_eq!(s.regime, Some(Regime::Bursty));
     }
 

@@ -30,7 +30,7 @@ use mielofon_proto::LinkKey;
 use mielofon_transport::Dialer;
 use nft::NftCli;
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::signal::unix::{signal, SignalKind};
 use tokio::sync::Notify;
 use tracing::{debug, error, info, warn};
@@ -145,14 +145,17 @@ impl Runtime {
             tokio::time::sleep(Duration::from_secs_f64((boundary - now).max(0.0))).await;
 
             // Block n ended, n+1 begins.
+            let ended = Instant::now();
+            let started = ended.checked_sub(block).unwrap_or(ended);
             let ifaces = self.agent.interfaces();
-            let mut under_test = self.agent.gate.paused();
             if let Err(e) = marker.flip(&ifaces, n + 1).await {
                 Counters::inc(&c.mark_errors);
                 report(&mut last_err, &mut errors, e);
             }
             tokio::time::sleep(block / 2).await;
-            under_test |= self.agent.gate.paused();
+            // Any throughput test (with its grace) that touched the block,
+            // including one that started and ended inside it.
+            let under_test = self.agent.gate.overlapped(started, ended);
             match marker.read(&ifaces, n, under_test).await {
                 Ok(out) => {
                     for _ in 0..out.blocks {
