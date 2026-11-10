@@ -23,7 +23,9 @@ fn transport() -> Arc<quinn::TransportConfig> {
     Arc::new(t)
 }
 
-/// A bound QUIC endpoint accepting sessions.
+/// A bound QUIC endpoint accepting sessions. Clones share the endpoint, so
+/// one can serve while another shuts it down.
+#[derive(Clone)]
 pub struct Listener {
     ep: quinn::Endpoint,
 }
@@ -60,6 +62,14 @@ impl Listener {
 
     pub fn close(&self) {
         self.ep.close(0u32.into(), b"shutdown");
+    }
+
+    /// Close every session and give the close frames up to `grace` to
+    /// leave. A peer that is told the endpoint went away reconnects at
+    /// once; one that is not only notices when its idle timeout expires.
+    pub async fn shutdown(&self, grace: Duration) {
+        self.close();
+        let _ = tokio::time::timeout(grace, self.ep.wait_idle()).await;
     }
 }
 
@@ -310,6 +320,17 @@ mod tests {
         assert!(server.accept().await.is_err());
         let reason = server.closed().await;
         assert!(reason.contains("bye"), "{reason}");
+    }
+
+    #[tokio::test]
+    async fn listener_shutdown_tells_the_peer_at_once() {
+        let (listener, client, _server) = pair().await;
+        listener.clone().shutdown(Duration::from_secs(1)).await;
+        let reason = tokio::time::timeout(Duration::from_secs(2), client.closed())
+            .await
+            .expect("the peer learns of the shutdown long before its idle timeout");
+        assert!(reason.contains("shutdown"), "{reason}");
+        assert!(listener.accept().await.is_none(), "endpoint closed");
     }
 
     #[tokio::test]

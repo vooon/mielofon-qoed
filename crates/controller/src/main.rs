@@ -60,6 +60,9 @@ async fn main() -> anyhow::Result<()> {
     }
 }
 
+/// How long a stopping daemon waits for its session close frames to leave.
+const SHUTDOWN_GRACE: std::time::Duration = std::time::Duration::from_secs(1);
+
 async fn run_daemon(path: &str) -> anyhow::Result<()> {
     let cfg = Config::load(path)?;
 
@@ -135,11 +138,11 @@ async fn run_daemon(path: &str) -> anyhow::Result<()> {
     let admin_handle = tokio::spawn(async move { admin_srv.await.context("admin listener") });
     let cluster_handle = tokio::spawn(mielofon_controller::gossip::serve(
         state.clone(),
-        cluster_listener,
+        cluster_listener.clone(),
     ));
     let client_handle = tokio::spawn(mielofon_controller::session::serve(
         state.clone(),
-        client_listener,
+        client_listener.clone(),
     ));
 
     state.set_ready(true);
@@ -164,6 +167,13 @@ async fn run_daemon(path: &str) -> anyhow::Result<()> {
     };
 
     state.set_ready(false);
+    // Tell agents and members the sessions are over. Left to find out by
+    // themselves they keep a dead session until its idle timeout, and a
+    // restarted controller knows no agent for that long.
+    tokio::join!(
+        client_listener.shutdown(SHUTDOWN_GRACE),
+        cluster_listener.shutdown(SHUTDOWN_GRACE),
+    );
     // procd stops us with SIGTERM: persist what the 30 s flush loop has not
     // written yet and drain the OTEL exporters before exiting.
     state.tsdb.flush();
