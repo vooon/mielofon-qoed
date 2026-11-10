@@ -220,6 +220,15 @@ the block task now follow.
   both the IPv4 and the IPv6 rule. The ingress chain counts colour B
   before the colour-A rules, which clean the bit in place and let the
   packet continue; the other order counts every A packet as B too.
+- **Test the IPv6 colour bit raw.** IPv6 DSCP is not byte aligned, and
+  nftables 1.1.6 compiles `ip6 dscp & 0x01 == 0x01` to a comparison that
+  can never be true (and `== 0x00` to one that always is): every IPv6
+  packet was received as colour B, so each A block lost nearly all of its
+  IPv6 packets on paper while ping and iperf3 were clean. The ingress
+  rules match the bit itself, `meta nfproto ipv6 @nh,9,1`. The IPv4 form
+  and the `dscp set` statements of both families compile correctly. Read
+  the bytecode (`nft -c --debug=netlink`) for both families after any
+  change to a match; the listing does not show the difference.
 - **A baseline is for one block.** The agent's delta for block `n` is
   valid only against the read of block `n − 2`. After a failed or missed
   read the next read of that colour only re-seeds the baseline; a delta
@@ -429,8 +438,10 @@ over the same minute must agree before the scheduler trusts the passive
 proof on every link. Compare per length band: a disagreement confined to
 the large band points at GRO/GSO (see *Counting caveats*), not at the
 link. The 0.18.0 include counted every sent packet twice and every
-colour-A packet twice on ingress; 0.18.1 is the first release whose
-counts can be trusted.
+colour-A packet twice on ingress; 0.18.1 fixed both but still received
+every IPv6 packet as colour B (see *Counting caveats*), which reads as
+~50 % loss on any link whose traffic is mostly IPv6. The include needs a
+firewall reload to take effect after a package upgrade.
 
 ## Later phases (summary)
 

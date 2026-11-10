@@ -63,12 +63,20 @@ chain mielofon_b {
 # only ticks when colour and length matched. Colour B (bit clear) is
 # counted before the colour-A rules, which clean the bit in place and let
 # the packet continue: the other order would count every A packet as B too.
+#
+# The IPv6 colour test is a raw match on the bit itself (`@nh,9,1`: 4 bits
+# of version, then the traffic class, whose sixth bit is DSCP bit 0), not
+# `ip6 dscp & 0x01 == ...`. IPv6 DSCP is not byte aligned, and nftables
+# 1.1.6 compiles a masked comparison of it to a shifted 16-bit value tested
+# against an 8-bit constant: `== 0x01` never matches and `== 0x00` always
+# does, so every IPv6 packet was counted as colour B and none as A. Check
+# any change here with `nft -c --debug=netlink`.
 chain mielofon_count {
 	type filter hook prerouting priority mangle - 10; policy accept;
-	ip6 dscp & 0x01 == 0x00 meta length <= 1000 iifname @mf_rx_b_s
-	ip6 dscp & 0x01 == 0x00 meta length > 1000 iifname @mf_rx_b_l
-	ip6 dscp & 0x01 == 0x01 meta length <= 1000 iifname @mf_rx_a_s ip6 dscp set ip6 dscp & 0x3e
-	ip6 dscp & 0x01 == 0x01 meta length > 1000 iifname @mf_rx_a_l ip6 dscp set ip6 dscp & 0x3e
+	meta nfproto ipv6 @nh,9,1 0 meta length <= 1000 iifname @mf_rx_b_s
+	meta nfproto ipv6 @nh,9,1 0 meta length > 1000 iifname @mf_rx_b_l
+	meta nfproto ipv6 @nh,9,1 1 meta length <= 1000 iifname @mf_rx_a_s ip6 dscp set ip6 dscp & 0x3e
+	meta nfproto ipv6 @nh,9,1 1 meta length > 1000 iifname @mf_rx_a_l ip6 dscp set ip6 dscp & 0x3e
 	ip dscp & 0x01 == 0x00 meta length <= 1000 iifname @mf_rx_b_s
 	ip dscp & 0x01 == 0x00 meta length > 1000 iifname @mf_rx_b_l
 	ip dscp & 0x01 == 0x01 meta length <= 1000 iifname @mf_rx_a_s ip dscp set ip dscp & 0x3e
