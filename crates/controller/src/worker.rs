@@ -235,6 +235,31 @@ impl WorkerRegistry {
         (generation, old)
     }
 
+    /// Forget every agent other than `keep` that registered with router id
+    /// `rid`: one router has one id, so a second name on it is the same
+    /// node before a rename, whose old session has not timed out yet. Left
+    /// in place it would keep claiming the directory entry of `rid`.
+    /// Returns the evicted names with their sessions for the caller to close.
+    pub fn evict_router_id(
+        &self,
+        rid: &str,
+        keep: &str,
+    ) -> Vec<(String, Option<Arc<dyn Session>>)> {
+        let mut map = self.inner.lock().expect("workers lock poisoned");
+        let stale: Vec<String> = map
+            .iter()
+            .filter(|(name, w)| name.as_str() != keep && w.router_id.as_deref() == Some(rid))
+            .map(|(name, _)| name.clone())
+            .collect();
+        stale
+            .into_iter()
+            .filter_map(|name| {
+                let w = map.remove(&name)?;
+                Some((name, w.session.map(|(_, s)| s)))
+            })
+            .collect()
+    }
+
     /// The session of `agent` went away: forget the agent, unless a newer
     /// session has replaced it meanwhile. Returns true when evicted.
     pub fn detach(&self, agent: &str, generation: u64) -> bool {
@@ -455,6 +480,39 @@ mod tests {
         assert_eq!(r.canonical_peer("node.0.example"), "node-0.example");
         assert_eq!(r.canonical_peer("hub-a"), "hub-a");
         assert_eq!(r.canonical_peer("nobody.example"), "nobody.example");
+    }
+
+    #[test]
+    fn a_router_id_registered_under_a_new_name_evicts_the_old_one() {
+        let r = WorkerRegistry::new();
+        r.register(
+            "hub-a",
+            vec![LinkKey::new("hub-a", "hub-b", "awg_hub_b")],
+            Some("192.0.2.1".into()),
+            HashMap::new(),
+            None,
+        );
+        r.register(
+            "hub-b",
+            vec![],
+            Some("192.0.2.2".into()),
+            HashMap::new(),
+            None,
+        );
+        r.register("spoke-1", vec![link()], None, HashMap::new(), None);
+        r.register(
+            "hub-e",
+            vec![LinkKey::new("hub-e", "hub-b", "awg_hub_b")],
+            Some("192.0.2.1".into()),
+            HashMap::new(),
+            None,
+        );
+        let evicted = r.evict_router_id("192.0.2.1", "hub-e");
+        assert_eq!(evicted.len(), 1);
+        assert_eq!(evicted[0].0, "hub-a");
+        assert!(!r.has_agent("hub-a"));
+        assert!(r.has_agent("hub-e") && r.has_agent("hub-b") && r.has_agent("spoke-1"));
+        assert!(r.evict_router_id("192.0.2.1", "hub-e").is_empty());
     }
 
     #[test]
