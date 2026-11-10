@@ -163,6 +163,20 @@ fn register(
     // Publish this node, then name its peers and itself on everyone else's
     // links through the directory; every changed link set is republished.
     if let Some(rid) = &router_id {
+        // A node that was renamed registers its router id under the new
+        // name while the session of the old name is still timing out: drop
+        // that one, or both would claim the directory entry in turn.
+        for (stale, old) in state.workers.evict_router_id(rid, &req.agent) {
+            warn!(
+                agent = req.agent,
+                stale,
+                router_id = rid,
+                "router id registered under a new name; the old one is dropped"
+            );
+            if let Some(old) = old {
+                old.close("router id registered under another name");
+            }
+        }
         state.kv.set_node(
             rid,
             &req.agent,
@@ -207,11 +221,23 @@ fn register(
     )
 }
 
-/// Name every agent's peers through the directory, then republish the
-/// entry of every agent whose link set no longer matches it (renamed by the
-/// directory or by the name folding in `register`), so the other members
-/// see the same link set.
+/// Bring the node directory and the agents' link sets in line: first the
+/// directory is made to name every registered agent (a merged entry may
+/// still carry the name the node had before a rename), then every agent's
+/// peers are named through it, and last the entry of every agent whose link
+/// set no longer matches (renamed by the directory or by the name folding
+/// in `register`) is republished, so the other members see the same link
+/// set. The order matters: peers resolved before the names are repaired
+/// would keep the stale name until some agent registers again.
 pub fn sync_directory(state: &AppState) {
+    for (agent, rid, links) in state.workers.entries() {
+        let Some(rid) = rid else { continue };
+        if state.kv.node(&rid).is_none_or(|e| e.name != agent) {
+            state
+                .kv
+                .set_node(&rid, &agent, links, crate::clock::now_secs());
+        }
+    }
     let renamed = state.workers.resolve_peers(|rid| state.kv.node_name(rid));
     for (agent, _, links) in &renamed {
         debug!(
@@ -222,11 +248,7 @@ pub fn sync_directory(state: &AppState) {
     }
     for (agent, rid, links) in state.workers.entries() {
         let Some(rid) = rid else { continue };
-        if state
-            .kv
-            .node(&rid)
-            .is_none_or(|e| e.name != agent || e.links != links)
-        {
+        if state.kv.node(&rid).is_none_or(|e| e.links != links) {
             state
                 .kv
                 .set_node(&rid, &agent, links, crate::clock::now_secs());
@@ -635,6 +657,97 @@ mod tests {
             "node-0.example",
             "hub's entry republished with the renamed link"
         );
+    }
+
+    /// A node boots under the name of the node it replaces, registers, and
+    /// is renamed seconds later: the old name's session lingers until its
+    /// idle timeout. Its links and the directory must settle on the new name
+    /// at once, whichever of the two the registry happens to list last.
+    #[tokio::test]
+    async fn a_renamed_node_takes_its_router_id_and_links_with_it() {
+        fn req(agent: &str, rid: &str, peer: &str, peer_rid: &str) -> mielofon_proto::RegisterReq {
+            mielofon_proto::RegisterReq {
+                agent: agent.into(),
+                router_id: Some(rid.into()),
+                links: vec![LinkKey::new(agent, peer, "awg_x")],
+                peer_rids: [("awg_x".to_string(), peer_rid.to_string())].into(),
+                loopback: None,
+            }
+        }
+        let state = AppState::new(Config::default());
+        let sessions: Vec<Arc<dyn Session>> = (0..4)
+            .map(|_| -> Arc<dyn Session> { FakeAgent::silent() })
+            .collect();
+
+        // The new box, still named after the hub it replaces.
+        let (resp, _) = register(
+            &state,
+            &sessions[0],
+            None,
+            req("hub-a", "192.0.2.5", "hub-b", "192.0.2.2"),
+        );
+        assert!(resp.ok);
+        let (resp, _) = register(
+            &state,
+            &sessions[1],
+            None,
+            req("hub-b", "192.0.2.2", "hub-e", "192.0.2.5"),
+        );
+        assert!(resp.ok);
+        assert_eq!(state.workers.links_of("hub-b")[0].to, "hub-a", "as named");
+
+        // Renamed: same router id, new name, new session.
+        let (resp, _) = register(
+            &state,
+            &sessions[2],
+            None,
+            req("hub-e", "192.0.2.5", "hub-b", "192.0.2.2"),
+        );
+        assert!(resp.ok);
+        assert!(!state.workers.has_agent("hub-a"), "old name evicted");
+        assert_eq!(state.kv.node_name("192.0.2.5").as_deref(), Some("hub-e"));
+        assert_eq!(state.workers.links_of("hub-b")[0].to, "hub-e");
+
+        // Any later registration keeps it that way.
+        for _ in 0..3 {
+            let (resp, _) = register(
+                &state,
+                &sessions[3],
+                None,
+                req("hub-c", "192.0.2.3", "hub-e", "192.0.2.5"),
+            );
+            assert!(resp.ok);
+            assert_eq!(state.kv.node_name("192.0.2.5").as_deref(), Some("hub-e"));
+            assert_eq!(state.workers.links_of("hub-b")[0].to, "hub-e");
+            assert_eq!(state.workers.links_of("hub-c")[0].to, "hub-e");
+            assert_eq!(state.kv.node("192.0.2.2").unwrap().links[0].to, "hub-e");
+        }
+    }
+
+    /// A directory entry that still carries a node's previous name (merged
+    /// from another member) is repaired before peers are resolved through
+    /// it, not one registration later.
+    #[tokio::test]
+    async fn a_stale_directory_name_is_repaired_before_peers_are_resolved() {
+        let state = AppState::new(Config::default());
+        state.workers.register(
+            "hub-e",
+            vec![],
+            Some("192.0.2.5".into()),
+            HashMap::new(),
+            None,
+        );
+        state.workers.register(
+            "hub-b",
+            vec![LinkKey::new("hub-b", "hub-e", "awg_x")],
+            Some("192.0.2.2".into()),
+            [("awg_x".to_string(), "192.0.2.5".to_string())].into(),
+            None,
+        );
+        state.kv.set_node("192.0.2.5", "hub-a", vec![], 1);
+        sync_directory(&state);
+        assert_eq!(state.kv.node_name("192.0.2.5").as_deref(), Some("hub-e"));
+        assert_eq!(state.workers.links_of("hub-b")[0].to, "hub-e");
     }
 
     #[tokio::test]
